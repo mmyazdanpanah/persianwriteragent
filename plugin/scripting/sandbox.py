@@ -143,6 +143,7 @@ VENV_AUTHORIZED_IMPORTS: tuple[str, ...] = (
     "plugin.scripting.text_analytics",  # trusted text analytics (spaCy) for Run Python Script + direct imports in user scripts
     "spacy",
     "spacy.*",
+    "plugin.persian.*",
     "hazm",
     "hazm.*",
     "textdescriptives",

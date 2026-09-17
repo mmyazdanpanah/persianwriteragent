@@ -446,6 +446,45 @@ def execute_and_insert_result(
     result_data = response.get("result")
     stdout = response.get("stdout")
 
+    # Persian-specific branch: exact-range tracked replacements within selection.
+    # Recognizes {"changes": [["موزه شناسی", "موزه‌شناسی"], ...]} for Writer documents.
+    # This branch runs before the generic format_result_for_writer insertion
+    # and prevents it from running for this structured result type.
+    if doc and is_writer(doc) and isinstance(result_data, dict) and "changes" in result_data:
+        changes = result_data.get("changes")
+        if isinstance(changes, list) and changes:
+            try:
+                from plugin.persian.tracked_replace import apply_tracked_replacements
+
+                tr_result = apply_tracked_replacements(doc, changes)
+                applied = tr_result.get("applied", 0)
+                skipped = tr_result.get("skipped", 0)
+                if applied > 0:
+                    formatted_time = format_elapsed_time(time.perf_counter() - t0)
+                    msg_parts = []
+                    if applied == 1:
+                        msg_parts.append(_("Applied 1 tracked replacement."))
+                    else:
+                        msg_parts.append(f"{_('Applied')} {applied} {_('tracked replacements.')}")
+                    if skipped:
+                        msg_parts.append(f"{skipped} {_('source text(s) not found in selection.')}")
+                    msg_parts.append(_("(took {time})").format(time=formatted_time))
+                    return {
+                        "ok": True,
+                        "status_ok_text": " ".join(msg_parts),
+                        "stdout": stdout,
+                        "result": tr_result,
+                    }
+            except Exception:
+                log.exception("Persian tracked replacements failed")
+                # Return clear error instead of falling through to generic handling
+                return rps_error_outcome(
+                    _("Persian tracked replacements failed: {error}").format(
+                        error=_("an unexpected error occurred during tracked replacement")
+                    ),
+                    t0=t0,
+                )
+
     if result_data is None and not stdout:
         return {
             "ok": True,
