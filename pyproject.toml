@@ -179,6 +179,7 @@ exclude = ["plugin/contrib", "plugin/lib", "plugin/tests", "plugin/xdl_strings.p
 
 [tool.ty.rules]
 redundant-cast = "ignore"
+redundant-condition = "ignore"
 # Optional-dependency import guards (e.g. `import language_tool_python  # type: ignore`)
 # read as "unused" once that optional package happens to be installed in the dev venv, but
 # the ignore is required where the package is absent (LibreOffice's bundled Python). Don't
