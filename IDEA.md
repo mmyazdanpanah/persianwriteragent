@@ -9,3 +9,11 @@ The project focuses on Persian academic writing rather than general-purpose chat
 The guiding principle is **human-controlled, precise, and explainable assistance**: AI should propose useful changes while the writer remains in control of what is accepted into the text.
 
 PersianWriterAgent is an extension of the existing WriterAgent ecosystem, not a replacement for it.
+
+\#\# Principle
+
+
+When a normalization is ambiguous or context-dependent, do not change it automatically.
+
+
+PersianWriterAgent prefers a smaller number of deterministic, explainable corrections over aggressive normalization. Every automatic correction must be safe, reproducible, and reviewable by the writer.

@@ -2,10 +2,17 @@
 # Copyright (c) 2026 KeithCu
 #
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""Persian Hazm normalization with exact-range change extraction — v0.1.
+"""Persian Hazm normalization with exact-range change extraction — v0.2.
 
-Experimental module that extracts ONLY ZWNJ (half-space) word joins produced
-by Hazm Normalizer. No other normalization rules.
+Experimental module that extracts mechanically safe Persian normalizations:
+1. ZWNJ word joins (v0.1) - space -> ZWNJ between word parts
+2. Arabic character normalization - ي -> ی, ك -> ک
+3. Whitespace normalization - multiple spaces/tabs -> single space (preserve newlines)
+4. Tatweel/Kashida removal - مـــوزه -> موزه
+5. Ellipsis normalization - ... -> …
+
+All transformations are applied with protection for URLs, emails, version numbers,
+and code-like patterns to avoid damaging mixed content.
 
 This is a minimal, reversible experiment. No external dependencies beyond
 already-authorized modules (hazm, stdlib).
@@ -23,6 +30,139 @@ except ImportError:
 
 # Unicode zero-width non-joiner (ZWNJ) used by Hazm for half-space
 ZWNJ = "\u200c"
+
+# Patterns for protecting content that must not be normalized
+# URLs: http://..., https://..., ftp://...
+URL_PATTERN = re.compile(r"\b(?:https?|ftp)://[^\s/$.?#].[^\s]*", re.IGNORECASE)
+
+# Emails: user@domain.tld
+EMAIL_PATTERN = re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b")
+
+# Version numbers: 1.0, 1.0.0, v1.2.3, version 2.0
+VERSION_PATTERN = re.compile(r"\b(?:v|version\s+)?\d+(?:\.\d+)+(?:-[a-zA-Z0-9]+)?\b", re.IGNORECASE)
+
+# Numbers with separators: 1,000, 1.000, 1 000
+NUMBER_PATTERN = re.compile(r"\b\d{1,3}(?:[,. ]\d{3})+(?:\.\d+)?\b")
+
+# Code-like patterns: function(), variable_name, ClassName, /path/to/file
+CODE_PATTERN = re.compile(r"\b[a-zA-Z_][a-zA-Z0-9_]*\(\)|\b[a-zA-Z_][a-zA-Z0-9_]*\.[a-zA-Z_][a-zA-Z0-9_]*|/[^\s]+")
+
+# File paths and URLs with dots: example.com, /path/to/file
+DOT_PATH_PATTERN = re.compile(r"(?:^|[\s\(\[<])(?:[a-zA-Z0-9-]+\.)+[a-zA-Z]{2,}(?:/[^\s]*)?(?=[\s\)\]>.,;:!?]|$)")
+
+# Combined protection pattern - all things that should not be normalized
+PROTECT_PATTERNS = [
+    URL_PATTERN,
+    EMAIL_PATTERN,
+    VERSION_PATTERN,
+    NUMBER_PATTERN,
+    CODE_PATTERN,
+    DOT_PATH_PATTERN,
+]
+
+
+class ProtectedText:
+    """Manages protection of sensitive text regions during normalization."""
+
+    def __init__(self, text: str):
+        self.original = text
+        self.protected_regions: list[tuple[int, int, str]] = []  # (start, end, placeholder)
+        self.placeholder_map: dict[str, str] = {}  # placeholder -> original text
+        self._placeholder_counter = 0
+
+    def protect(self) -> str:
+        """Replace protected regions with placeholders and return modified text."""
+        if not self.protected_regions:
+            self._find_protected_regions()
+
+        if not self.protected_regions:
+            return self.original
+
+        # Build result by replacing protected regions with placeholders
+        result_parts = []
+        last_end = 0
+
+        for start, end, placeholder in self.protected_regions:
+            result_parts.append(self.original[last_end:start])
+            result_parts.append(placeholder)
+            last_end = end
+
+        result_parts.append(self.original[last_end:])
+        return "".join(result_parts)
+
+    def restore(self, text: str) -> str:
+        """Restore protected regions from placeholders."""
+        result = text
+        for placeholder, original in self.placeholder_map.items():
+            result = result.replace(placeholder, original)
+        return result
+
+    def _find_protected_regions(self) -> None:
+        """Find all protected regions in the original text."""
+        matches = []
+
+        for pattern in PROTECT_PATTERNS:
+            for match in pattern.finditer(self.original):
+                start, end = match.span()
+                matched_text = match.group(0)
+                # Only protect if it looks like it should be protected
+                if self._should_protect(matched_text):
+                    matches.append((start, end, matched_text))
+
+        # Sort by start position, then by length (longer first for overlapping)
+        matches.sort(key=lambda x: (x[0], -(x[1] - x[0])))
+
+        # Remove overlapping matches (keep longest)
+        filtered = []
+        for start, end, text in matches:
+            overlaps = False
+            for f_start, f_end, _ in filtered:
+                if start < f_end and end > f_start:
+                    overlaps = True
+                    break
+            if not overlaps:
+                filtered.append((start, end, text))
+
+        # Create placeholders
+        for start, end, matched_text in filtered:
+            # Use base36 (letters only) to avoid Hazm digit normalization
+            import string
+            chars = string.ascii_lowercase
+            n = self._placeholder_counter
+            # Convert to base26 using only letters
+            placeholder_chars = []
+            if n == 0:
+                placeholder_chars = ['a', 'a', 'a', 'a']
+            else:
+                temp = n
+                while temp > 0:
+                    placeholder_chars.insert(0, chars[temp % 26])
+                    temp //= 26
+                while len(placeholder_chars) < 4:
+                    placeholder_chars.insert(0, 'a')
+            placeholder = "\u0000PROT_" + "".join(placeholder_chars) + "\u0000"
+            self._placeholder_counter += 1
+            self.protected_regions.append((start, end, placeholder))
+            self.placeholder_map[placeholder] = matched_text
+
+    def _should_protect(self, text: str) -> bool:
+        """Determine if a matched text should be protected."""
+        # Always protect URLs and emails
+        if URL_PATTERN.fullmatch(text) or EMAIL_PATTERN.fullmatch(text):
+            return True
+        # Protect version numbers
+        if VERSION_PATTERN.fullmatch(text):
+            return True
+        # Protect numbers with separators
+        if NUMBER_PATTERN.fullmatch(text):
+            return True
+        # Protect code-like patterns
+        if CODE_PATTERN.search(text):
+            return True
+        # Protect dot-paths (domains, file paths)
+        if DOT_PATH_PATTERN.search(text):
+            return True
+        return False
 
 
 def normalize_with_hazm(text: str) -> str:
@@ -44,6 +184,44 @@ def normalize_with_hazm(text: str) -> str:
         return text
 
 
+def apply_safe_normalizations(text: str) -> str:
+    """Apply mechanically safe normalizations directly (without Hazm's aggressive normalizer).
+
+    Safe transformations:
+    1. Arabic character normalization: ي -> ی, ك -> ک
+    2. Whitespace: multiple spaces/tabs -> single space (preserve newlines)
+    3. Tatweel/Kashida removal
+    4. Ellipsis: ... -> …
+    5. ZWNJ joins (handled separately via Hazm)
+
+    Args:
+        text: Input text (with protected regions already replaced)
+
+    Returns:
+        Normalized text
+    """
+    # 1. Arabic character normalization (ي -> ی, ك -> ک)
+    text = text.replace("ي", "ی").replace("ك", "ک")
+
+    # 2. Whitespace normalization: multiple spaces/tabs -> single space, preserve newlines
+    lines = text.split("\n")
+    normalized_lines = []
+    for line in lines:
+        # Replace tabs with spaces, then collapse multiple spaces
+        line = line.replace("\t", " ")
+        line = re.sub(r" {2,}", " ", line)
+        normalized_lines.append(line)
+    text = "\n".join(normalized_lines)
+
+    # 3. Tatweel/Kashida removal (U+0640)
+    text = text.replace("\u0640", "")
+
+    # 4. Ellipsis normalization: ... -> … (U+2026)
+    text = re.sub(r"\.{3,}", "…", text)
+
+    return text
+
+
 def find_joined_word_changes(original: str, normalized: str) -> list[tuple[str, str]]:
     """Find Hazm changes where words are joined with ZWNJ.
 
@@ -51,10 +229,6 @@ def find_joined_word_changes(original: str, normalized: str) -> list[tuple[str, 
     - "شکل گیری" -> "شکل\u200cگیری"
     - "سازمان دهی" -> "سازمان\u200cدهی"
     - etc.
-
-    This function finds such patterns by looking for:
-    1. In normalized: words containing ZWNJ
-    2. In original: the corresponding space-separated parts
 
     Args:
         original: Original text
@@ -84,11 +258,143 @@ def find_joined_word_changes(original: str, normalized: str) -> list[tuple[str, 
     return changes
 
 
-def extract_hazm_changes(text: str) -> dict[str, list[list[str]]]:
-    """Main entry point: extract Hazm ZWNJ join changes from text.
+def find_arabic_char_changes(original: str, normalized: str) -> list[tuple[str, str]]:
+    """Find Arabic character normalization changes (ي -> ی, ك -> ک).
 
-    v0.1: ONLY extracts word joins with ZWNJ (half-space).
-    No Arabic char normalization, no punctuation space changes.
+    Returns individual character changes, not whole words, to avoid
+    including surrounding punctuation in the replacement.
+
+    Args:
+        original: Original text
+        normalized: Normalized text (after safe normalizations)
+
+    Returns:
+        List of (old_text, new_text) pairs
+    """
+    changes = []
+
+    # Find positions where Arabic chars were normalized
+    i = 0
+    while i < len(original) and i < len(normalized):
+        if original[i] != normalized[i]:
+            o, n = original[i], normalized[i]
+            if (o == "ي" and n == "ی") or (o == "ك" and n == "ک"):
+                # Record the individual character change only
+                changes.append((o, n))
+        i += 1
+
+    # Deduplicate consecutive identical changes at the same position
+    # (can happen if same change detected multiple times)
+    deduped = []
+    for old, new in changes:
+        if not deduped or deduped[-1] != (old, new):
+            deduped.append((old, new))
+
+    return deduped
+
+
+def find_whitespace_changes(original: str, normalized: str) -> list[tuple[str, str]]:
+    """Find whitespace normalization changes (multiple spaces -> single space).
+
+    Args:
+        original: Original text
+        normalized: Normalized text
+
+    Returns:
+        List of (old_text, new_text) pairs
+    """
+    changes = []
+
+    # Find runs of multiple spaces or tabs
+    ws_pattern = re.compile(r"[ \t]{2,}")
+
+    matches = list(ws_pattern.finditer(original))
+    if not matches:
+        return changes
+
+    # Merge adjacent/overlapping matches
+    merged = []
+    current_start, current_end = matches[0].span()
+
+    for match in matches[1:]:
+        start, end = match.span()
+        if start <= current_end + 1:  # Adjacent or overlapping
+            current_end = max(current_end, end)
+        else:
+            merged.append((current_start, current_end))
+            current_start, current_end = start, end
+
+    merged.append((current_start, current_end))
+
+    for start, end in merged:
+        old_text = original[start:end]
+        new_text = " "
+        if old_text != new_text:
+            changes.append((old_text, new_text))
+
+    return changes
+
+
+def find_tatweel_changes(original: str, normalized: str) -> list[tuple[str, str]]:
+    """Find tatweel/kashida removal changes.
+
+    Args:
+        original: Original text
+        normalized: Normalized text
+
+    Returns:
+        List of (old_text, new_text) pairs
+    """
+    changes = []
+
+    # Find tatweel characters (U+0640)
+    tatweel_pattern = re.compile(r"[^\s]*\u0640[^\s]*")
+
+    for match in tatweel_pattern.finditer(original):
+        old_text = match.group(0)
+        # Remove tatweel from the matched word
+        new_text = old_text.replace("\u0640", "")
+        if old_text != new_text:
+            changes.append((old_text, new_text))
+
+    return changes
+
+
+def find_ellipsis_changes(original: str, normalized: str) -> list[tuple[str, str]]:
+    """Find ellipsis normalization changes (... -> …).
+
+    Args:
+        original: Original text
+        normalized: Normalized text
+
+    Returns:
+        List of (old_text, new_text) pairs
+    """
+    changes = []
+
+    # Find 3+ dots
+    ellipsis_pattern = re.compile(r"\.{3,}")
+
+    for match in ellipsis_pattern.finditer(original):
+        old_text = match.group(0)
+        new_text = "…"  # U+2026
+        if old_text != new_text:
+            changes.append((old_text, new_text))
+
+    return changes
+
+
+def extract_hazm_changes(text: str) -> dict[str, list[list[str]]]:
+    """Main entry point: extract safe Persian normalization changes from text.
+
+    v0.2: Implements mechanically safe normalizations:
+    1. ZWNJ word joins (v0.1)
+    2. Arabic character normalization (ي -> ی, ك -> ک)
+    3. Whitespace normalization (multiple spaces/tabs -> single space)
+    4. Tatweel/Kashida removal
+    4. Ellipsis normalization (... -> …)
+
+    All with protection for URLs, emails, version numbers, code.
 
     Args:
         text: Input Persian text (typically the Writer selection)
@@ -99,18 +405,44 @@ def extract_hazm_changes(text: str) -> dict[str, list[list[str]]]:
     if not text or not text.strip():
         return {"changes": []}
 
-    normalized = normalize_with_hazm(text)
+    # Step 1: Protect sensitive regions
+    protector = ProtectedText(text)
+    protected_text = protector.protect()
 
-    if normalized == text:
+    # Step 2: Apply Hazm for ZWNJ joins only
+    hazm_normalized = normalize_with_hazm(protected_text)
+
+    # Step 3: Apply safe normalizations on the protected text
+    safe_normalized = apply_safe_normalizations(hazm_normalized)
+
+    # Step 4: Restore protected regions
+    final_normalized = protector.restore(safe_normalized)
+
+    if final_normalized == text:
         return {"changes": []}
 
-    # v0.1: ONLY ZWNJ joins
-    changes = find_joined_word_changes(text, normalized)
+    # Step 5: Extract changes by comparing original with normalized
+    all_changes = []
+
+    # 1. ZWNJ joins (use Hazm's result for this)
+    all_changes.extend(find_joined_word_changes(text, final_normalized))
+
+    # 2. Arabic character changes
+    all_changes.extend(find_arabic_char_changes(text, final_normalized))
+
+    # 3. Whitespace changes
+    all_changes.extend(find_whitespace_changes(text, final_normalized))
+
+    # 4. Tatweel changes
+    all_changes.extend(find_tatweel_changes(text, final_normalized))
+
+    # 5. Ellipsis changes
+    all_changes.extend(find_ellipsis_changes(text, final_normalized))
 
     # Deduplicate while preserving order
     seen = set()
     unique_changes = []
-    for old, new in changes:
+    for old, new in all_changes:
         key = (old, new)
         if key not in seen:
             seen.add(key)
