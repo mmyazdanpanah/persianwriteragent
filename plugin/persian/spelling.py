@@ -35,6 +35,19 @@ from plugin.persian.normalize import ProtectedText
 # Unicode zero-width non-joiner (ZWNJ) used by Hazm for half-space
 ZWNJ = "\u200c"
 
+# Persian letters (excluding punctuation marks in U+0600–U+06FF block)
+# Valid Persian/Arabic letters for candidate extraction
+PERSIAN_LETTERS = (
+    "\u0621-\u063A"  # Arabic letters: ء آ أ ؤ إ ئ ا ب ة ت ث ج ح خ د ذ ر ز س ش ص ض ط ظ ع غ ف ق ك ل م ن ه و ى ي
+    "\u0641-\u064A"  # Additional letters: ف ق ك ل م ن ه و ى ي
+    "\u067E\u0686\u0698\u06A9\u06AF\u06CC"  # Persian-specific: پ چ ژ ک گ ی
+)
+
+# Pattern for Persian words (letters + optional ZWNJ components), NO punctuation
+PERSIAN_WORD_PATTERN = re.compile(
+    f"[{PERSIAN_LETTERS}]+(?:{ZWNJ}[{PERSIAN_LETTERS}]+)*"
+)
+
 
 def get_dictionary_path() -> Path:
     """Get the path to the Persian dictionary directory."""
@@ -43,7 +56,7 @@ def get_dictionary_path() -> Path:
 
 def load_approved_dictionary() -> list[dict[str, Any]]:
     """Load the approved dictionary entries.
-    
+
     Returns:
         List of approved dictionary entries. Each entry is a dict with keys:
         - wrong: the incorrect form
@@ -55,7 +68,7 @@ def load_approved_dictionary() -> list[dict[str, Any]]:
     dict_path = get_dictionary_path() / "approved.json"
     if not dict_path.exists():
         return []
-    
+
     try:
         with open(dict_path, "r", encoding="utf-8") as f:
             data = json.load(f)
@@ -70,7 +83,7 @@ def load_candidates_dictionary() -> list[dict[str, Any]]:
     dict_path = get_dictionary_path() / "candidates.json"
     if not dict_path.exists():
         return []
-    
+
     try:
         with open(dict_path, "r", encoding="utf-8") as f:
             return json.load(f)
@@ -96,18 +109,18 @@ def add_candidate_entry(
     context: str | None = None
 ) -> bool:
     """Add or update a candidate entry in the candidates dictionary.
-    
+
     Args:
         candidate: The candidate form
         frequency: Frequency count
         sources: List of source documents
         context: Optional surrounding context
-    
+
     Returns:
         True if saved successfully
     """
     candidates = load_candidates_dictionary()
-    
+
     # Check if candidate already exists
     for entry in candidates:
         if entry.get("candidate") == candidate:
@@ -117,7 +130,7 @@ def add_candidate_entry(
             if context:
                 entry.setdefault("context", []).append(context)
             return save_candidates_dictionary(candidates)
-    
+
     # Add new candidate
     new_entry = {
         "candidate": candidate,
@@ -126,7 +139,7 @@ def add_candidate_entry(
     }
     if context:
         new_entry["context"] = [context]
-    
+
     candidates.append(new_entry)
     return save_candidates_dictionary(candidates)
 
@@ -138,22 +151,22 @@ def promote_candidate_to_approved(
     source: list[str] | None = None
 ) -> bool:
     """Promote a candidate to approved status.
-    
+
     Args:
         candidate: The candidate form (wrong form)
         correct: The correct form
         entry_type: Type of entry (spelling, terminology, etc.)
         source: Source of the approval
-    
+
     Returns:
         True if promoted successfully
     """
     candidates = load_candidates_dictionary()
     approved = load_approved_dictionary()
-    
+
     # Find and remove from candidates
     candidates = [c for c in candidates if c.get("candidate") != candidate]
-    
+
     # Add to approved
     new_entry = {
         "wrong": candidate,
@@ -163,7 +176,7 @@ def promote_candidate_to_approved(
         "source": source or ["manual"]
     }
     approved.append(new_entry)
-    
+
     # Save both
     dict_path = get_dictionary_path()
     try:
@@ -183,7 +196,7 @@ def find_spelling_changes(text: str) -> dict[str, list[list[str]]]:
     1. Loads the approved dictionary
     2. Finds exact occurrences of wrong forms in the text
     3. Skips matches that fall inside protected regions (URLs, emails, versions, etc.)
-    5. Returns structured changes for the tracked replacement bridge
+    4. Returns structured changes for the tracked replacement bridge
 
     Args:
         text: Input Persian text (typically the Writer selection)
@@ -259,74 +272,104 @@ def find_spelling_changes(text: str) -> dict[str, list[list[str]]]:
     return {"changes": unique_changes}
 
 
+def _is_mechanical_anomaly(word: str) -> bool:
+    """Check if a word contains mechanically detectable normalization anomalies.
+
+    These are forms that v0.2 can deterministically normalize:
+    - Arabic yeh (ي) that should be Persian yeh (ی)
+    - Arabic kaf (ك) that should be Persian kaf (ک)
+    - Tatweel/kashida (U+0640)
+
+    Correctly formed Persian words with ZWNJ are NOT anomalies.
+    Ellipsis (...) and multiple spaces are handled by v0.2 mechanical
+    normalization layer and cannot reach this function through the
+    Persian-word tokenizer.
+    """
+    # Arabic yeh (ي) or Arabic kaf (ك) inside word
+    if "ي" in word or "ك" in word:
+        return True
+
+    # Tatweel/kashida
+    if "\u0640" in word:
+        return True
+
+    return False
+
+
 def extract_candidates_from_text(text: str, source_doc: str) -> list[dict[str, Any]]:
     """Extract potential Persian lexical candidates from approved academic text.
-    
+
     This function identifies potentially useful Persian lexical forms
     from approved academic documents. It does NOT auto-approve anything.
-    
+
+    Focuses on mechanically detectable anomalies that v0.2 normalizes:
+    - Arabic yeh (ي) → Persian yeh (ی)
+    - Arabic kaf (ك) → Persian kaf (ک)
+    - Tatweel/kashida removal
+
+    Does NOT extract candidates merely because they contain ZWNJ or are
+    recurring Persian words. Correctly formed words with ZWNJ are not candidates.
+
+    Ellipsis and multiple spaces are handled by v0.2 mechanical normalization
+    and cannot reach this extractor through the Persian-word tokenizer.
+
     Args:
         text: The document text
         source_doc: Source document identifier
-    
+
     Returns:
         List of candidate entries for review
     """
     if not text or not text.strip():
         return []
-    
+
     candidates = []
-    
-    # Simple extraction: find Persian words with ZWNJ, Arabic chars, etc.
-    # This is a basic extractor - more sophisticated extraction can be added
-    
-    # Pattern for Persian words (including ZWNJ)
-    persian_word_pattern = re.compile(r"[\u0600-\u06FF]+(?:\u200c[\u0600-\u06FF]+)*")
-    
+
+    # Pattern for Persian words (letters + optional ZWNJ components), NO punctuation
+    persian_word_pattern = re.compile(f"[{PERSIAN_LETTERS}]+(?:{ZWNJ}[{PERSIAN_LETTERS}]+)*")
+
+    # Extract words using the strict pattern (no punctuation)
     words = persian_word_pattern.findall(text)
-    
+
     # Count frequencies
     freq = {}
     for word in words:
         if len(word) > 1:  # Ignore single characters
             freq[word] = freq.get(word, 0) + 1
-    
+
     # Create candidates for words that appear multiple times
-    # and contain ZWNJ or Arabic chars (potential normalization targets)
+    # and contain MECHANICAL ANOMALIES (not just ZWNJ)
     for word, count in freq.items():
         if count >= 2:
-            # Check if it has ZWNJ (half-space) or Arabic characters
-            has_zwnj = "\u200c" in word
-            has_arabic = any(c in word for c in "ي ك")
-            
-            if has_zwnj or has_arabic:
+            # Check for mechanical anomalies that v0.2 can normalize
+            if _is_mechanical_anomaly(word):
                 candidates.append({
                     "candidate": word,
                     "frequency": count,
                     "sources": [source_doc],
                 })
-    
+
     return candidates
 
 
 def extract_candidates_from_file(file_path: str) -> list[dict[str, Any]]:
     """Extract candidates from a Markdown or plain text file.
-    
+
     Args:
         file_path: Path to the document file
-    
+
     Returns:
         List of candidate entries
     """
     path = Path(file_path)
     if not path.exists():
         return []
-    
+
     try:
         text = path.read_text(encoding="utf-8")
     except OSError:
         return []
-    
+
     return extract_candidates_from_text(text, path.name)
 
 

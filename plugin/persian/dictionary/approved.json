@@ -34,23 +34,5 @@
     "source": [
       "test-doc.md"
     ]
-  },
-  {
-    "wrong": "موزه‌شناسی",
-    "correct": "موزه‌شناسی",
-    "type": "terminology",
-    "status": "approved",
-    "source": [
-      "test-doc.md"
-    ]
-  },
-  {
-    "wrong": "موزه‌شناسی",
-    "correct": "موزه‌شناسی",
-    "type": "terminology",
-    "status": "approved",
-    "source": [
-      "test-doc.md"
-    ]
   }
 ]
