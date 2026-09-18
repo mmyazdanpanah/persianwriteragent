@@ -1,0 +1,56 @@
+[
+  {
+    "wrong": "صرفا",
+    "correct": "صرفاً",
+    "type": "spelling",
+    "status": "approved",
+    "source": [
+      "manual"
+    ]
+  },
+  {
+    "wrong": "بعنوان",
+    "correct": "به‌عنوان",
+    "type": "spelling",
+    "status": "approved",
+    "source": [
+      "manual"
+    ]
+  },
+  {
+    "wrong": "بویژه",
+    "correct": "به‌ویژه",
+    "type": "spelling",
+    "status": "approved",
+    "source": [
+      "manual"
+    ]
+  },
+  {
+    "wrong": "موزه‌شناسی",
+    "correct": "موزه‌شناسی",
+    "type": "terminology",
+    "status": "approved",
+    "source": [
+      "test-doc.md"
+    ]
+  },
+  {
+    "wrong": "موزه‌شناسی",
+    "correct": "موزه‌شناسی",
+    "type": "terminology",
+    "status": "approved",
+    "source": [
+      "test-doc.md"
+    ]
+  },
+  {
+    "wrong": "موزه‌شناسی",
+    "correct": "موزه‌شناسی",
+    "type": "terminology",
+    "status": "approved",
+    "source": [
+      "test-doc.md"
+    ]
+  }
+]
