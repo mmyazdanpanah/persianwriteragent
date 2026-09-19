@@ -223,12 +223,13 @@ def apply_safe_normalizations(text: str) -> str:
 
 
 def find_joined_word_changes(original: str, normalized: str) -> list[tuple[str, str]]:
-    """Find Hazm changes where words are joined with ZWNJ.
+    """Find conservative ZWNJ joins from Hazm normalization.
 
-    Hazm's primary normalization is inserting ZWNJ between word parts:
-    - "شکل گیری" -> "شکل\u200cگیری"
-    - "سازمان دهی" -> "سازمان\u200cدهی"
-    - etc.
+    Hazm can insert ZWNJ into many Persian word combinations. Some are
+    mechanically safe, while others are lexical or context-dependent.
+    PersianWriterAgent therefore accepts only an explicit conservative
+    set here. Broader lexical joins belong in the reviewed spelling
+    dictionary rather than the mechanical normalization layer.
 
     Args:
         original: Original text
@@ -239,21 +240,19 @@ def find_joined_word_changes(original: str, normalized: str) -> list[tuple[str, 
     """
     changes = []
 
-    # Find all ZWNJ-containing words in normalized text
-    # Pattern: word\u200cword (Persian letters around ZWNJ)
-    zwnj_pattern = re.compile(r"([\u0600-\u06FF]+)" + ZWNJ + r"([\u0600-\u06FF]+)")
+    # Conservative mechanical joins validated for automatic normalization.
+    # Do not expand this list casually: context-dependent compounds belong
+    # in the reviewed Persian spelling/terminology dictionary.
+    SAFE_ZWNJ_JOINS = {
+        "شکل گیری": "شکل‌گیری",
+        "سازمان دهی": "سازمان‌دهی",
+        "همکاری های": "همکاری‌های",
+        "نه تنها": "نه‌تنها",
+    }
 
-    for match in zwnj_pattern.finditer(normalized):
-        full_word = match.group(0)  # e.g., "شکل\u200cگیری"
-        part1 = match.group(1)      # e.g., "شکل"
-        part2 = match.group(2)      # e.g., "گیری"
-
-        # Look for "part1 part2" in original (space separated)
-        space_separated = part1 + " " + part2
-
-        # Find this pattern in original text
-        if space_separated in original:
-            changes.append((space_separated, full_word))
+    for old_text, new_text in SAFE_ZWNJ_JOINS.items():
+        if old_text in original and new_text in normalized:
+            changes.append((old_text, new_text))
 
     return changes
 
