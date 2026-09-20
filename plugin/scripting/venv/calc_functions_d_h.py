@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import datetime as dt
 import math
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 
@@ -639,11 +639,11 @@ def filter(range_arr: Any, criteria: Any, if_empty: Any | None = None) -> Any:
     crit = np.asarray(criteria)
     if arr.ndim == 1:
         mask = np.asarray([bool(x) for x in crit.ravel()[: len(arr)]])
-        out = arr.ravel()[mask]
+        out = arr.ravel()[cast(Any, mask)]
     else:
         if crit.ndim == 1:
             mask = np.asarray([bool(x) for x in crit.ravel()[: arr.shape[0]]])
-            out = arr[mask]
+            out = arr[cast(Any, mask)]
         else:
             mask = crit.astype(bool)
             out = arr[mask]
