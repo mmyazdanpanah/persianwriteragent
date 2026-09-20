@@ -80,6 +80,7 @@ dev = [
     "sympy",
     "pint",
     "matplotlib",
+    "hazm>=0.12.0",
     "deal",
     "crosshair-tool",
     "hypothesis",
