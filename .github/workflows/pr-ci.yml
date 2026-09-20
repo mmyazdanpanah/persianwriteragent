@@ -223,4 +223,3 @@ jobs:
             make test-mock-sidebar
           fi
 
-# CI trigger verification
