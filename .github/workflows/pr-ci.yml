@@ -145,6 +145,14 @@ jobs:
         run: |
           make vendor manifest compile-translations
 
+      - name: Install Persian typecheck dependency
+        if: ${{ inputs.test_mock_sidebar != true }}
+        run: |
+          # Hazm is optional at runtime but required when CI typechecks plugin.persian.
+          # Keep it out of the general Python >=3.11 dev dependency set because
+          # current Hazm releases require Python 3.12+.
+          uv pip install "hazm>=0.12.0"
+
       - name: Run typecheck
         if: ${{ inputs.test_mock_sidebar != true }}
         run: |

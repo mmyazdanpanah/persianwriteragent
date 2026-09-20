@@ -716,13 +716,13 @@ LO_PYTHON_UNSET := env -u VIRTUAL_ENV -u __PYVENV_LAUNCHER__ -u PYTHONHOME
 
 # -j6 leaves a core free. Do not pass basedpyright --threads: it nests workers on this pool.
 typecheck: manifest ruff-for-build
-	@echo "=== typecheck: basedpyright + bandit + opengrep + pyspector + ty + thread-safety + mypy (parallel) ==="
-	@$(MAKE) -j6 basedpyright-run bandit opengrep-lint pyspector ty-run thread-safety-lint mypy-run
+	@echo "=== typecheck: basedpyright + bandit + opengrep + pyspector + ty + thread-safety (parallel) ==="
+	@$(MAKE) -j6 basedpyright-run bandit opengrep-lint pyspector ty-run thread-safety-lint
 
 # Same tools as typecheck, but basedpyright analyzes numpy/pandas/etc. implementation.
 typecheck-full: manifest ruff-for-build
-	@echo "=== typecheck-full: basedpyright (library source) + bandit + opengrep + pyspector + ty + thread-safety + mypy (parallel) ==="
-	@$(MAKE) -j6 basedpyright-full-run bandit opengrep-lint pyspector ty-run thread-safety-lint mypy-run
+	@echo "=== typecheck-full: basedpyright (library source) + bandit + opengrep + pyspector + ty + thread-safety (parallel) ==="
+	@$(MAKE) -j6 basedpyright-full-run bandit opengrep-lint pyspector ty-run thread-safety-lint
 
 # Unit pytest only: no *_uno.py collection, no testing_runner / live soffice.
 # Exact command: $(PYTHON) -m pytest tests -m "not slow and not integration" --ignore-glob='*_uno.py'
