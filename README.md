@@ -234,8 +234,8 @@ A chronicle of building a Python runtime and AI suite inside LibreOffice:
 **Prerequisites:** Python 3.11–3.13 for development (pinned to **3.13** via [`.python-version`](.python-version)), [uv](https://docs.astral.sh/uv/). Run `make check-setup` to verify. On macOS: install `make`, `gettext`.
 
 ```bash
-git clone https://github.com/KeithCu/writeragent.git
-cd writeragent
+git clone https://github.com/mmyazdanpanah/persianwriteragent.git
+cd persianwriteragent
 uv python install 3.13
 uv sync
 make deploy          # Builds & installs WriterAgent.oxt (or: make deploy writer)
