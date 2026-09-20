@@ -121,7 +121,9 @@ quote-annotations = true
 runtime-evaluated-decorators = ["dataclasses.dataclass"]
 
 [tool.mypy]
-python_version = "3.11"
+# Mypy runs on Python 3.13 in CI; newer scientific-package stubs use 3.12+ syntax.
+# Python 3.11 compatibility remains covered by basedpyright and pyrefly.
+python_version = "3.13"
 explicit_package_bases = true
 ignore_missing_imports = true
 disable_error_code = ["annotation-unchecked"]
