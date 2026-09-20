@@ -1,4 +1,56 @@
-# WriterAgent, LibrePy & LibreHarper
+# PersianWriterAgent
+
+> **Persian-first scholarly writing and research assistance for LibreOffice.**
+
+PersianWriterAgent is a focused Persian-language layer built on [WriterAgent](https://github.com/KeithCu/writeragent). It is designed for serious Persian academic and professional writing: conservative normalization, reviewed spelling corrections, terminology support, and eventually context-aware scholarly assistance.
+
+The project keeps the writer in control. Automatic corrections are deliberately conservative, explainable, reproducible, and reviewable through LibreOffice Track Changes.
+
+**Current Persian milestone:** `v0.3.1` — mechanical normalization + reviewed spelling layer.
+
+[![License: GPL v3+](https://img.shields.io/badge/License-GPL%20v3%2B-blue.svg)](LICENSE)
+[![Persian layer](https://img.shields.io/badge/Persian--first-writing%20layer-0.3.1-blue.svg)](https://github.com/mmyazdanpanah/persianwriteragent/tree/master/plugin/persian)
+
+### Contribute
+
+PersianWriterAgent is open to contributions from developers, Persian-language researchers, linguists, writers, LibreOffice users, and other interested contributors.
+
+Useful contributions include Persian spelling and normalization improvements, conservative terminology rules, tests, reproducible bug reports, LibreOffice integration fixes, documentation, accessibility, and performance improvements.
+
+Start here:
+
+- **[Contributing guide](CONTRIBUTING.md)** — development setup, testing, language-layer rules, and pull requests
+- **[Project idea and principles](IDEA.md)** — why the Persian layer is intentionally conservative
+- **[Development invariants](AGENTS.md)** — repository-wide engineering rules
+- **[Issues](https://github.com/mmyazdanpanah/persianwriteragent/issues)** — bugs and concrete feature requests
+- **[Pull requests](https://github.com/mmyazdanpanah/persianwriteragent/pulls)** — proposed changes
+
+Small, focused pull requests are especially welcome. For Persian language changes, please include before/after examples and the linguistic or technical rationale.
+
+---
+
+## About this fork
+
+This repository is a maintained Persian-focused fork/layer of WriterAgent. It is **not a reimplementation** of WriterAgent.
+
+The upstream project provides the LibreOffice extension architecture, AI tooling, MCP/ACP integration, Python execution, document tooling, and broader application infrastructure. PersianWriterAgent adds Persian-specific behavior while keeping that upstream foundation as intact as practical.
+
+The Persian development path is intentionally layered:
+
+```text
+mechanical normalization
+        ↓
+reviewed spelling dictionary
+        ↓
+future terminology layer
+        ↓
+future contextual scholarly assistance
+```
+
+When a normalization is ambiguous or context-dependent, PersianWriterAgent prefers not to change it automatically.
+
+---
+
 
 ![WriterAgent logo](https://raw.githubusercontent.com/KeithCu/writeragent/master/extension/assets/logo.jpg)
 
