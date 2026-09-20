@@ -141,6 +141,15 @@ jobs:
         run: |
           uv sync --dev
 
+      - name: Install Persian typecheck dependency
+        if: ${{ inputs.test_mock_sidebar != true }}
+        run: |
+          # Hazm is an optional runtime dependency for the Persian layer.
+          # Keep it out of the general dev dependency group because Hazm 0.12.x
+          # supports Python 3.12-3.13 while WriterAgent still supports Python >=3.11.
+          # Install it only in the CI environment that typechecks plugin.persian.
+          uv pip install "hazm>=0.12.0"
+
       - name: Prepare build artifacts (manifest, vendor, translations)
         run: |
           make vendor manifest compile-translations
