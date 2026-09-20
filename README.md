@@ -49,6 +49,16 @@ future contextual scholarly assistance
 
 When a normalization is ambiguous or context-dependent, PersianWriterAgent prefers not to change it automatically.
 
+### Next Phase: Persian LLM Integration
+
+The next development phase is focused on integrating a Persian-tuned language model as an optional, configurable assistance layer.
+
+This work will build on WriterAgent's existing functions and extension architecture rather than creating a separate writing-assistant system from scratch. The goal is to provide Persian-aware contextual assistance for tasks such as academic writing, editing, terminology, and style while keeping the underlying WriterAgent functionality intact.
+
+The model layer will remain adjustable so different compatible models can be tested and used according to the user's hardware, task, and workflow.
+
+This integration is currently under active development and is planned for the next release.
+
 ---
 
 
