@@ -142,7 +142,7 @@ jobs:
 
       - name: Install Python dependencies
         run: |
-          uv sync --frozen --dev
+          uv sync --dev
 
       - name: Install Persian typecheck dependency
         if: ${{ inputs.test_mock_sidebar != true }}
