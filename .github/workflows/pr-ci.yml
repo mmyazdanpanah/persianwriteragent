@@ -222,4 +222,3 @@ jobs:
           else
             make test-mock-sidebar
           fi
-
