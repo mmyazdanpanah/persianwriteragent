@@ -45,7 +45,7 @@ Please do not introduce automatic corrections that are:
 - likely to alter URLs, paths, code, identifiers, numbers, or other mixed content
 - duplicating functionality already provided by WriterAgent or its existing dependencies
 
-When a correction is context-dependent, prefer a reviewed dictionary/terminology mechanism or future contextual assistance rather than an aggressive normalization rule.
+When a correction is context-dependent, prefer a reviewed dictionary/terminology mechanism or the planned configurable Persian-tuned LLM layer rather than an aggressive normalization rule.
 
 ## Development setup
 
@@ -83,10 +83,10 @@ reviewed spelling dictionary
         ↓
 future terminology layer
         ↓
-future contextual assistance
+optional configurable Persian-tuned LLM assistance
 ```
 
-Deterministic changes should be conservative and reviewable through LibreOffice Track Changes.
+Deterministic changes should be conservative and reviewable through LibreOffice Track Changes. The planned LLM layer is a separate contextual assistance layer and should remain optional, configurable, and compatible with the existing WriterAgent architecture.
 
 Every automatic correction should be:
 
