@@ -26,7 +26,7 @@ Static checking does **not** prove LibreOffice runtime behavior: UNO remains hig
 ### mypy (optional)
 
 - **`make mypy`** — same prelude as `ty` (`make manifest`, `import uno` → `make fix-uno`), then **`python -m mypy`** using **`[tool.mypy]`** in `pyproject.toml`.
-- **Not** part of **`make build`** alone; it **is** part of **`make typecheck`** and **`make test`**. **`make release`** runs **`make test`** first, so mypy runs there too. Use standalone **`make mypy`** to compare against **`ty`**. Mypy often reports issues `ty` does not (and vice versa).
+- **Not** part of **`make build`**, **`make typecheck`**, **`make test`**, or **`make release`**. Use standalone **`make mypy`** when you want an additional static-analysis comparison against **`ty`** and **Basedpyright**. Mypy often reports issues the other checkers do not (and vice versa).
 - **Scope**: `packages = ["plugin", "compute_service"]` with path **`exclude`** plus **`[[tool.mypy.overrides]]`** `ignore_errors = true` for **`plugin.contrib.*`**, **`plugin.lib.*`**, and **`plugin.tests.*`**. Plain `exclude` alone does not stop mypy from checking vendored trees when resolving the `plugin` package, so the overrides mirror ty’s “no contrib / no lib / no tests” intent.
 - **Stubs**: **`types-requests`**, **`types-unopy`**, and overrides for **`officehelper`** are configured for a usable first run; remaining diagnostics are normal application code until you tighten further. Venv-only packages (e.g. **`sounddevice`** for sidebar recording) are type-checked only when imported inside `plugin/scripting/venv/`.
 
@@ -52,7 +52,7 @@ Static checking does **not** prove LibreOffice runtime behavior: UNO remains hig
 
 ## Basedpyright vs `ty` and mypy (what differed in practice)
 
-All three tools share **`types-unopy`**, **`make fix-uno`**, and the same **`plugin/`** scope (contrib, lib, and tests excluded). **`make typecheck`** runs **`ruff-for-build`**, then **`basedpyright`**, **bandit**, **opengrep**, **`pyspector`**, **`ty`**, thread-safety lint, and **`mypy`** in parallel. **`make test`** runs **`typecheck`**, then tests. **`make release`** runs **`typecheck-full`**. Basedpyright is stricter than **`ty`** / **`mypy`** on optional access, overrides, and JSON-shaped **`Any`**; those differences are why the gate exists. The catalog below is **what we already fixed**, so new code can copy the same patterns.
+**Basedpyright** and **`ty`** share **`types-unopy`**, **`make fix-uno`**, and the same **`plugin/`** scope (contrib, lib, and tests excluded). **`make typecheck`** runs **`ruff-for-build`**, **Basedpyright**, **bandit**, **Opengrep**, **PySpector**, **`ty`**, and thread-safety lint in parallel. **`make test`** runs **`typecheck`**, then tests. **`make release`** runs **`typecheck-full`**. **Mypy** remains an optional standalone checker rather than part of the required gate. Basedpyright is stricter than **`ty`** / **`mypy`** on optional access, overrides, and JSON-shaped **`Any`**; those differences are useful when comparing the tools. The catalog below is **what we already fixed**, so new code can copy the same patterns.
 
 ### Optional and `None` narrowing
 
@@ -95,7 +95,7 @@ All three tools share **`types-unopy`**, **`make fix-uno`**, and the same **`plu
 
 ### Cross-check workflow
 
-After Basedpyright-driven edits, run **`make ty`** (or **`make test`**) anyway: fixes for Basedpyright do **not** always change **`ty`**, and occasionally one tool will disagree. **`make build`** enforces **`ty`**; **`make test`** / **`make release`** enforce all three tools.
+After Basedpyright-driven edits, run **`make ty`** (or **`make test`**) anyway: fixes for Basedpyright do **not** always change **`ty`**, and occasionally the tools disagree. **`make build`** enforces **`ty`**; **`make test`** / **`make release`** enforce the configured gate. Run **`make mypy`** separately when you want its additional signal.
 
 ---
 
