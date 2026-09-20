@@ -72,6 +72,16 @@ For ordinary changes, run the tests relevant to the code you changed and `make t
 
 If your change affects LibreOffice/UNO behavior, follow the native test guidance in `AGENTS.md` and the relevant topic documentation.
 
+## Development environment
+
+The project is currently developed primarily on macOS with Apple Silicon and LibreOffice.
+
+This is the maintainer's development environment, not a project requirement. Contributors may develop and test on macOS, Linux, or Windows.
+
+Pull requests are automatically validated by GitHub Actions on Ubuntu. Additional macOS or Windows validation may be run when platform-specific changes require it.
+
+When reporting a platform-specific issue, please include your operating system, architecture, LibreOffice version, and WriterAgent/PersianWriterAgent version or commit.
+
 ## Persian development workflow
 
 For Persian-specific changes, keep the processing layers separate:
