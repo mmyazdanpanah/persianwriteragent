@@ -45,7 +45,7 @@ Please do not introduce automatic corrections that are:
 - likely to alter URLs, paths, code, identifiers, numbers, or other mixed content
 - duplicating functionality already provided by WriterAgent or its existing dependencies
 
-When a correction is context-dependent, prefer a reviewed dictionary/terminology mechanism or future contextual assistance rather than an aggressive normalization rule.
+When a correction is context-dependent, prefer a reviewed dictionary/terminology mechanism or the planned configurable Persian-tuned LLM layer rather than an aggressive normalization rule.
 
 ## Development setup
 
@@ -72,6 +72,16 @@ For ordinary changes, run the tests relevant to the code you changed and `make t
 
 If your change affects LibreOffice/UNO behavior, follow the native test guidance in `AGENTS.md` and the relevant topic documentation.
 
+## Development environment
+
+The project is currently developed primarily on macOS with Apple Silicon and LibreOffice.
+
+This is the maintainer's development environment, not a project requirement. Contributors may develop and test on macOS, Linux, or Windows.
+
+Pull requests are automatically validated by GitHub Actions on Ubuntu. Additional macOS or Windows validation may be run when platform-specific changes require it.
+
+When reporting a platform-specific issue, please include your operating system, architecture, LibreOffice version, and WriterAgent/PersianWriterAgent version or commit.
+
 ## Persian development workflow
 
 For Persian-specific changes, keep the processing layers separate:
@@ -83,10 +93,10 @@ reviewed spelling dictionary
         ↓
 future terminology layer
         ↓
-future contextual assistance
+optional configurable Persian-tuned LLM assistance
 ```
 
-Deterministic changes should be conservative and reviewable through LibreOffice Track Changes.
+Deterministic changes should be conservative and reviewable through LibreOffice Track Changes. The planned LLM layer is a separate contextual assistance layer and should remain optional, configurable, and compatible with the existing WriterAgent architecture.
 
 Every automatic correction should be:
 
