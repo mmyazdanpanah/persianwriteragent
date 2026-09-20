@@ -1,0 +1,6 @@
+# Project ownership
+# Keep the default owner on project-wide changes so architectural decisions remain reviewable.
+/* @mmyazdanpanah
+
+# Persian language layer
+/plugin/persian/ @mmyazdanpanah
