@@ -38,6 +38,7 @@ Module: [`plugin/framework/uno_context.py`](../../plugin/framework/uno_context.p
 | `get_desktop` | `com.sun.star.frame.Desktop` from the extension context. |
 | `get_toolkit` | `com.sun.star.awt.Toolkit` (event pump / focus). |
 | `process_events_to_idle` | Drain VCL via the approved toolkit pump (skips when a chat/MCP drain owner is active). |
+| `wait_while_pumping` | Secondary wait loop: PE2I (`force=False`) on the VCL thread, else **post** PE2I to main (Writer linguistic `Dummy-*` waiters). Drain-owner waits stay on `pump_ui_idle` / `run_blocking_in_thread`. |
 | `get_package_info` | `PackageInformationProvider` singleton. |
 | `set_package_extension_id` / `resolve_package_extension_id` | Pin / detect LibrePy vs WriterAgent vs LibreHarper OXT id. |
 | `get_extension_url` | Package location URL, else `vnd.sun.star.extension://<id>`. |
@@ -59,6 +60,7 @@ Still [`uno_context.py`](../../plugin/framework/uno_context.py), plus the resear
 |--------|--------|---------|
 | `normalize_doc_url` | `uno_context` | Strip + drop a trailing `/` so URL identity compares. |
 | `get_runtime_uid` | `uno_context` | Per-session id (`getRuntimeUID` / attribute / property); works for untitled docs. |
+| `uno_same` | `uno_context` | UNO object identity: `is` → `==` → `uno.isSame` (unwrap viral proxy first). PyUNO wrappers, not a thread-proxy requirement. |
 | `resolve_document_by_url` | `uno_context` | Walk desktop components; match normalized URL **or** RuntimeUID; return `(model, doc_type)`. |
 | `get_open_documents` | `document_research` | List open OfficeDocuments with name/url/uid/path/type/active/modified (untitled kept). |
 | `_office_model_from_desktop_element` | `document_research` | Frame-or-model → `guard_uno(model)` for desktop walks. |
@@ -77,7 +79,7 @@ LibrePy Run Python Script, text analytics, Excel auto-open, and Writer selection
 | Symbol | Purpose |
 |--------|---------|
 | `normalize_linebreaks` | `\r\n` / `\r` → `\n` so offsets match (Windows UNO/clipboard). |
-| `get_string_without_tracked_deletions` | Skip redline Delete portions when reading a text range. |
+| `get_string_without_tracked_deletions` | Skip redline Delete portions. A paragraph concatenates visible portions without a mid-`\n`; a document or multi-para range still joins with `\n`. Shares `_visible_portions` with html_export paint (paint aborts on portion-enum failure to avoid offset drift; the helper continues). |
 | `normalize_file_url` | Repair `file:/path` → `file:///path` (legacy `urljoin`). Shared with research. |
 | `get_document_path` | `file:` URL → repair then `uno.fileUrlToSystemPath`; `None` if untitled / non-file. |
 | `get_selection_range` | Writer `(start, end)` character offsets (cursor = equal ends). |
@@ -115,7 +117,7 @@ Module: [`plugin/doc/document_helpers.py`](../../plugin/doc/document_helpers.py)
 | `get_document_context_for_chat` | module function + `get_ctx()` |
 | `get_paragraph_ranges` / `find_paragraph_for_range` / `resolve_locator` | `paragraph_search` / module `resolve_locator` |
 
-`get_page_for_paragraph` / `get_page_count` are Writer view-cursor walks (lockControllers + restore). `doc_key` is `id(doc)` — **not** RuntimeUID (see overlap).
+`get_page_for_paragraph` / `get_page_count` are Writer view-cursor walks (lockControllers + restore). `doc_key` is `uid:<RuntimeUID>` then `url:<normalized>` (same shape as MCP `_resolve_mcp_doc_key`); empty both → `"unknown"` and do not cache.
 
 ### 1.5 Type guards
 
@@ -202,6 +204,7 @@ Shared across Writer / Calc / Draw / Impress image and shape tools. **Not** inse
 | `parse_color_to_uno_int` | Hex / name / `rgb()` / int / tuple → 24-bit UNO RGB. |
 | `apply_character_properties` | Batch Char* on a shape/cell/style. |
 | `mm_to_units` / `px_to_units` / `units_to_px` / `mm_to_px` | 1/100 mm ↔ 96-DPI px. |
+| `px_to_display_units` / `GENERATED_IMAGE_MAX_DISPLAY_MM` | Px → 1/100 mm, then cap longer edge at 135mm (generate resolution ≠ page size). |
 | `is_graphic_object` / `selected_graphic_object` / `graphic_objects_in_selection` | Graphic detection and selection. |
 | `list_graphic_objects` / `get_graphic_object_by_name` / `graphic_from_object` | Name lookup across Writer text + Draw pages. |
 | `get_active_draw_page` / `remove_graphic_from_draw_pages` | Draw/Impress page helpers. |
@@ -217,7 +220,8 @@ Module: [`plugin/framework/errors.py`](../../plugin/framework/errors.py) — UNO
 |--------|---------|
 | `UnoObjectError` | Stale docs / missing properties (`UNO_OBJECT_ERROR`). |
 | `DocumentDisposedError` | Disposed object (`DISPOSED_OBJECT`). |
-| `is_disposed_exception` | `DisposedException` / `RuntimeException` name heuristic + UNO types. |
+| `is_disposed_exception` | `DisposedException` / `RuntimeException` name heuristic + UNO types (UI lifecycle). |
+| `is_tool_document_disposed` | `execute_safe` mapping: live-doc bare `RuntimeException` is not `DOCUMENT_DISPOSED`. |
 | `suppress_disposed` (`ignore_disposed`) | UI lifecycle: swallow disposal (and optionally other) exceptions. |
 | `check_not_none` (`check_disposed`) | Null guard only — does **not** probe live disposal. |
 | `is_document_disposed` | Best-effort `getImplementationName` probe. |
@@ -300,7 +304,7 @@ Untitled documents have `getURL() == ""`. Identity then **must** use RuntimeUID.
 | `get_document_path` | Returns `None` (not a `file:` URL after repair). |
 | `document_scripts_identity` | Empty string for untitled (URL-only; **no** uid). |
 | MCP `_resolve_mcp_doc_key` | Prefers `uid:<RuntimeUID>`; else `url:<normalized>`; else active-document sentinel. Survives Save As. |
-| `DocumentService.doc_key` | `id(doc)` — proxy-unsafe; **not** uid. |
+| `DocumentService.doc_key` | Prefers `uid:<RuntimeUID>`; else `url:<normalized>`; else `"unknown"` (do not cache). Survives Save As. Modify + `OnUnload` emit `document:cache_invalidated`. |
 | `_is_same_document` | Compares RuntimeUID first (guard proxies break `==`). |
 
 `plugin/framework/tool.py` documents `document_url` as “URL or RuntimeUID from `list_open_documents`”.
@@ -400,7 +404,7 @@ Classification: **intentional split** (keep) / **accidental copy** (unify later)
 | `uno_context.normalize_doc_url` vs `document_scripts._normalize_doc_url` | Trailing-slash strip | **Landed.** Script identity imports `normalize_doc_url`; the document_scripts copy is gone. |
 | `document_research._path_to_file_url` vs `embeddings_fs.path_to_file_url` vs `format._file_url` | `Path(abspath).as_uri()` | **Landed.** Shared `url_utils.path_to_file_url` (filesystem section). Old copies deleted; no aliases. |
 | `text_helpers.normalize_file_url` vs sandbox vs session_manager `file:/` repair | `file:/` → `file://` + rest | **Landed for UNO callers** (`get_document_path` + research). Sandbox / session_manager stay stdlib. |
-| Desktop component walks | `resolve_document_by_url`, `get_open_documents`, `_collect_open_file_urls` | All enumerate `desktop.getComponents()`. Research already has `_office_model_from_desktop_element`; resolve has a slightly different frame-vs-model walk. |
+| Desktop component walks | `resolve_document_by_url`, `get_open_documents`, `_collect_open_file_urls` | All enumerate `desktop.getComponents()`. Research already has `_office_model_from_desktop_element`; resolve has a slightly different frame-vs-model walk. GHA 34593327841: leftover HTML-paste Writers must be skipped per-component (`getController` / `getURL` can raise PyUNO traceback-conversion); do not abort the whole nearby listing. |
 
 ### 3.2 Intentional splits (do not collapse)
 
@@ -452,7 +456,7 @@ Unifying `detect_doc_type` onto `doc_type_label_for_enum` would change unknown �
 
 **Document identity keys**
 
-`get_runtime_uid` (session-stable) vs `DocumentService.doc_key` (`id(doc)`, breaks across guard proxies) vs `document_scripts_identity` (URL only, empty if untitled). `_is_same_document` already documents why `==` fails on guard builds.
+`get_runtime_uid` (session-stable) vs `DocumentService.doc_key` (`uid:` / `url:`, same as MCP) vs `document_scripts_identity` (URL only, empty if untitled). `_is_same_document` already documents why `==` fails on guard builds.
 
 **Property existence**
 
@@ -460,7 +464,7 @@ Unifying `detect_doc_type` onto `doc_type_label_for_enum` would change unknown �
 
 **Desktop / GraphicProvider duplication (lower value)**
 
-- `uno_context._current_document_controller` creates Desktop via ServiceManager instead of `get_desktop`.
+- `uno_context._current_document_controller` uses `get_desktop` (no-VCL fail-soft, issue #768).
 - `main.py._load_icon_graphic` vs `librepy/sidebar_menus.py` GraphicProvider-from-URL (LibrePy also tries filesystem).
 - `create_property_value` (`writer/format.py`) vs inline `PropertyValue()` / `createUnoStruct` at load sites. `open_document_for_read` already imports `create_property_value`.
 
@@ -510,7 +514,7 @@ Do **not** re-merge a monolithic `uno_helpers.py`. Prefer the smallest existing 
 10. GraphicProvider icon load: `main.py` vs `librepy/sidebar_menus.py` (LibrePy’s filesystem fallback is the extra behavior).
 11. Point remaining `uno.systemPathToFileUrl` image/math sites at the P1 helper **after** a Windows smoke check.
 12. Notebook `file://` strip fallback → same URL→path helper.
-13. `DocumentService.doc_key` → `get_runtime_uid` (or uid-or-url like MCP). This is a behavior change for any cache keyed on `id(doc)`.
+13. `DocumentService.doc_key` → `get_runtime_uid` (or uid-or-url like MCP). **Landed.** Tree / proximity / FTS caches key on `uid:` / `url:`; modify and unload emit `document:cache_invalidated`. Tests: `tests/writer/test_document_helpers.py`, `tests/writer/test_tree.py`, `tests/writer/test_tree_uno.py`.
 14. Promote `uno_context._normalize_doc_url` to public name when P1 lands. **Landed** as `normalize_doc_url`.
 
 ### Explicit non-goals for later refactors

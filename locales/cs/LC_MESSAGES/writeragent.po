@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: PACKAGE VERSION\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-09-04 14:15-0400\n"
+"POT-Creation-Date: 2026-09-14 16:20-0400\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: Czech <LL@li.org>\n"
@@ -72,9 +72,28 @@ msgstr "Pro tento ovládací prvek nebyla nalezena buňka poznámkového bloku."
 msgid "Open a Writer document first."
 msgstr "Nejprve otevřete dokument Writeru."
 
-#: plugin/notebook/writer_importer.py
+#: plugin/notebook/notebook_controls.py
 msgid "Run code cell"
 msgstr "Spustit buňku kódu"
+
+#: plugin/embeddings/search_ui.py
+msgid "just now"
+msgstr "právě teď"
+
+#: plugin/embeddings/search_ui.py
+#, python-brace-format
+msgid "{0}m ago"
+msgstr "před {0} m"
+
+#: plugin/embeddings/search_ui.py
+#, python-brace-format
+msgid "{0}h ago"
+msgstr "před {0} h"
+
+#: plugin/embeddings/search_ui.py
+#, python-brace-format
+msgid "{0}d ago"
+msgstr "před {0} d"
 
 #: plugin/embeddings/search_ui.py
 msgid "Cache Status: No active document"
@@ -95,20 +114,6 @@ msgstr "Stav mezipaměti: Nevytvořeno (lancedb)"
 #: plugin/embeddings/search_ui.py
 msgid "Cache Status: Not built"
 msgstr "Stav mezipaměti: Nevytvořeno"
-
-#: plugin/embeddings/search_ui.py
-msgid "just now"
-msgstr "právě teď"
-
-#: plugin/embeddings/search_ui.py
-#, python-brace-format
-msgid "{0}m ago"
-msgstr "před {0} m"
-
-#: plugin/embeddings/search_ui.py
-#, python-brace-format
-msgid "{0}h ago"
-msgstr "před {0} h"
 
 #: plugin/embeddings/search_ui.py
 #, python-brace-format
@@ -418,7 +423,8 @@ msgid "Status:"
 msgstr "Stav:"
 
 #: plugin/calc/python/cell_editor_ui.py plugin/chatbot/panel_wiring.py
-#: plugin/scripting/editor_ui_strings.py plugin/xdl_strings.py
+#: plugin/chatbot/panel.py plugin/scripting/editor_ui_strings.py
+#: plugin/xdl_strings.py
 msgid "Ready"
 msgstr "Připraveno"
 
@@ -560,13 +566,13 @@ msgstr "Vložené obrázky"
 #: plugin/calc/python/geometric_recalc.py
 #, python-format
 msgid ""
-"Geometric Recalc Order skipped sheet '%s': found %s or more Python cells "
-"(discovery cap). The sheet was left unchained so a partial list is not "
-"treated as complete."
+"Geometric Recalc Order skipped sheet '%(sheet)s': found %(cap)s or more "
+"Python cells (discovery cap). The sheet was left unchained so a partial list "
+"is not treated as complete."
 msgstr ""
-"Geometrické pořadí přepočtu přeskočilo list „%s“: nalezeno %s nebo více "
-"buněk Pythonu (limit zjišťování). List byl ponechán beze změn, aby částečný "
-"seznam nebyl považován za úplný."
+"Pořadí geometrického přepočtu přeskočilo list „%(sheet)s“: nalezeno %(cap)s "
+"nebo více buněk Pythonu (limit zjišťování). List byl ponechán bez změn, aby "
+"částečný seznam nebyl považován za úplný."
 
 #: plugin/calc/excel_py_convert/auto_open.py
 #, python-brace-format
@@ -1327,6 +1333,10 @@ msgid ""
 "Settings.]"
 msgstr ""
 "[Model {0} nepodporuje nativní zvuk. Prosím, vyberte model STT v Nastavení.]"
+
+#: plugin/chatbot/panel.py
+msgid "[Peer send requires Chat mode on this sidebar.]"
+msgstr "[Odesílání partnerovi vyžaduje v tomto postranním panelu režim Chat.]"
 
 #: plugin/chatbot/web_research_chat.py
 #, python-format
@@ -3155,6 +3165,20 @@ msgstr "Nástroje tabulkového procesoru Calc"
 
 msgid "Max Rows Display"
 msgstr "Maximální počet řádků"
+
+msgid "Cache Excel siblings as ODS"
+msgstr "Ukládat sourozence Excelu do mezipaměti jako ODS"
+
+msgid ""
+"Convert sibling .xlsx/.xls to writeragent_ods_cache/ beside the folder so "
+"repeated DuckDB SQL reuses the ODS. Native .ods and the live workbook are "
+"never cached. Set calc.ods_cache_enabled false in writeragent.json to "
+"disable."
+msgstr ""
+"Převést sourozenecké soubory .xlsx/.xls do writeragent_ods_cache/ vedle "
+"složky, aby opakované SQL dotazy DuckDB mohly znovu použít ODS. Nativní "
+"soubory .ods a aktivní sešit nejsou nikdy ukládány do mezipaměti. Pro "
+"zakázání nastavte calc.ods_cache_enabled na false v souboru writeragent.json."
 
 msgid "Sidebar"
 msgstr "Postranní panel"

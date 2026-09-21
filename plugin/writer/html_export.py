@@ -5,14 +5,18 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """XHTML/FODT export and image stripping for Writer documents.
 
-Public entry: ``document_to_content`` (also re-exported from ``plugin.writer.format``).
+Public entries: ``document_to_content`` and ``xtext_to_content``
+(also re-exported from ``plugin.writer.format``).
 """
 
 import logging
 import re
 import time
 
-from plugin.doc.text_helpers import get_string_without_tracked_deletions
+from plugin.doc.text_helpers import (
+    get_string_without_tracked_deletions,
+    _visible_portions as _shared_visible_portions,
+)
 from plugin.framework.uno_context import get_desktop
 from . import xhtml_style_postprocess as xhtml_post
 from . import format as format_mod
@@ -69,26 +73,158 @@ def _export_xhtml(doc, config_svc):
 
 
 
-def _autostyle_parents(doc, config_svc):
-    """Export *doc* as flat ODF and return the autostyle -> parent-style map (Pn -> base name).
+def _autostyle_maps(doc, config_svc):
+    """Export *doc* as flat ODF once and return ``(parents, overrides)`` for the autostyles.
 
-    Lets the read path recover an autostyle paragraph's real style name when the XHTML CSS
-    fingerprint matches nothing. Returns ``{}`` on any failure (the read still works, just
-    without the autostyle-name recovery)."""
+    ``parents`` (Pn -> base style name) lets the read path recover an autostyle paragraph's real
+    style name when the XHTML CSS fingerprint matches nothing. ``overrides`` (Pn -> CSS text) is
+    the paragraph's DIRECT formatting, which the flattened XHTML cannot distinguish from inherited
+    values. Both come from the same export. Returns ``({}, {})`` on any failure (the read still
+    works, just without autostyle-name recovery and without the direct-formatting report).
+
+    Both scopes report overrides: the range path copies the source paragraphs' direct formatting
+    onto the temp document first (see _paint_direct_formatting)."""
     try:
         with format_mod._with_temp_buffer(None, config_svc, ext=format_mod.FODT_EXTENSION) as (path, file_url):
             props = (format_mod.create_property_value("FilterName", format_mod.FLAT_ODF_FILTER),)
             doc.storeToURL(file_url, props)
             with open(path, "r", encoding="utf-8", errors="replace") as f:
                 fodt = f.read()
-        return xhtml_post.extract_autostyle_parents_from_fodt(fodt)
+        return (xhtml_post.extract_autostyle_parents_from_fodt(fodt),
+                xhtml_post.extract_autostyle_overrides_from_fodt(fodt))
     except Exception:
-        log.debug("_autostyle_parents: flat-ODF export failed", exc_info=True)
-        return {}
+        log.debug("_autostyle_maps: flat-ODF export failed", exc_info=True)
+        return ({}, {})
 
 
 
-def _range_to_content_via_temp_doc(model, ctx, start, end, max_chars, config_svc, *, include_images=False):
+# Direct formatting the range copy carries into the temp document. Whitelists rather than "every
+# property": a blanket copy drags UNO structs and page/section properties along, which either fail
+# to set or change the temp document's layout. Char* is painted per text portion so a bold run
+# inside a sentence survives; Para* is set once per paragraph.
+_COPIED_CHAR_PROPERTIES = (
+    "CharStyleName", "CharFontName", "CharHeight", "CharWeight", "CharPosture",
+    "CharUnderline", "CharStrikeout", "CharColor", "CharBackColor", "CharCaseMap",
+    "CharEscapement", "CharEscapementHeight",
+)
+_COPIED_PARA_PROPERTIES = (
+    "ParaLeftMargin", "ParaRightMargin", "ParaTopMargin", "ParaBottomMargin",
+    "ParaFirstLineIndent", "ParaAdjust", "ParaBackColor",
+)
+
+_COPY_PORTION_LIMIT = 50000
+
+
+def _copy_properties(src, dst, names, style=None):
+    """Copy *names* from one range to another, but only where they differ from *style*.
+
+    Copying a value equal to the style's turns an inherited value into a hand-set one on the copy,
+    and the read would then report it as a direct override — margin-right:0cm and text-align:left
+    on every paragraph, drowning the one indent that was actually set. Detection is by VALUE for
+    the same reason as apply_paragraph_style_preserving_direct_char: getPropertyState is not
+    dependable at the text-portion level.
+
+    Per-property rather than all-or-nothing: the temp document is a plain Writer doc and does not
+    necessarily offer every property the source paragraph carries.
+    """
+    for name in names:
+        try:
+            value = src.getPropertyValue(name)
+        except Exception:
+            continue
+        if style is not None:
+            try:
+                if value == style.getPropertyValue(name):
+                    continue
+            except Exception:
+                pass
+        try:
+            dst.setPropertyValue(name, value)
+        except Exception:
+            continue
+
+
+def _source_style(model, style_name, cache):
+    """The source document's paragraph-style object for *style_name*, or None. Cached per read."""
+    if style_name in cache:
+        return cache[style_name]
+    style = None
+    if style_name:
+        try:
+            style = model.getStyleFamilies().getByName("ParagraphStyles").getByName(style_name)
+        except Exception:
+            style = None
+    cache[style_name] = style
+    return style
+
+
+def _visible_portions(para, limit=_COPY_PORTION_LIMIT, truncated_out=None):
+    """Visible portions for offset paint. Same walk as the text helper.
+
+    Aborts on portion enum / type failure so later runs are not painted at a
+    drifted offset. ``get_string_without_tracked_deletions`` continues past a
+    bad portion instead — that is the only intentional divergence.
+
+    Hitting *limit* used to stop silently, so a range read could omit later
+    runs' Char* with no signal. When the shared walk stops because of the cap,
+    log and append ``walk_cap_warning`` to *truncated_out*.
+    """
+    hit: list[int] = []
+    yield from _shared_visible_portions(
+        para, abort_on_portion_error=True, limit=limit, truncated_out=hit
+    )
+    if hit:
+        msg = format_mod.walk_cap_warning("text portions", hit[0], limit)
+        log.warning("%s", msg)
+        if truncated_out is not None:
+            truncated_out.append(msg)
+
+
+def _paint_direct_formatting(para, portions, temp_text, trim_start, trim_end, style=None):
+    """Re-apply the source paragraph's direct formatting to the copy just written.
+
+    The copy is made with setString, which carries plain text and nothing else — so a range read
+    used to hand the caller a flattened slice where a block quote was indistinguishable from body
+    text. Done as a second pass over character OFFSETS rather than by inserting run by run: the
+    text is already in place, so there is no insertion-point bookkeeping to get wrong, and a
+    failure here degrades to the old plain-text result instead of corrupting the copy.
+    """
+    try:
+        # The copy always appends, so the paragraph just written is the one at the document end.
+        para_cursor = temp_text.createTextCursor()
+        para_cursor.gotoEnd(False)
+        para_cursor.gotoStartOfParagraph(False)
+        para_start = para_cursor.getStart()
+    except Exception:
+        log.debug("_paint_direct_formatting: paragraph start skipped", exc_info=True)
+        return
+
+    try:
+        para_cursor.gotoEndOfParagraph(True)
+        _copy_properties(para, para_cursor, _COPIED_PARA_PROPERTIES, style)
+    except Exception:
+        # A refused Para* used to return here and skip the Char* loop, dropping bold/colour
+        # for the whole range — the reason the temp-doc path exists. Log and keep painting.
+        log.debug("_paint_direct_formatting: paragraph properties skipped", exc_info=True)
+
+    offset = 0  # position within the visible (tracked-deletions removed) paragraph text
+    for portion, chunk in portions:
+        chunk_start, chunk_end = offset, offset + len(chunk)
+        offset = chunk_end
+        lo, hi = max(chunk_start, trim_start), min(chunk_end, trim_end)
+        if lo >= hi:
+            continue  # portion lies outside the requested range
+        try:
+            run = temp_text.createTextCursorByRange(para_start)
+            run.goRight(lo - trim_start, False)
+            run.goRight(hi - lo, True)
+            _copy_properties(portion, run, _COPIED_CHAR_PROPERTIES, style)
+        except Exception:
+            log.debug("_paint_direct_formatting: portion skipped", exc_info=True)
+            continue
+
+
+def _range_to_content_via_temp_doc(model, ctx, start, end, max_chars, config_svc, *, include_images=False, walk_warnings=None):
     """Export a character range to content via a hidden temp document."""
     temp_doc = None
     try:
@@ -101,6 +237,7 @@ def _range_to_content_via_temp_doc(model, ctx, start, end, max_chars, config_svc
 
         temp_text = temp_doc.getText()
         temp_cursor = temp_text.createTextCursor()
+        style_cache = {}
         text = model.getText()
         enum = text.createEnumeration()
         first_para = True
@@ -114,7 +251,11 @@ def _range_to_content_via_temp_doc(model, ctx, start, end, max_chars, config_svc
                 style = el.getPropertyValue("ParaStyleName")
             except Exception:
                 style = ""
-            para_text = get_string_without_tracked_deletions(el)
+            # Same _visible_portions walk as get_string_without_tracked_deletions so
+            # paint offsets match the helper string. Still walk here (not just the
+            # helper) because we need the portion objects to copy Char* properties.
+            portions = list(_visible_portions(el, truncated_out=walk_warnings))
+            para_text = "".join(chunk for _unused, chunk in portions)
             style = style or ""
             # Compute paragraph start offset
             start_cursor = model.getText().createTextCursor()
@@ -126,6 +267,9 @@ def _range_to_content_via_temp_doc(model, ctx, start, end, max_chars, config_svc
 
             if para_end <= start or para_start >= end:
                 continue
+            # The window in the paragraph's own (tracked-deletions removed) coordinates. Kept even
+            # when nothing is trimmed: _paint_direct_formatting indexes portions with it.
+            trim_start, trim_end = 0, len(para_text)
             if para_start < start or para_end > end:
                 trim_start = max(0, start - para_start)
                 trim_end = len(para_text) - max(0, para_end - end)
@@ -146,6 +290,8 @@ def _range_to_content_via_temp_doc(model, ctx, start, end, max_chars, config_svc
                 temp_cursor.gotoEndOfParagraph(True)
                 temp_cursor.setPropertyValue("ParaStyleName", style)
                 temp_cursor.setString(para_text)
+            _paint_direct_formatting(el, portions, temp_text, trim_start, trim_end,
+                                      _source_style(model, style, style_cache))
             added_any = True
 
         if not added_any:
@@ -153,8 +299,8 @@ def _range_to_content_via_temp_doc(model, ctx, start, end, max_chars, config_svc
 
         try:
             xhtml = _export_xhtml(temp_doc, config_svc)
-            parents = _autostyle_parents(temp_doc, config_svc)
-            content = xhtml_post.xhtml_to_semantic_html(xhtml, parents)
+            parents, overrides = _autostyle_maps(temp_doc, config_svc)
+            content = xhtml_post.xhtml_to_semantic_html(xhtml, parents, overrides)
         except Exception:
             log.exception("_range_to_content_via_temp_doc (XHTML) failed; falling back to StarWriter")
             filter_name, _unused = format_mod._get_format_props(config_svc)
@@ -191,6 +337,7 @@ def document_to_content(
     range_end=None,
     *,
     include_images=False,
+    walk_warnings=None,
 ):
     """Export a Writer document (or part of it) as HTML.
 
@@ -227,7 +374,9 @@ def document_to_content(
         # selection path no longer names document_helpers in this file.
         start, end = format_mod._selection_range_for_export(model)
         return _done(
-            _range_to_content_via_temp_doc(model, ctx, start, end, max_chars, config_svc, include_images=include_images),
+            _range_to_content_via_temp_doc(
+                model, ctx, start, end, max_chars, config_svc,
+                include_images=include_images, walk_warnings=walk_warnings),
             "selection",
         )
 
@@ -238,7 +387,9 @@ def document_to_content(
         start = max(0, min(start, doc_len))
         end = min(end, doc_len)
         return _done(
-            _range_to_content_via_temp_doc(model, ctx, start, end, max_chars, config_svc, include_images=include_images),
+            _range_to_content_via_temp_doc(
+                model, ctx, start, end, max_chars, config_svc,
+                include_images=include_images, walk_warnings=walk_warnings),
             "range",
         )
 
@@ -252,14 +403,15 @@ def document_to_content(
             len(xhtml) if isinstance(xhtml, str) else -1,
         )
         t_phase = time.perf_counter()
-        parents = _autostyle_parents(model, config_svc)
+        parents, overrides = _autostyle_maps(model, config_svc)
         log.debug(
-            "document_to_content: phase=_autostyle_parents elapsed_ms=%.1f parents=%d",
+            "document_to_content: phase=_autostyle_maps elapsed_ms=%.1f parents=%d overrides=%d",
             (time.perf_counter() - t_phase) * 1000.0,
             len(parents) if isinstance(parents, dict) else -1,
+            len(overrides) if isinstance(overrides, dict) else -1,
         )
         t_phase = time.perf_counter()
-        content = xhtml_post.xhtml_to_semantic_html(xhtml, parents)
+        content = xhtml_post.xhtml_to_semantic_html(xhtml, parents, overrides)
         content = _apply_image_export_options(content, include_images=include_images)
         content = _inject_exported_math_tex(model, ctx, content)
         if max_chars and len(content) > max_chars:
@@ -297,5 +449,326 @@ def document_to_content(
         log.exception("document_to_content (full) failed")
         return _done("", "failed")
 
+
+def _supports_service(obj, name):
+    try:
+        return bool(obj.supportsService(name))
+    except Exception:
+        return False
+
+
+def _xtext_has_tables(text_obj):
+    try:
+        enum = text_obj.createEnumeration()
+    except Exception:
+        return False
+    while enum.hasMoreElements() is True:
+        try:
+            el = enum.nextElement()
+        except Exception:
+            break
+        if _supports_service(el, "com.sun.star.text.TextTable"):
+            return True
+    return False
+
+
+def _whole_xtext_range(text_obj):
+    cursor = text_obj.createTextCursor()
+    cursor.gotoStart(False)
+    cursor.gotoEnd(True)
+    return cursor
+
+
+def _goto_doc_end(doc):
+    try:
+        doc.getCurrentController().getViewCursor().gotoEnd(False)
+    except Exception:
+        pass
+
+
+def _paste_range(src_doc, rng, dest_doc):
+    """Copy a range via the document transferable (fields, images, char format).
+
+    Selecting a header/footer *table* and pasting this way drops the table
+    (probed: ``insertTransferable`` yields an empty dest). Paragraphs,
+    page-number fields, and AS_CHARACTER images survive.
+    """
+    try:
+        src_ctrl = src_doc.getCurrentController()
+        src_ctrl.select(rng)
+        xfer = src_ctrl.getTransferable()
+        dest_ctrl = dest_doc.getCurrentController()
+        _goto_doc_end(dest_doc)
+        dest_ctrl.insertTransferable(xfer)
+        return True
+    except Exception:
+        log.debug("_paste_range failed", exc_info=True)
+        return False
+
+
+def _copy_field_into(dest_doc, dest_text, dest_cursor, src_field):
+    """Recreate *src_field* in *dest_doc* (used for table-cell fields)."""
+    services = []
+    try:
+        services = [
+            s for s in src_field.getSupportedServiceNames()
+            if str(s).startswith("com.sun.star.text.textfield.")
+        ]
+    except Exception:
+        return False
+    if not services:
+        return False
+    svc = sorted(services, key=len)[-1]
+    try:
+        new_field = dest_doc.createInstance(svc)
+    except Exception:
+        return False
+    for prop in ("NumberingType", "PageNumberType", "IsDate", "IsFixed", "Format"):
+        try:
+            new_field.setPropertyValue(prop, src_field.getPropertyValue(prop))
+        except Exception:
+            pass
+    try:
+        dest_text.insertTextContent(dest_cursor, new_field, False)
+        return True
+    except Exception:
+        log.debug("_copy_field_into failed", exc_info=True)
+        return False
+
+
+def _copy_cell_xtext(src_doc, src_cell, dest_doc, dest_cell):
+    """Copy one table cell: text + fields. Images in cells are not copied here."""
+    dest_text = dest_cell
+    try:
+        dest_cell.setString("")
+    except Exception:
+        pass
+    dest_cursor = dest_text.createTextCursor()
+    dest_cursor.gotoStart(False)
+    try:
+        para_enum = src_cell.createEnumeration()
+    except Exception:
+        dest_cell.setString(src_cell.getString())
+        return
+    first_para = True
+    while para_enum.hasMoreElements() is True:
+        try:
+            para = para_enum.nextElement()
+        except Exception:
+            break
+        if _supports_service(para, "com.sun.star.text.TextTable"):
+            # Recreate the nested table inside dest_cell (same walk as body _copy_table).
+            _copy_table(src_doc, para, dest_doc, dest_cell)
+            dest_cursor = dest_text.createTextCursor()
+            dest_cursor.gotoEnd(False)
+            first_para = False
+            continue
+        if not first_para:
+            try:
+                dest_text.insertControlCharacter(dest_cursor, _PARAGRAPH_BREAK, False)
+                dest_cursor.gotoNextParagraph(False)
+            except Exception:
+                pass
+        first_para = False
+        try:
+            portions = para.createEnumeration()
+        except Exception:
+            try:
+                dest_text.insertString(dest_cursor, para.getString(), False)
+            except Exception:
+                pass
+            continue
+        while portions.hasMoreElements() is True:
+            try:
+                portion = portions.nextElement()
+                kind = portion.getPropertyValue("TextPortionType")
+            except Exception:
+                break
+            if kind == "TextField":
+                try:
+                    field = portion.getPropertyValue("TextField")
+                except Exception:
+                    continue
+                _copy_field_into(dest_doc, dest_text, dest_cursor, field)
+            else:
+                try:
+                    chunk = portion.getString()
+                except Exception:
+                    chunk = ""
+                if chunk:
+                    dest_text.insertString(dest_cursor, chunk, False)
+
+
+def _copy_table(src_doc, src_table, dest_doc, dest_text=None):
+    """Recreate *src_table* in *dest_text* (document body if omitted).
+
+    *dest_text* is a cell when copying a nested TextTable; recursion through
+    ``_copy_cell_xtext`` then copies inner cells (including further nests).
+    """
+    try:
+        rows = int(src_table.getRows().getCount())
+        cols = int(src_table.getColumns().getCount())
+    except Exception:
+        return
+    if rows < 1 or cols < 1:
+        return
+    dest_table = dest_doc.createInstance("com.sun.star.text.TextTable")
+    dest_table.initialize(rows, cols)
+    dest_xtext = dest_text if dest_text is not None else dest_doc.getText()
+    dest_xtext.insertTextContent(dest_xtext.getEnd(), dest_table, False)
+    for row in range(rows):
+        for col in range(cols):
+            try:
+                src_cell = src_table.getCellByPosition(col, row)
+                dest_cell = dest_table.getCellByPosition(col, row)
+            except Exception:
+                continue
+            _copy_cell_xtext(src_doc, src_cell, dest_doc, dest_cell)
+    _goto_doc_end(dest_doc)
+
+
+def _copy_xtext_by_portions(src_doc, src_text, dest_doc):
+    """Copy paragraphs/fields without the view transferable.
+
+    Needed when ``select()`` on ``HeaderText`` pastes nothing because the
+    view is on the first page (``FirstIsShared=False``).
+    """
+    dest_text = dest_doc.getText()
+    dest_text.setString("")
+    dest_cursor = dest_text.createTextCursor()
+    dest_cursor.gotoStart(False)
+    try:
+        enum = src_text.createEnumeration()
+    except Exception:
+        dest_text.setString(src_text.getString() if src_text else "")
+        return
+    first_para = True
+    while enum.hasMoreElements() is True:
+        try:
+            el = enum.nextElement()
+        except Exception:
+            break
+        if _supports_service(el, "com.sun.star.text.TextTable"):
+            _copy_table(src_doc, el, dest_doc)
+            _goto_doc_end(dest_doc)
+            dest_cursor = dest_text.createTextCursor()
+            dest_cursor.gotoEnd(False)
+            first_para = False
+            continue
+        if not first_para:
+            try:
+                dest_text.insertControlCharacter(dest_cursor, _PARAGRAPH_BREAK, False)
+                dest_cursor.gotoNextParagraph(False)
+            except Exception:
+                pass
+        first_para = False
+        try:
+            portions = el.createEnumeration()
+        except Exception:
+            try:
+                dest_text.insertString(dest_cursor, el.getString(), False)
+            except Exception:
+                pass
+            continue
+        while portions.hasMoreElements() is True:
+            try:
+                portion = portions.nextElement()
+                kind = portion.getPropertyValue("TextPortionType")
+            except Exception:
+                break
+            if kind == "TextField":
+                try:
+                    field = portion.getPropertyValue("TextField")
+                except Exception:
+                    continue
+                _copy_field_into(dest_doc, dest_text, dest_cursor, field)
+            else:
+                try:
+                    chunk = portion.getString()
+                except Exception:
+                    chunk = ""
+                if chunk:
+                    dest_text.insertString(dest_cursor, chunk, False)
+
+
+def _copy_xtext_into_doc(src_doc, src_text, dest_doc):
+    """Copy *src_text* (body, header, footer, cell) into *dest_doc*'s body.
+
+    Paragraphs use the transferable so fields and AS_CHARACTER images survive.
+    Tables are recreated — LO's transferable drops a header table (probed).
+    When the view is on the first page, ``select(HeaderText)`` pastes empty;
+    fall back to a portion walk so shared vs first-page regions still export.
+    """
+    dest_doc.getText().setString("")
+    src_plain = (src_text.getString() if src_text else "") or ""
+    if not _xtext_has_tables(src_text):
+        pasted = _paste_range(src_doc, _whole_xtext_range(src_text), dest_doc)
+        dest_plain = dest_doc.getText().getString() or ""
+        if pasted and dest_plain.strip():
+            return
+        if src_plain.strip():
+            _copy_xtext_by_portions(src_doc, src_text, dest_doc)
+        return
+    try:
+        enum = src_text.createEnumeration()
+    except Exception:
+        dest_doc.getText().setString(src_plain)
+        return
+    while enum.hasMoreElements() is True:
+        try:
+            el = enum.nextElement()
+        except Exception:
+            break
+        if _supports_service(el, "com.sun.star.text.TextTable"):
+            _copy_table(src_doc, el, dest_doc)
+        else:
+            if not _paste_range(src_doc, el, dest_doc):
+                try:
+                    dest_doc.getText().insertString(dest_doc.getText().getEnd(), el.getString(), False)
+                except Exception:
+                    pass
+    dest_plain = dest_doc.getText().getString() or ""
+    if not dest_plain.strip() and src_plain.strip():
+        _copy_xtext_by_portions(src_doc, src_text, dest_doc)
+
+
+def _open_hidden_writer(ctx):
+    desktop = get_desktop(ctx)
+    load_props = (format_mod.create_property_value("Hidden", True),)
+    return desktop.loadComponentFromURL("private:factory/swriter", "_blank", 0, load_props)
+
+
+def xtext_to_content(text_obj, model, ctx, services=None, *, include_images=True, max_chars=None):
+    """Export an ``XText`` (header, footer, body, cell) via ``document_to_content``.
+
+    Full-document XHTML omits page-style headers/footers, so the region is
+    copied into a hidden Writer body's text and run through the same
+    XHTML + postprocess stack as ``get_document_content``.
+    """
+    if text_obj is None:
+        return ""
+    temp_doc = None
+    try:
+        temp_doc = _open_hidden_writer(ctx)
+        if not temp_doc or not hasattr(temp_doc, "getText"):
+            return ""
+        _copy_xtext_into_doc(model, text_obj, temp_doc)
+        return document_to_content(
+            temp_doc,
+            ctx,
+            services,
+            max_chars=max_chars,
+            scope="full",
+            include_images=include_images,
+        )
+    except Exception:
+        log.exception("xtext_to_content failed")
+        return ""
+    finally:
+        if temp_doc is not None:
+            try:
+                temp_doc.close(True)
+            except Exception:
+                pass
 
 

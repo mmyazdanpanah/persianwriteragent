@@ -12,7 +12,8 @@ This plan covers the WriterAgent prompt optimization + evaluation system (`scrip
 ## Current Status
 
 The evaluation system lives in `scripts/prompt_optimization/`:
-- `run_eval.py` / `run_eval_multi.py`: Main entrypoints (`LlmClient` + tool loop from `llm_chat_eval.py`). Eval does not set sampling temperature (LlmClient / provider default). `run_eval_multi.py` **refuses** a full catalog sweep unless `--models` or `--yes-all-models` is set. `--gold-model` runs only with `--generate-golds`.
+- `run_eval.py` / `run_eval_multi.py`: Main entrypoints (`LlmClient` + tool loop from `llm_chat_eval.py`). Eval does not set sampling temperature (LlmClient / provider default). `run_eval_multi.py` **refuses** a full catalog sweep unless `--models` or `--yes-all-models` is set. `--gold-model` runs only with `--generate-golds`. Live `--tools` / `--schema-density` reshape the advertised catalog only (see `eval_catalog` + the prompt_optimization README); they do not change sidebar registration.
+- `run_optimize.py`: MIPROv2 **offline** optimizer. Default `--student llm` wraps that same `llm_chat_eval` loop and rewrites a **named slice** (`calc_core`, `writer_core`, `apply_html`, `sort_range`, …), not the whole ambient prompt. `--student react-mock` is the old DSPy ReAct + `tools_lo` comparison path. Instruction-only (`max_*_demos=0`); does not auto-merge into `prompts.py` / `cells.py`.
 - Default: `--backend string` (Writer/Draw/Calc worlds in `eval_worlds.py` via `string_eval_tools.py`). Core schemas from `ToolRegistry.get_schemas`. Flowchart uses `delegate_to_specialized_draw_toolset(domain="shapes")`; sort uses `delegate_to_specialized_calc_toolset(domain="ranges")` then one-column `sort_range` (two stable passes for Product then Revenue).
 - `--backend lo`: Headless UNO via `tools_lo.py` (fidelity smoke, not ranking).
 - Judging: Hard gate is substring + **result oracles** + **process oracles**. Quality LLM-as-judge runs **after** the hard gate for resume, rewriting, summarization, and the two table tasks. Creative weights are accuracy-first (50/20/30); tables are formatting-heavy after the gate (20/80). Unparseable judge JSON retries once, then keeps the hard pass (`judge_score=None`). Rank by hard pass / agent score / quality; C²/$ is secondary.
@@ -113,6 +114,9 @@ Source plan: [`oss-20b-eval.md`](oss-20b-eval.md). Scores:
   without loosening wrong-row, wrong-factor, or Price-column junk.
 - `write_formula_range` fails loud when a JSON leaf count does not match
   the A1 cell count (string `CalcWorld` too).
+- String `CalcWorld` fill-down of one formula into a 1-D range uses
+  `formula_fill.expand_single_formula` (production); JSON arrays stay
+  pinned. Snapshot `formulas` stores the per-cell expanded text.
 - Ranking catalog: `z-ai/glm-5.3-flash` only.
 
 #### What shipped

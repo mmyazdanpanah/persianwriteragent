@@ -137,6 +137,13 @@ No formula evaluator. Tax column can still write `0.8` as a value.
 `=PY("result = …"; A1:H500)` is stored as formula text at dest; process
 oracles parse dest vs DataRange.
 
+A single formula string into a **1-D** range fill-down/across-adjusts
+relative A1 refs via [`formula_fill.expand_single_formula`](../../plugin/calc/formula_fill.py)
+(same as production `write_formula_range`). A JSON array of formula
+strings stays exact per-cell (pin). 2-D + one formula, or an import
+failure, falls back to the honest pin. Snapshot `formulas` stores the
+**per-cell** text, not the original pin source on every address.
+
 `sort_range` is production-shaped: one 0-based column, stable,
 non-numeric last (tie-break = two calls). `get_sheet_summary` returns
 the full grid. Snapshot JSON grows `formulas` / `writes` without
@@ -182,6 +189,13 @@ breaking `grid` / `rows` that `oracle_data_sorting` and
 (`tool_loop.py`). Specialized tools stay off the list; Draw
 `shape_upsert` / Calc `sort_range` are advertised only via
 `delegate_to_specialized_*`. There is no committed JSON snapshot.
+
+Eval-only (not sidebar): `filter_eval_tool_schemas` / named presets
+(`full`, `calc_minimal`, `calc_core`, `writer_minimal`) and
+`apply_schema_density` (`full` \| `skinny`) hang off `prepare_eval_tool_schemas`
+and the `--tools` / `--schema-density` flags on `run_eval.py` /
+`run_eval_multi.py` / `run_optimize.py`. Outer allowlists do not filter
+specialized inner schemas. Recipe: [prompt_optimization README](../../scripts/prompt_optimization/README.md).
 
 Do not include `specialized` / `specialized_control`. Do not
 bootstrap `MainJob`.

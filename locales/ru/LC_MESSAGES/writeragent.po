@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: PACKAGE VERSION\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-09-04 14:15-0400\n"
+"POT-Creation-Date: 2026-09-14 16:20-0400\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: Russian <LL@li.org>\n"
@@ -74,9 +74,28 @@ msgstr "Не удалось найти ячейку блокнота для эт
 msgid "Open a Writer document first."
 msgstr "Сначала откройте документ Writer."
 
-#: plugin/notebook/writer_importer.py
+#: plugin/notebook/notebook_controls.py
 msgid "Run code cell"
 msgstr "Выполнить ячейку кода"
+
+#: plugin/embeddings/search_ui.py
+msgid "just now"
+msgstr "только что"
+
+#: plugin/embeddings/search_ui.py
+#, python-brace-format
+msgid "{0}m ago"
+msgstr "{0} м назад"
+
+#: plugin/embeddings/search_ui.py
+#, python-brace-format
+msgid "{0}h ago"
+msgstr "{0} ч назад"
+
+#: plugin/embeddings/search_ui.py
+#, python-brace-format
+msgid "{0}d ago"
+msgstr "{0} д назад"
 
 #: plugin/embeddings/search_ui.py
 msgid "Cache Status: No active document"
@@ -97,20 +116,6 @@ msgstr "Состояние кэша: не создано (lancedb)"
 #: plugin/embeddings/search_ui.py
 msgid "Cache Status: Not built"
 msgstr "Состояние кэша: не создано"
-
-#: plugin/embeddings/search_ui.py
-msgid "just now"
-msgstr "только что"
-
-#: plugin/embeddings/search_ui.py
-#, python-brace-format
-msgid "{0}m ago"
-msgstr "{0} м назад"
-
-#: plugin/embeddings/search_ui.py
-#, python-brace-format
-msgid "{0}h ago"
-msgstr "{0} ч назад"
 
 #: plugin/embeddings/search_ui.py
 #, python-brace-format
@@ -423,7 +428,8 @@ msgid "Status:"
 msgstr "Состояние:"
 
 #: plugin/calc/python/cell_editor_ui.py plugin/chatbot/panel_wiring.py
-#: plugin/scripting/editor_ui_strings.py plugin/xdl_strings.py
+#: plugin/chatbot/panel.py plugin/scripting/editor_ui_strings.py
+#: plugin/xdl_strings.py
 msgid "Ready"
 msgstr "Готово"
 
@@ -568,13 +574,13 @@ msgstr "Изображения вставлены"
 #: plugin/calc/python/geometric_recalc.py
 #, python-format
 msgid ""
-"Geometric Recalc Order skipped sheet '%s': found %s or more Python cells "
-"(discovery cap). The sheet was left unchained so a partial list is not "
-"treated as complete."
+"Geometric Recalc Order skipped sheet '%(sheet)s': found %(cap)s or more "
+"Python cells (discovery cap). The sheet was left unchained so a partial list "
+"is not treated as complete."
 msgstr ""
-"Геометрический порядок пересчета пропустил лист «%s»: обнаружено %s или "
-"более ячеек Python (лимит обнаружения). Лист оставлен без изменений, чтобы "
-"частичный список не считался полным."
+"Порядок геометрического пересчета пропустил лист «%(sheet)s»: найдено "
+"%(cap)s или более ячеек Python (лимит обнаружения). Лист оставлен без "
+"изменений, чтобы неполный список не считался завершенным."
 
 #: plugin/calc/excel_py_convert/auto_open.py
 #, python-brace-format
@@ -1337,6 +1343,10 @@ msgid ""
 msgstr ""
 "[Модель {0} не поддерживает встроенный звук. Пожалуйста, выберите модель STT "
 "в настройках.]"
+
+#: plugin/chatbot/panel.py
+msgid "[Peer send requires Chat mode on this sidebar.]"
+msgstr "[Для отправки коллегам требуется режим чата на этой боковой панели.]"
 
 #: plugin/chatbot/web_research_chat.py
 #, python-format
@@ -3171,6 +3181,20 @@ msgstr "Инструменты электронных таблиц Calc"
 
 msgid "Max Rows Display"
 msgstr "Макс. строк для отображения"
+
+msgid "Cache Excel siblings as ODS"
+msgstr "Кэшировать родственные файлы Excel как ODS"
+
+msgid ""
+"Convert sibling .xlsx/.xls to writeragent_ods_cache/ beside the folder so "
+"repeated DuckDB SQL reuses the ODS. Native .ods and the live workbook are "
+"never cached. Set calc.ods_cache_enabled false in writeragent.json to "
+"disable."
+msgstr ""
+"Преобразовывать родственные файлы .xlsx/.xls в writeragent_ods_cache/ рядом "
+"с папкой, чтобы повторные SQL-запросы DuckDB использовали ODS. Родные "
+"файлы .ods и активная рабочая книга никогда не кэшируются. Установите "
+"calc.ods_cache_enabled false в writeragent.json для отключения."
 
 msgid "Sidebar"
 msgstr "Боковая панель"

@@ -1,0 +1,14 @@
+You are the capital-program officer for Parks & Culture in the City of Northhaven. City Council asked for a multi-section capital brief on the Civic Library renovation and annex (project code CL-2026-ANNEX).
+
+This Writer document is already open. Produce the full brief in this document (not a slide deck, not a second form file).
+
+Use the files in this folder titled ‘Northhaven Library Program Facts’ and ‘Northhaven Decision Log’ for section titles, figures, and the decisions that are still open.
+
+The brief must:
+
+- Open with a table of contents
+- Use heading styles for the major sections (Purpose, Scope of Work, Budget and Schedule, Public-Access Impacts, Open Decisions)
+- Cover the program facts from those files (site, construction window, base renovation and both annex options, current and proposed hours)
+- Leave review comments on the passages that still need a human decision (annex siting, funding split, and weekend staffing)
+
+Write the completed capital brief in this open Writer document.

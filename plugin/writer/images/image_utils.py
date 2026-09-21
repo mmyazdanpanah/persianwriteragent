@@ -22,8 +22,10 @@ import tempfile
 import re
 import base64
 from plugin.framework.client.llm_client import LlmClient
+from plugin.framework.client.base_provider_shim import canonical_aspect_ratio, canonical_resolution
 from plugin.framework.client.requests import sync_request
 from plugin.framework.config import get_config_int
+from plugin.framework.config_schema import DEFAULT_IMAGE_BASE_SIZE
 
 log = logging.getLogger(__name__)
 
@@ -50,10 +52,12 @@ class EndpointImageProvider(ImageProvider):
 
     def _save_url(self, url, suffix=".webp"):
         with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-            tmp.write(sync_request(url, parse_json=False))
+            # Same Settings budget as image_completion — downloading the
+            # generated file can take as long as the provider POST.
+            tmp.write(sync_request(url, parse_json=False, timeout=get_config_int("request_timeout")))
             return [tmp.name]
 
-    def generate(self, prompt, width=512, height=512, model=None, steps=None, **kwargs):
+    def generate(self, prompt, width=DEFAULT_IMAGE_BASE_SIZE, height=DEFAULT_IMAGE_BASE_SIZE, model=None, steps=None, **kwargs):
         """Request image via the configured endpoint (modalities=['image'] where supported)."""
         override = kwargs.pop("image_model", None)
         if isinstance(override, str) and override.strip():
@@ -100,6 +104,23 @@ class EndpointImageProvider(ImageProvider):
             _method, _path, body, _headers = self.client.make_chat_request(messages, max_tokens=1000, model=model)
             body_dict = json.loads(body)
             body_dict["modalities"] = ["image"]
+            # Edit: source image already defines geometry. Sending sidebar
+            # Square / Base Size as image_config overrode the selection and
+            # mapped ~512 display px to image_size "512", which OpenRouter
+            # chat rejects (enum is 0.5K|1K|2K|4K).
+            if not source_image:
+                # Create: Gemini multimodal models need image_config hints;
+                # pixel size is not a chat-completions field
+                # (https://openrouter.ai/google/gemini-3.1-flash-lite-image).
+                hint = canonical_aspect_ratio(width, height, named=kwargs.get("aspect_ratio"))
+                image_config = {}
+                if hint:
+                    image_config["aspect_ratio"] = hint
+                size_hint = canonical_resolution(width, height, family="openrouter_chat")
+                if size_hint:
+                    image_config["image_size"] = size_hint
+                if image_config:
+                    body_dict["image_config"] = image_config
             if steps is not None and steps > 0:
                 body_dict["steps"] = steps
             if "max_tokens" in kwargs:

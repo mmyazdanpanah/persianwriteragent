@@ -255,6 +255,13 @@ def test_stream_request_with_tools_text_and_tool(client):
 
 
 def test_stream_request_with_tools_logs_raw_indexes_before_accumulation(client, caplog):
+    # Cerebras/OpenRouter gpt-oss stream-split: first delta is the real call
+    # (index 0, name=lookup, partial args); second delta is a phantom
+    # continuation (new index, empty id/name, remainder of arguments).
+    # accumulate_delta keeps both slots; coalesce_split_tool_calls then
+    # merges the phantom into the real call and rebases index to 0.
+    # Merge unit coverage lives in test_async_stream.py; this test is the
+    # stream_request_with_tools end-to-end + raw/accumulated logging path.
     mock_responses = [
         b'data: {"id":"chunk-1","model":"gpt-oss","provider":"Cerebras","choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"lookup","arguments":"{\\"query\\":\\"part"}}]}}]}\n\n',
         b'data: {"id":"chunk-2","model":"gpt-oss","provider":"Cerebras","choices":[{"delta":{"tool_calls":[{"index":1,"id":"","type":"function","function":{"name":"","arguments":" two\\"}"}}]},"finish_reason":"tool_calls"}]}\n\n',
@@ -276,7 +283,13 @@ def test_stream_request_with_tools_logs_raw_indexes_before_accumulation(client, 
                 tools=[{"type": "function", "function": {"name": "lookup"}}],
             )
 
-    assert len(result["tool_calls"]) == 2
+    assert result["tool_calls"] is not None
+    assert len(result["tool_calls"]) == 1
+    kept = result["tool_calls"][0]
+    assert kept["id"] == "call_1"
+    assert kept["function"]["name"] == "lookup"
+    assert kept["function"]["arguments"] == '{"query":"part two"}'
+    assert kept["index"] == 0
 
     from plugin.framework.client import llm_client as llm_mod
     from tests.strip_bundle import module_source_contains
@@ -284,10 +297,17 @@ def test_stream_request_with_tools_logs_raw_indexes_before_accumulation(client, 
     if not module_source_contains(llm_mod, "raw tool_call delta"):
         pytest.skip("log.debug stripped in release bundle")
 
+    # Raw deltas are logged before accumulate/coalesce — the phantom
+    # index=1 chunk must still appear on the wire log.
     assert "raw tool_call delta" in caplog.text
-    assert 'chunk_provider=\'Cerebras\'' in caplog.text
+    assert "chunk_provider='Cerebras'" in caplog.text
     assert '"index": 1' in caplog.text
+    # After coalesce the accumulated snapshot is one rebased call.
+    # json.dumps escapes the arguments string, so the merged JSON appears
+    # as \"query\":\"part two\" in the log text.
     assert "accumulated tool_calls" in caplog.text
+    assert '\\"query\\":\\"part two\\"' in caplog.text
+    assert '"index": 0' in caplog.text
 
 
 def test_stream_request_with_tools_preserves_reasoning_replay(client):
@@ -755,7 +775,7 @@ def test_strip_leaked_chat_template_control_tokens_empty():
 
 
 def test_strip_leaked_chat_template_control_tokens_llama_python_tag_still_parsable():
-    """Stripping ``<|python_tag|>`` leaves JSON; llama3_json parser uses ``{`` anyway."""
+    """Stripping ``<|python_tag|>`` leaves the JSON payload intact."""
     raw = '<|python_tag|>{"name": "x", "arguments": {}}'
     out = strip_leaked_chat_template_control_tokens(raw)
     assert "<|" not in out
@@ -981,13 +1001,42 @@ def test_grok_shim(client):
 
         # Test image request for Grok (should omit size)
         client.image_completion("Draw a cat", model="aurora", width=1024, height=1024)
-        
+
         # Check the request body sent to sync_request
-        _, kwargs = mock_sync.call_args
+        args, kwargs = mock_sync.call_args
         body = json.loads(kwargs["data"])
         assert body["prompt"] == "Draw a cat"
         assert body["model"] == "aurora"
+        assert body["aspect_ratio"] == "1:1"
+        assert body["resolution"] == "1k"
         assert "size" not in body
+        assert "quality" not in body
+        assert "image" not in body
+        assert str(args[0]).endswith("/images/generations")
+
+        client.image_completion("Wide landscape", model="aurora", width=1792, height=1024)
+        body = json.loads(mock_sync.call_args.kwargs["data"])
+        assert body["aspect_ratio"] == "16:9"
+        assert body["resolution"] == "2k"
+
+        client.image_completion("High res", model="aurora", width=2048, height=2048)
+        body = json.loads(mock_sync.call_args.kwargs["data"])
+        assert body["aspect_ratio"] == "1:1"
+        assert body["resolution"] == "2k"
+
+        client.image_completion("Make it dusk", model="aurora", width=1024, height=1024, source_image="abc123")
+        args, kwargs = mock_sync.call_args
+        body = json.loads(kwargs["data"])
+        assert str(args[0]).endswith("/images/edits")
+        assert "image_url" not in body
+        assert body["aspect_ratio"] == "1:1"
+        assert body["resolution"] == "1k"
+        assert "quality" not in body
+        assert body["image"] == {
+            "url": "data:image/png;base64,abc123",
+            "type": "image_url",
+        }
+        assert body["response_format"] == "b64_json"
 
 
 def test_ollama_shim_image(client):
@@ -1000,12 +1049,22 @@ def test_ollama_shim_image(client):
 
         # Test image request for Ollama
         client.image_completion("Draw a dog", model="flux", width=1024, height=1024)
-        
+
         _, kwargs = mock_sync.call_args
         body = json.loads(kwargs["data"])
         assert body["prompt"] == "Draw a dog"
         assert body["model"] == "flux"
         assert body["stream"] is False
+        assert body["width"] == 1024
+        assert body["height"] == 1024
+        assert "images" not in body
+        assert "image_url" not in body
+
+        client.image_completion("Make it dusk", model="flux", width=512, height=512, source_image="abc123")
+        _, kwargs = mock_sync.call_args
+        body = json.loads(kwargs["data"])
+        assert body["images"] == ["abc123"]
+        assert "image_url" not in body
 
         # Test parsing
         shim = client._get_shim()
@@ -1015,6 +1074,19 @@ def test_ollama_shim_image(client):
         assert shim.parse_image_responses({"image": "def"}) == ["def"]
         # Fallback to OpenAI style
         assert shim.parse_image_responses({"data": [{"b64_json": "ghi"}]}) == ["ghi"]
+
+
+def test_image_completion_passes_client_timeout(client):
+    """Image generate/edit must use Settings request_timeout, not a silent 10s default."""
+    client.config["request_timeout"] = 122
+    with (
+        patch("plugin.framework.client.llm_client.LlmClient._resolve_auth") as mock_auth,
+        patch("plugin.framework.client.llm_client.sync_request") as mock_sync,
+    ):
+        mock_auth.return_value = {"provider": "openai"}
+        mock_sync.return_value = {"data": []}
+        client.image_completion("Draw a cat", model="dall-e-3", width=1024, height=1024)
+        assert mock_sync.call_args.kwargs["timeout"] == 122
 
 
 def test_openrouter_shim_image(client):
@@ -1035,10 +1107,65 @@ def test_openrouter_shim_image(client):
         body = json.loads(kwargs["data"])
         assert body["prompt"] == "Draw a galaxy"
         assert body["model"] == "bytedance-seed/seedream-4.5"
-        assert body["size"] == "1024x1024"
         assert body["aspect_ratio"] == "1:1"
+        assert body["resolution"] == "1K"
+        assert "size" not in body
         assert body["n"] == 1
-        assert body["output_format"] == "webp"
+        assert body["output_format"] == "png"
+
+        client.image_completion("Draw a galaxy", model="bytedance-seed/seedream-4.5", width=2048, height=2048)
+        body = json.loads(mock_sync.call_args.kwargs["data"])
+        assert body["aspect_ratio"] == "1:1"
+        assert body["resolution"] == "2K"
+        assert "size" not in body
+
+
+def test_openrouter_shim_image_flux_klein_png_aspect_not_size(client):
+    """flux.2-klein-4b rejects webp and size+aspect_ratio pairs (create + img2img).
+
+    Hint with aspect_ratio plus resolution; pixel size is omitted so OpenRouter
+    does not 400 a mismatched pair. Gemini ignores size and needs those hints.
+    """
+    client.config["endpoint"] = "https://openrouter.ai/api"
+    with (
+        patch("plugin.framework.client.llm_client.LlmClient._resolve_auth") as mock_auth,
+        patch("plugin.framework.client.llm_client.sync_request") as mock_sync
+    ):
+        mock_auth.return_value = {"provider": "openrouter"}
+        mock_sync.return_value = {"data": [{"b64_json": "xyz"}]}
+
+        client.image_completion(
+            "Draw a galaxy",
+            model="black-forest-labs/flux.2-klein-4b",
+            width=1024,
+            height=576,
+        )
+
+        body = json.loads(mock_sync.call_args.kwargs["data"])
+        assert body["model"] == "black-forest-labs/flux.2-klein-4b"
+        assert body["aspect_ratio"] == "16:9"
+        assert body["resolution"] == "1K"
+        assert "size" not in body
+        assert body["output_format"] == "png"
+        assert "webp" not in json.dumps(body)
+
+        client.image_completion(
+            "Make it dusk",
+            model="black-forest-labs/flux.2-klein-4b",
+            width=1024,
+            height=1024,
+            source_image="abc123",
+        )
+
+        body = json.loads(mock_sync.call_args.kwargs["data"])
+        assert body["output_format"] == "png"
+        assert body["aspect_ratio"] == "1:1"
+        assert body["resolution"] == "1K"
+        assert "size" not in body
+        assert "image_url" not in body
+        assert body["input_references"] == [
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64,abc123"}}
+        ]
 
 
 def test_is_image_only_model(client):

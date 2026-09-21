@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: PACKAGE VERSION\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-09-04 14:15-0400\n"
+"POT-Creation-Date: 2026-09-14 16:20-0400\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: Chinese (Traditional) <LL@li.org>\n"
@@ -68,9 +68,28 @@ msgstr "找不到此控制項對應的 Notebook 儲存格。"
 msgid "Open a Writer document first."
 msgstr "請先開啟一份 Writer 文件。"
 
-#: plugin/notebook/writer_importer.py
+#: plugin/notebook/notebook_controls.py
 msgid "Run code cell"
 msgstr "執行程式碼儲存格"
+
+#: plugin/embeddings/search_ui.py
+msgid "just now"
+msgstr "剛剛"
+
+#: plugin/embeddings/search_ui.py
+#, python-brace-format
+msgid "{0}m ago"
+msgstr "{0} 分鐘前"
+
+#: plugin/embeddings/search_ui.py
+#, python-brace-format
+msgid "{0}h ago"
+msgstr "{0} 小時前"
+
+#: plugin/embeddings/search_ui.py
+#, python-brace-format
+msgid "{0}d ago"
+msgstr "{0} 天前"
 
 #: plugin/embeddings/search_ui.py
 msgid "Cache Status: No active document"
@@ -91,20 +110,6 @@ msgstr "快取狀態：未建立 (lancedb)"
 #: plugin/embeddings/search_ui.py
 msgid "Cache Status: Not built"
 msgstr "快取狀態：未建立"
-
-#: plugin/embeddings/search_ui.py
-msgid "just now"
-msgstr "剛剛"
-
-#: plugin/embeddings/search_ui.py
-#, python-brace-format
-msgid "{0}m ago"
-msgstr "{0} 分鐘前"
-
-#: plugin/embeddings/search_ui.py
-#, python-brace-format
-msgid "{0}h ago"
-msgstr "{0} 小時前"
 
 #: plugin/embeddings/search_ui.py
 #, python-brace-format
@@ -394,7 +399,8 @@ msgid "Status:"
 msgstr "狀態："
 
 #: plugin/calc/python/cell_editor_ui.py plugin/chatbot/panel_wiring.py
-#: plugin/scripting/editor_ui_strings.py plugin/xdl_strings.py
+#: plugin/chatbot/panel.py plugin/scripting/editor_ui_strings.py
+#: plugin/xdl_strings.py
 msgid "Ready"
 msgstr "準備就緒"
 
@@ -532,12 +538,12 @@ msgstr "已插入影像"
 #: plugin/calc/python/geometric_recalc.py
 #, python-format
 msgid ""
-"Geometric Recalc Order skipped sheet '%s': found %s or more Python cells "
-"(discovery cap). The sheet was left unchained so a partial list is not "
-"treated as complete."
+"Geometric Recalc Order skipped sheet '%(sheet)s': found %(cap)s or more "
+"Python cells (discovery cap). The sheet was left unchained so a partial list "
+"is not treated as complete."
 msgstr ""
-"幾何重新計算順序跳過了工作表 '%s'：發現 %s 個或更多的 Python 儲存格（發現上"
-"限）。該工作表未被鏈接，因此部分列表不會被視為完整。"
+"幾何重新計算順序已跳過工作表「%(sheet)s」：發現 %(cap)s 個或更多 Python 儲存"
+"格（探索上限）。該工作表未被鏈結，因此部分清單不會被視為完整。"
 
 #: plugin/calc/excel_py_convert/auto_open.py
 #, python-brace-format
@@ -1290,6 +1296,10 @@ msgid ""
 "[Model {0} does not support native audio. Please select an STT Model in "
 "Settings.]"
 msgstr "[模型 {0} 不支援原生音訊。請在設定中選擇 STT 模型。]"
+
+#: plugin/chatbot/panel.py
+msgid "[Peer send requires Chat mode on this sidebar.]"
+msgstr "[對等傳送需要在此側邊欄開啟聊天模式。]"
 
 #: plugin/chatbot/web_research_chat.py
 #, python-format
@@ -3066,6 +3076,19 @@ msgstr "Calc 試算表工具"
 
 msgid "Max Rows Display"
 msgstr "最大顯示行數"
+
+msgid "Cache Excel siblings as ODS"
+msgstr "將 Excel 同層檔案快取為 ODS"
+
+msgid ""
+"Convert sibling .xlsx/.xls to writeragent_ods_cache/ beside the folder so "
+"repeated DuckDB SQL reuses the ODS. Native .ods and the live workbook are "
+"never cached. Set calc.ods_cache_enabled false in writeragent.json to "
+"disable."
+msgstr ""
+"將同層的 .xlsx/.xls 轉換至資料夾旁的 writeragent_ods_cache/，以便重複的 "
+"DuckDB SQL 可以重複使用 ODS。原生 .ods 與即時活頁簿永遠不會被快取。若要停用，"
+"請在 writeragent.json 中將 calc.ods_cache_enabled 設為 false。"
 
 msgid "Sidebar"
 msgstr "側邊欄"

@@ -4,6 +4,8 @@ This document describes Draw/Impress tool organization, current implementation s
 
 > **Note**: Draw and Impress share the same UNO foundation. WriterAgent treats them as a unified domain with presentation-specific extensions.
 
+**Related:** [small-model steal advice (not a SKILL paste)](ppt-master-steal-for-small-models.md) · [LO-first M0′ probe results](impress-lo-first-m0-probe-results.md) (PR #788)
+
 ----
 
 ## 1. Architecture Overview
@@ -42,7 +44,10 @@ These tools are **always available** to the main agent for Draw/Impress document
 | `set_active_page` | `pages.py` | Drawing+Presentation | Switch current view to slide |
 | `read_slide_text` | `pages.py` | Drawing+Presentation | Extract text from all shapes on a page |
 | `get_presentation_info` | `pages.py` | Drawing+Presentation | Metadata: slide count, dimensions, masters |
-| `get_draw_tree` | `tree.py` | Drawing+Presentation | JSON DOM of shapes and layout hierarchy |
+| `list_designs` | `designs.py` | Drawing+Presentation | Enumerate shipped Impress `.otp` via PathSettings (no hardcoded install prefix). Each entry includes a short `look` vibe string from the template ZIP thumbnail (mood, accent hues, illustrated / graphic chrome) |
+| `apply_design` | `designs.py` | Drawing+Presentation | Restyle the **open** Impress deck: Hidden `.otp` master clone + assign-all (no system clipboard, no new window). Draw → not-Impress |
+| `get_draw_tree` | `tree.py` | Drawing+Presentation | JSON DOM of shapes and layout; `fillable` blanks + ControlShape value/state |
+| `get_image` | `writer/get_image.py` | Text+Drawing+Presentation | Vision: embedded graphic, selection, or `page=N` PNG of the rendered page. **`page` is 0-based.** Complements `get_draw_tree`; does not replace it. |
 | `list_placeholders` | `placeholders.py` | Presentation | List placeholder shapes (title, subtitle, body) |
 | `get_placeholder_text` | `placeholders.py` | Presentation | Get text from a placeholder |
 | `set_placeholder_text` | `placeholders.py` | Presentation | Set text in a placeholder |
@@ -55,7 +60,8 @@ These are available only via `delegate_to_specialized_draw_toolset`:
 | Tool | Domain | Module | Purpose | Services |
 |------|--------|--------|---------|---------|
 | `shape_summary` | `shapes` | `draw/shapes.py` | Summary of shapes on page | Drawing+Presentation |
-| `shape_upsert` | `shapes` | `draw/shapes.py` | Create or edit shapes (1/100mm coordinates) | Drawing+Presentation |
+| `shape_upsert` | `shapes` | `draw/shapes.py` | Create or edit shapes (1/100mm); edit by **name** or index | Drawing+Presentation |
+| `fill_draw_fields` | `shapes` | `draw/field_fill.py` | Batch-fill paper-form blanks / ControlShape values by name, index, or `label_hint` | Drawing+Presentation |
 | `shape_delete` | `shapes` | `draw/shapes.py` | Delete a shape by index | Drawing+Presentation |
 | `shape_connect` | `shapes` | `draw/shapes.py` | Connect two shapes with a connector line | Drawing+Presentation |
 | `shape_group` | `shapes` | `draw/shapes.py` | Group multiple shapes | Drawing+Presentation |
@@ -63,7 +69,7 @@ These are available only via `delegate_to_specialized_draw_toolset`:
 | `distribute_shapes` | `shapes` | `draw/shapes.py` | Evenly space shapes along an axis | Drawing+Presentation |
 | `create_diagram` | `shapes` | `draw/shapes.py` | Batch nodes + connectors (flowchart) | Drawing+Presentation |
 | `image_insert` / `image_list` / `image_delete` / `image_generate` | `images` | `writer/images/images.py` | Same image tools as Writer/Calc; Draw/Impress uses millimetres (`page`, `x_mm`, `y_mm`) | Drawing+Presentation |
-| `table_insert` / `table_list` / `table_get_cells` / `table_set_cell` / `manage_table_structure` | `tables` | `writer/specialized/tables.py` + `draw/tables.py` | Same names as Writer; Draw uses TableShape | Drawing+Presentation |
+| `table_insert` / `table_delete` / `table_list` / `table_get_cells` / `table_set_cell` / `manage_table_structure` | `tables` | `writer/specialized/tables.py` + `draw/tables.py` | Same names as Writer; Draw uses TableShape | Drawing+Presentation |
 | `get_slide_transition` | `slide_transitions` | `draw/transitions.py` | Get transition effect/speed/duration | Presentation |
 | `set_slide_transition` | `slide_transitions` | `draw/transitions.py` | Set transition effect/speed/duration | Presentation |
 | `get_slide_layout` | `slide_layouts` | `draw/transitions.py` | Get current slide layout | Presentation |
@@ -76,7 +82,7 @@ These are available only via `delegate_to_specialized_draw_toolset`:
 | `get_headers_footers` | `headers_footers` | `draw/headers_footers.py` | Read slide/master header and footer settings (Impress) | Presentation |
 | `set_headers_footers` | `headers_footers` | `draw/headers_footers.py` | Update slide/master header and footer settings (Impress) | Presentation |
 | `manage_charts` | `charts` | `draw/charts.py` | Unified charts CRUD | Drawing+Presentation |
-| `form_*` (6 tools) | `forms` | `writer/forms.py` | Form controls | Drawing+Presentation+Spreadsheet+Text |
+| `form_*` (6 tools) | `forms` | `writer/specialized/forms.py` | Live ControlShape widgets (name-addressable; checkbox/radio State) | Drawing+Presentation+Spreadsheet+Text |
 | `insert_math` | `math` | `math_insert.py` | Insert LibreOffice Math (OLE) from LaTeX or MathML | Drawing+Presentation |
 | `WebResearchTool` | `web_research` | `web_research.py` | Web search for context | All |
 
@@ -143,7 +149,7 @@ The existing sidebar doesn't need new UI elements; the "Insert Image" action dyn
 | Domain | Status | Tools | Notes |
 |--------|--------|-------|-------|
 | **Shapes (core)** | ✅ Complete | 11 tools | Create, edit, delete, connect, group, summary, tree, align, distribute, graphic, diagram |
-| **Pages/Slides (core)** | ✅ Complete | 7 tools | List, add, delete, duplicate, move, rename, read text |
+| **Pages/Slides (core)** | ✅ Complete | 7 tools | List, add (inherits assigned master), delete, duplicate, move, rename, read text |
 | **Master Slides (specialized)** | ✅ Complete | 3 tools | `slide_masters`: list, get, set |
 | **Speaker Notes (specialized)** | ✅ Complete | 2 tools | `speaker_notes`: get, set (Impress only — Draw has no speaker notes) |
 | **Placeholders (core)** | ✅ Complete | 3 tools | List, get text, set text (Impress only) |
@@ -151,7 +157,7 @@ The existing sidebar doesn't need new UI elements; the "Insert Image" action dyn
 | **Charts (specialized)** | ✅ Complete | 5 tools | Full CRUD + info |
 | **Tree Structure (core)** | ✅ Complete | 1 tool | JSON DOM for LLM understanding |
 | **Web Research (specialized)** | ✅ Complete | 1 tool | Delegated search |
-| **Forms (specialized)** | ✅ Complete | 6 tools | Form controls (shared with Writer) |
+| **Forms (specialized)** | ✅ ControlShapes + paper-form fill | 6 `form_*` + `fill_draw_fields` | Two problems — see [§3.1](#31-controlshapes-vs-paper-form-fill) |
 | **Math (specialized)** | partial | 1 tool (`insert_math`) | LaTeX/MathML → OLE Math on slide; **bounding-box sizing still unreliable** — see [§2.3](#23-insert_math-math-domain) |
 | **Animations** | ❌ Missing | — | Slide + shape-level animations |
 | **Layers** | ❌ Missing | — | Draw layer management |
@@ -159,16 +165,46 @@ The existing sidebar doesn't need new UI elements; the "Insert Image" action dyn
 | **Media (Audio/Video)** | ❌ Missing | — | Insert, control |
 | **Custom Shows** | ❌ Missing | — | Non-linear presentation paths |
 | **Timings** | ❌ Missing | — | Rehearse, auto-advance |
-| **Themes** | ❌ Missing | — | Color/font schemes |
-| **Templates** | ❌ Missing | — | Document templates |
+| **Themes** | ❌ No Theme API | — | M0′: master `XTheme.getColorSet` is a palette hook, **not** apply-design. No list/apply theme wrappers. See [M0′ results](impress-lo-first-m0-probe-results.md). |
+| **Templates / design** | ✅ current-doc only | `list_designs`, `apply_design` | `apply_design` Hidden-opens the listed `.otp`, **clones** its master into the **open** deck (`createInstance` + add + Size/Position after add; Graphic via `Graphic`), then assigns `page.MasterPage` to every slide. Does **not** open a new presentation (a second Impress window would spawn a fresh sidebar agent). Does **not** use the system clipboard — headed #791 DiaMode Paste pulled desktop junk and imported no master. Create-from-template (`loadComponentFromURL` + `AsTemplate`) remains an **internal/test helper** (`create_presentation_from_design`); start from a blank deck or File→Templates, then `list_designs` → `apply_design`. **`list_designs` adds a short `look` string** derived from the `.otp` ZIP (`Thumbnails/thumbnail.png`, `Pictures/`, `styles.xml` fallback) so small models can pick dark/tech vs candy/illustrated. Do **not** use `.uno:PresentationLayout` PropertyValues (SDI empty; silent no-op) or DiaMode Copy/Paste. Draw → not-Impress. |
 | **Headers/Footers (specialized)** | ✅ Complete | 2 tools | `get_headers_footers`, `set_headers_footers` (Impress only) |
-| **Tables** | ✅ | same names as Writer | `table_insert`, list/get/set, `manage_table_structure` on TableShape |
+| **Tables** | ✅ | same names as Writer | `table_insert`, `table_delete`, list/get/set, `manage_table_structure` on TableShape |
 | **3D Shapes** | ❌ Missing | — | 3D objects and scenes |
 | **Guides/Grid** | ❌ Missing | — | Snap settings, custom guides |
 | **OCR** | ❌ Missing | — | Text from images |
 | **Export** | ❌ Missing | — | PDF, image, video export |
 | **Macros** | ❌ Missing | — | Automation scripts |
 | **Versioning** | ❌ Missing | — | Document history |
+
+----
+
+## 3. Form fill — ControlShapes vs paper forms
+
+These are **two different problems**. The old “Forms ✅ Complete” row only covered interactive widgets.
+
+| Kind | What it is | How to fill | Do not |
+|------|------------|-------------|--------|
+| **A. Paper form** | Empty / near-empty TextShapes (and other text-capable boxes) next to labels. Typical when LibreOffice opens a PDF as editable Draw text/shapes. | `get_draw_tree` → `fill_draw_fields` (batch) or `shape_upsert` `action=edit` by **name** | Do not create new ControlShapes unless the user asked. Do not claim PDF/AcroForm fill. |
+| **B. Live ControlShapes** | `com.sun.star.drawing.ControlShape` + `com.sun.star.form.component.*` | Shared `form_*` (list/edit/delete by **name** or draw-page index; checkbox/radio `State`) | Index-only addressing — non-controls between widgets shift the draw-page index. |
+| **C. PDF AcroForm** | Live PDF form widgets | **Out of scope.** Not a product API. | Do not add AcroForm bindings. |
+
+**Staging fact, not a product claim:** File → Open on a PDF often imports as an editable Draw stand-in. That is harness/eval staging (see [peer messaging §4.7](../chat/peer-messaging.md#47-gmp-staging--not-a-pdf-product)). WriterAgent does **not** edit PDFs and does **not** expose an AcroForm API.
+
+### 3.1 ControlShapes vs paper-form fill
+
+**Slice 1 — paper-form (`plugin/draw/tree.py`, `field_fill.py`, `shapes.py`)**
+
+- `get_draw_tree` marks empty / near-empty text-capable shapes with `fillable=true`, always includes `name` + `geometry` (bbox) on those nodes, and adds `label_hint`: nearest sibling text **to the left** (vertically aligned) or **above** (horizontally aligned). Left wins a distance tie. Slack is 200 units (2 mm) so PDF→Draw imports that barely overlap still match. Heuristic, not a reading-order parser.
+- ControlShape nodes include `control.type`, `control.name`, and current `text` / `state` / `selected` so the main agent can see widgets without a forms delegation.
+- `shape_upsert` edit accepts **name or index**. Create can set `Name` so later fills stay stable.
+- `fill_draw_fields` (`domain=shapes`) takes `fields: [{name\|index\|label_hint, value}, …]` and optional `page`. Resolves via the tree, then `setString` (or ControlShape `Text` / `State`). Returns per-field ok/fail.
+
+**Slice 2 — live widgets (`plugin/writer/specialized/forms.py`)**
+
+- Descriptions name Writer, Calc, **and Draw/Impress**.
+- `form_list_controls` / `form_edit_control` / `form_delete_control` address by **name** (index remains). Optional `page` on Draw/Impress.
+- List/edit expose checkbox/radio **State** (0/1/2). When `index` is omitted, `name` is the lookup; `new_name` renames. `index` + `name` still means rename (older callers).
+- Shared registration stays `ToolWriterFormBase` ∪ `ToolDrawFormBase`. No Draw-only fork.
 
 ----
 
@@ -198,7 +234,7 @@ Core **placeholders** remain on the default list (`list_placeholders`, `get_plac
 Some tools are implemented in shared modules but work with Draw/Impress:
 
 - **Charts** (`plugin/draw/charts.py`): Chart tools work across all document types that support charts
-- **Forms** (`writer/forms.py`): Form tools inherit from `ToolDrawFormBase` (`plugin/draw/base.py`) and work across document types that support form controls
+- **Forms** (`plugin/writer/specialized/forms.py`): Live ControlShape tools inherit from `ToolWriterFormBase` ∪ `ToolDrawFormBase` and work across Writer/Calc/Draw/Impress. Paper-form blanks (empty TextShapes) are a different path — `get_draw_tree` + `fill_draw_fields` / `shape_upsert` — see [§3.1](#31-controlshapes-vs-paper-form-fill).
 
 > This document focuses on Draw/Impress-specific usage of these shared tools.
 
@@ -363,9 +399,9 @@ Use the existing Writer/Calc `image_*` tools (`domain="images"`). On Draw/Impres
 
 | Domain | Tools | Use Case |
 |--------|-------|---------|
-| `shapes` | `shape_upsert`, `create_diagram`, `align_shapes`, `distribute_shapes`, `shape_connect`, `shape_group` | Vector graphics & flowcharts |
-| `images` | `image_insert`, `image_list`, `image_delete`, `image_generate` | Images on slides (millimetres) |
-| `tables` | `table_insert`, `table_list`, `table_get_cells`, `table_set_cell`, `manage_table_structure` | Slide tables |
+| `shapes` | `shape_upsert`, `fill_draw_fields`, `create_diagram`, `align_shapes`, `distribute_shapes`, `shape_connect`, `shape_group` | Vector graphics, flowcharts, paper-form fill |
+| `images` | `image_insert`, `image_list`, `image_delete`, `image_generate` (`source_image='selection'` edits in place) | Images on slides (millimetres) |
+| `tables` | `table_insert`, `table_delete`, `table_list`, `table_get_cells`, `table_set_cell`, `manage_table_structure` | Slide tables |
 | `animations` | `get_animations`, `set_animations`, `add_animation` | Element entrance/motion builds |
 | `slide_transitions` | `get_slide_transition`, `set_slide_transition` | Slide-to-slide advance effects |
 | `slide_layouts` | `get_slide_layout`, `set_slide_layout` | Impress slide layouts |
@@ -389,8 +425,8 @@ Use the existing Writer/Calc `image_*` tools (`domain="images"`). On Draw/Impres
 - **OCR**: Text recognition from inserted images
 - **Custom Shows**: Non-linear presentation paths
 - **Presenter Console**: Presenter view with notes timer
-- **Themes**: Color schemes, font schemes
-- **Templates**: Document template management
+- **Themes**: Color schemes, font schemes — **no Theme apply API** (M0′). Look = applied `.otp` + master.
+- **Templates**: Current-doc `.otp` merge remains an LO wall; new-doc create-from-template shipped as M1′.
 - **Macros**: Recording and execution
 - **Versioning**: Document history and rollback
 - **3D Objects**: 3D shape creation and manipulation
@@ -456,10 +492,12 @@ Use the existing Writer/Calc `image_*` tools (`domain="images"`). On Draw/Impres
 - Test **edge cases**: deleting last slide, grouping all shapes, etc.
 
 **Recommended test additions:**
-- `tests/draw/test_draw_uno.py` - Draw/Impress UNO shape and page coverage
+- `tests/draw/test_draw_uno.py` - Draw/Impress UNO shape and page coverage (tree blanks, name-based `shape_upsert`)
+- `tests/draw/test_tree.py` / `tests/draw/test_field_fill.py` - blank detection, label hints, `fill_draw_fields` resolve
 - `tests/draw/test_draw_specialized_tiers.py` - Specialized tier registration
-- `tests/draw/test_draw_forms_uno.py` - Forms
+- `tests/draw/test_draw_forms_uno.py` - ControlShapes (list/edit by name, checkbox State) + `fill_draw_fields`
 - `tests/draw/test_draw_headers_footers.py` - Headers/footers
+- `tests/draw/test_designs.py` / `test_designs_uno.py` - PathSettings list, current-doc Metropolis clone+assign, internal create-from-template helper
 
 ----
 
@@ -507,4 +545,5 @@ This pattern could be extended to other domains.
 - [LibreOffice API Reference — Presentation](https://api.libreoffice.org/docs/idl/ref/interfacecom_1_1star_1_1presentation_1_1XPresentation.html)
 - [LibreOffice Draw/Impress UNO Examples](https://wiki.documentfoundation.org/Documentation/DevGuide/Drawings/Tutorial)
 - [Writer specialized toolsets](../writer/specialized-toolsets.md) — Architecture reference
+- [Peer messaging](../chat/peer-messaging.md) — Writer ↔ Calc ↔ Draw async `send_peer_work / send_peer_result`; Draw is a v1 peer, not a mega-agent tool list
 - [AGENTS.md](../../AGENTS.md) — Project overview

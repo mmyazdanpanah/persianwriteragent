@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: PACKAGE VERSION\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-09-04 14:15-0400\n"
+"POT-Creation-Date: 2026-09-14 16:20-0400\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: Indonesian <LL@li.org>\n"
@@ -72,9 +72,28 @@ msgstr "Tidak dapat menemukan sel notebook untuk kontrol ini."
 msgid "Open a Writer document first."
 msgstr "Buka dokumen Writer terlebih dahulu."
 
-#: plugin/notebook/writer_importer.py
+#: plugin/notebook/notebook_controls.py
 msgid "Run code cell"
 msgstr "Jalankan sel kode"
+
+#: plugin/embeddings/search_ui.py
+msgid "just now"
+msgstr "baru saja"
+
+#: plugin/embeddings/search_ui.py
+#, python-brace-format
+msgid "{0}m ago"
+msgstr "{0}m yang lalu"
+
+#: plugin/embeddings/search_ui.py
+#, python-brace-format
+msgid "{0}h ago"
+msgstr "{0}j yang lalu"
+
+#: plugin/embeddings/search_ui.py
+#, python-brace-format
+msgid "{0}d ago"
+msgstr "{0} hari yang lalu"
 
 #: plugin/embeddings/search_ui.py
 msgid "Cache Status: No active document"
@@ -95,20 +114,6 @@ msgstr "Status Cache: Belum dibangun (lancedb)"
 #: plugin/embeddings/search_ui.py
 msgid "Cache Status: Not built"
 msgstr "Status Cache: Belum dibangun"
-
-#: plugin/embeddings/search_ui.py
-msgid "just now"
-msgstr "baru saja"
-
-#: plugin/embeddings/search_ui.py
-#, python-brace-format
-msgid "{0}m ago"
-msgstr "{0}m yang lalu"
-
-#: plugin/embeddings/search_ui.py
-#, python-brace-format
-msgid "{0}h ago"
-msgstr "{0}j yang lalu"
 
 #: plugin/embeddings/search_ui.py
 #, python-brace-format
@@ -419,7 +424,8 @@ msgid "Status:"
 msgstr "Status:"
 
 #: plugin/calc/python/cell_editor_ui.py plugin/chatbot/panel_wiring.py
-#: plugin/scripting/editor_ui_strings.py plugin/xdl_strings.py
+#: plugin/chatbot/panel.py plugin/scripting/editor_ui_strings.py
+#: plugin/xdl_strings.py
 msgid "Ready"
 msgstr "Siap"
 
@@ -561,13 +567,13 @@ msgstr "Gambar disisipkan"
 #: plugin/calc/python/geometric_recalc.py
 #, python-format
 msgid ""
-"Geometric Recalc Order skipped sheet '%s': found %s or more Python cells "
-"(discovery cap). The sheet was left unchained so a partial list is not "
-"treated as complete."
+"Geometric Recalc Order skipped sheet '%(sheet)s': found %(cap)s or more "
+"Python cells (discovery cap). The sheet was left unchained so a partial list "
+"is not treated as complete."
 msgstr ""
-"Urutan Hitung Ulang Geometris melewati lembar '%s': ditemukan %s sel Python "
-"atau lebih (batas penemuan). Lembar dibiarkan tanpa rantai agar daftar "
-"parsial tidak dianggap lengkap."
+"Urutan Hitung Ulang Geometris melewati lembar '%(sheet)s': ditemukan %(cap)s "
+"sel Python atau lebih (batas penemuan). Lembar dibiarkan tidak berantai "
+"sehingga daftar parsial tidak dianggap lengkap."
 
 #: plugin/calc/excel_py_convert/auto_open.py
 #, python-brace-format
@@ -1329,6 +1335,10 @@ msgid ""
 "Settings.]"
 msgstr ""
 "[Model {0} tidak mendukung audio asli. Harap pilih Model STT di Pengaturan.]"
+
+#: plugin/chatbot/panel.py
+msgid "[Peer send requires Chat mode on this sidebar.]"
+msgstr "[Pengiriman rekan memerlukan mode Obrolan pada bilah sisi ini.]"
 
 #: plugin/chatbot/web_research_chat.py
 #, python-format
@@ -3147,6 +3157,20 @@ msgstr "Alat lembar kerja Calc"
 
 msgid "Max Rows Display"
 msgstr "Jumlah Baris Maksimum"
+
+msgid "Cache Excel siblings as ODS"
+msgstr "Singgah Excel saudara sebagai ODS"
+
+msgid ""
+"Convert sibling .xlsx/.xls to writeragent_ods_cache/ beside the folder so "
+"repeated DuckDB SQL reuses the ODS. Native .ods and the live workbook are "
+"never cached. Set calc.ods_cache_enabled false in writeragent.json to "
+"disable."
+msgstr ""
+"Konversi .xlsx/.xls saudara ke writeragent_ods_cache/ di samping folder agar "
+"SQL DuckDB berulang menggunakan kembali ODS tersebut. .ods asli dan buku "
+"kerja langsung tidak pernah disinggah. Atur calc.ods_cache_enabled false di "
+"writeragent.json untuk menonaktifkan."
 
 msgid "Sidebar"
 msgstr "Bilah Samping"

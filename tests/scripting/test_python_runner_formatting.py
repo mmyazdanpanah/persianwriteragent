@@ -7,7 +7,7 @@
 # (at your option) any later version.
 
 import unittest
-from plugin.scripting.python_runner import format_result_for_writer, format_elapsed_time
+from plugin.scripting.python_runner import format_result_for_writer, format_elapsed_time, is_shape_tool_status_result
 
 class TestPythonRunnerFormatting(unittest.TestCase):
     def test_format_elapsed_time(self):
@@ -45,6 +45,27 @@ class TestPythonRunnerFormatting(unittest.TestCase):
     def test_format_zero(self):
         self.assertEqual(format_result_for_writer(0), "0")
         self.assertEqual(format_result_for_writer(0.0), "0.0")
+
+    def test_is_shape_tool_status_result(self):
+        self.assertTrue(is_shape_tool_status_result({
+            "status": "ok",
+            "message": "Created star24",
+            "index": 0,
+            "page": 0,
+            "shape_count_after": 1,
+            "geometry_applied": True,
+        }))
+        self.assertTrue(is_shape_tool_status_result({
+            "status": "ok",
+            "message": "Shape updated",
+            "page": 0,
+            "index": 1,
+            "name": "Box1",
+        }))
+        self.assertFalse(is_shape_tool_status_result({"title": "Hello", "summary": "world"}))
+        self.assertFalse(is_shape_tool_status_result("Created star24"))
+        self.assertFalse(is_shape_tool_status_result(None))
+
 
     def test_format_list_of_lists(self):
         data = [["A", "B"], [1, 2]]
@@ -196,6 +217,28 @@ def test_insert_result_into_calc_exception_shows_msgbox():
         insert_result_into_calc(doc, MagicMock(), 1)
     box.assert_called_once()
     assert "Failed to insert result into Calc" in box.call_args[0][2]
+
+
+
+def test_insert_result_into_calc_skips_shape_status_dict():
+    from unittest.mock import MagicMock, patch
+    from plugin.scripting.python_runner import insert_result_into_calc
+
+    doc = MagicMock()
+    with patch("plugin.calc.rich_html.insert_cell_html_rich") as rich:
+        insert_result_into_calc(
+            doc,
+            MagicMock(),
+            {
+                "status": "ok",
+                "message": "Created star24",
+                "index": 0,
+                "page": 0,
+                "shape_count_after": 1,
+                "geometry_applied": True,
+            },
+        )
+    rich.assert_not_called()
 
 if __name__ == "__main__":
     unittest.main()

@@ -17,6 +17,7 @@ from scripts.prompt_optimization.eval_prompts import (
     get_calc_eval_chat_system_prompt,
     get_draw_eval_chat_system_prompt,
     get_writer_eval_chat_system_prompt,
+    replace_prompt_slice,
 )
 
 
@@ -61,14 +62,19 @@ _CALC_HAS_HEADER = (
     "When row 1 is labels, pass has_header=true — otherwise labels sort as values."
 )
 _CALC_RELATIVE_FORMULA = (
-    "Do write each row's formula with that row's cells because copying one "
-    "prototype pins cell refs to the first row (e.g. Banana row uses B3, not a "
-    "stamped B2)."
+    "Write one ordinary formula into a 1-column (or 1-row) destination — "
+    "write_formula_range fill-down adjusts relative refs ($ stays absolute)."
 )
 _SORT_RANGE_HAS_HEADER = (
     "Do pass has_header=true when row 1 is labels because otherwise labels "
     "sort as values."
 )
+
+
+def test_replace_prompt_slice_swaps_once_and_ignores_missing() -> None:
+    assert replace_prompt_slice("aa CORE bb CORE", "CORE", "NEW") == "aa NEW bb CORE"
+    assert replace_prompt_slice("aa bb", "CORE", "NEW") == "aa bb"
+    assert replace_prompt_slice("aa CORE", "CORE", "CORE") == "aa CORE"
 
 
 def test_calc_eval_prompt_pins_sort_and_relative_formula_rules() -> None:
@@ -110,6 +116,17 @@ def test_calc_tool_descriptions_pin_sort_has_header_not_tax() -> None:
     assert "Multi-key sorts are multiple calls" in sort_desc
     assert "two stable one-column passes" in sort_desc
     assert _SORT_RANGE_HAS_HEADER in sort_desc
+    assert "Do call sort_range to reorder rows" in sort_desc
+    assert "not rewrite the block with write_formula_range" in sort_desc
+    assert "Pick sort_column for the metric" in sort_desc
+    assert "ascending=false when largest values should come first" in sort_desc
     assert SortRange.parameters["required"] == ["range", "has_header"]
     assert "true when row 1 is labels" in SortRange.parameters["properties"]["has_header"]["description"]
     assert "false only for a headerless block" in SortRange.parameters["properties"]["has_header"]["description"]
+    assert "0 = leftmost" in SortRange.parameters["properties"]["sort_column"]["description"]
+    assert "largest/highest first" in SortRange.parameters["properties"]["ascending"]["description"]
+    values = WriteCellRange.parameters["properties"]["values"]["description"]
+    assert "fill-down/across" in values
+    assert "pins every row to the first ref" in values
+    assert "Banana" not in values
+    assert "stamped B2" not in values

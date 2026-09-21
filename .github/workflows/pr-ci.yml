@@ -38,9 +38,13 @@ jobs:
   test:
     name: ${{ inputs.test_mock_sidebar == true && format('Mock LLM Sidebar ({0})', matrix.os) || format('Test & Typecheck ({0})', matrix.os) }}
     runs-on: ${{ matrix.os }}
-    # 30 is the budget that cancelled 33447705893 after the xdist replace wedge.
-    # Debug runs get 40 so dump + artifact upload still run after a 25-min test step.
-    timeout-minutes: ${{ inputs.test_mock_sidebar == true && 60 || (inputs.ci_debug == true && 40 || 30) }}
+    # Ubuntu/macOS: 30 (40 if ci_debug) after the 25-min test step.
+    # 30 cancelled 33447705893 after the xdist replace wedge.
+    # Windows leftover_open=0 + impress recycles no longer fit in 25m
+    # (GHA 35470191616 timed out mid ops_uno after a real format_uno fail).
+    # Windows test step is 40; job 50 (55 if ci_debug) so dump/artifacts
+    # and LibrePy/Harper packaging can still run.
+    timeout-minutes: ${{ inputs.test_mock_sidebar == true && 60 || (matrix.os == 'windows-latest' && (inputs.ci_debug == true && 55 || 50) || (inputs.ci_debug == true && 40 || 30)) }}
     strategy:
       fail-fast: false
       matrix:
@@ -72,6 +76,12 @@ jobs:
       - name: Install LibreOffice and system tools (Ubuntu)
         if: runner.os == 'Linux'
         run: |
+          # ubuntu-latest ships Chrome's apt source. Chrome's Packages.gz
+          # Hash-Sum-mismatches periodically (PR CI 34384169659) and fails
+          # this step before LibreOffice. This job never installs from that repo.
+          sudo rm -f /etc/apt/sources.list.d/google-chrome.list \
+                     /etc/apt/sources.list.d/google-chrome.sources \
+                     /etc/apt/sources.list.d/google.list
           sudo add-apt-repository -y ppa:libreoffice/ppa
           sudo apt-get update
           # libreoffice-dev ships unoidl-write; make build-core / rdb-core needs it.
@@ -139,7 +149,11 @@ jobs:
 
       - name: Install Python dependencies
         run: |
-          uv sync --dev
+          # Lockfile is authoritative (uv.lock is tracked). Unfrozen sync pulled
+          # pint 0.26 the day it shipped (2026-09-10) and mypy
+          # (python_version=3.11) died on PEP 695 syntax before any UNO test
+          # (GHA 34520496629 / 34520753637).
+          uv sync --frozen --dev
 
       - name: Prepare build artifacts (manifest, vendor, translations)
         run: |
@@ -168,7 +182,10 @@ jobs:
 
       - name: Run tests (Pytest + UNO)
         if: ${{ inputs.test_mock_sidebar != true }}
-        timeout-minutes: 25
+        # Ubuntu/macOS stay at 25. Windows UNO after leftover_open=0 +
+        # impress recycles exceeded 25m (GHA 35470191616; last test had
+        # returned — duration blow-up, not a single hung test).
+        timeout-minutes: ${{ matrix.os == 'windows-latest' && 40 || 25 }}
         run: |
           if [ "${{ inputs.pytest_serial }}" = "true" ]; then
             export PYTEST_WORKERS=0

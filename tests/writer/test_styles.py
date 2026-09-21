@@ -15,6 +15,7 @@
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 import pytest
 from unittest.mock import MagicMock, patch
+from plugin.writer.page import PageGetStyleProperties
 from plugin.writer.styles import StyleList, StyleGetInfo, ApplyStyle, StyleCreate, StyleImport, StyleUpdate
 from plugin.tests.testing_utils import TestingFactory, WriterDocStub
 
@@ -84,7 +85,10 @@ def test_list_styles_filtering():
     res = tool.execute(mock_ctx, family="")
     assert "ParagraphStyles" in res["families"]
     assert "CharacterStyles" in res["families"]
-    assert "PageStyles" not in res["families"]
+    # PageStyles is reported: the page tools take a page-style NAME, and a converted .docx rarely
+    # uses "Standard" — without this the only way to learn the real names was to guess and read
+    # them off the error message.
+    assert "PageStyles" in res["families"]
 
     res = tool.execute(mock_ctx, family="ParagraphStyles")
     assert res["status"] == "ok"
@@ -138,6 +142,94 @@ def test_get_style_info():
     assert res["is_in_use"] is True
 
 
+def test_get_style_info_para_adjust_is_word():
+    """Inspect must use the same ParaAdjust words as style_update."""
+    style = create_mock_style("Text body", is_in_use=True)
+    props = {
+        "DisplayName": "Text body",
+        "IsPhysical": True,
+        "IsHidden": False,
+        "ParentStyle": "Default",
+        "Category": 0,
+        "ParaAdjust": 2,
+    }
+    style.getPropertyValue.side_effect = lambda p: props.get(p)
+    style.getParentStyle.return_value = "Default"
+    family = _style_family({"Text body": style})
+    mock_ctx = _ctx_with_families(ParagraphStyles=family)
+
+    res = StyleGetInfo().execute(mock_ctx, style="Text body", family="ParagraphStyles")
+
+    assert res["status"] == "ok"
+    assert res["ParaAdjust"] == "justify"
+
+
+def _page_style_for_info():
+    """Page-style mock with the UNO properties get_page_style_properties reads."""
+    style = MagicMock()
+    props = {
+        "Width": 21000,
+        "Height": 29700,
+        "IsLandscape": False,
+        "LeftMargin": 2000,
+        "RightMargin": 2000,
+        "TopMargin": 2500,
+        "BottomMargin": 2000,
+        "GutterMargin": 0,
+        "HeaderIsOn": True,
+        "FooterIsOn": False,
+        "HeaderIsShared": True,
+        "FooterIsShared": True,
+        "HeaderHeight": 500,
+        "FooterHeight": 500,
+        "HeaderBodyDistance": 500,
+        "FooterBodyDistance": 500,
+        "BackColor": 16777215,
+        "BackTransparent": True,
+        "NumberingType": 4,
+        "FootnoteHeight": 0,
+        "RegisterParagraphStyle": "",
+        "FirstIsShared": False,
+        "PageStyleLayout": MagicMock(value=0),
+    }
+    style.getPropertyValue.side_effect = lambda n: props[n]
+    return style
+
+
+def test_get_style_info_page_styles_returns_page_properties():
+    """style_get_info(PageStyles) must answer in-process, not error-bounce to the page tool."""
+    style = _page_style_for_info()
+    mock_ctx = _ctx_with_families(PageStyles=_style_family({"Standard": style}))
+
+    res = StyleGetInfo().execute(mock_ctx, style="Standard", family="PageStyles")
+
+    assert res["status"] == "ok"
+    assert res["family"] == "PageStyles"
+    assert res["properties"]["left_margin_mm"] == 20.0
+    assert res["properties"]["top_margin_mm"] == 25.0
+    assert res["properties"]["header_is_on"] is True
+    assert res["properties"]["footer_is_on"] is False
+    assert res["properties"]["first_is_shared"] is False
+    page = PageGetStyleProperties().execute(mock_ctx, style="Standard")
+    assert page["status"] == "ok"
+    assert page["properties"] == res["properties"]
+
+
+def test_apply_style_clear_direct_schema_default_is_style_props():
+    """Small models read the schema; default must be the house-font-wins value."""
+    schema = ApplyStyle.parameters["properties"]["clear_direct"]
+    assert schema["default"] == "style_props"
+    assert schema["enum"] == ["none", "style_props", "all"]
+
+
+def test_resolve_clear_direct_defaults():
+    assert ApplyStyle._resolve_clear_direct("ParagraphStyles", None) == "style_props"
+    assert ApplyStyle._resolve_clear_direct("ParagraphStyles", "") == "style_props"
+    assert ApplyStyle._resolve_clear_direct("ParagraphStyles", "none") == "none"
+    assert ApplyStyle._resolve_clear_direct("CharacterStyles", None) == "none"
+    assert ApplyStyle._resolve_clear_direct("CharacterStyles", "all") == "all"
+
+
 @patch("plugin.writer.styles.apply_paragraph_style_preserving_direct_char")
 @patch("plugin.writer.styles.resolve_target_cursor")
 def test_apply_style_paragraph(mock_resolve, mock_preserve, mock_ctx):
@@ -149,8 +241,107 @@ def test_apply_style_paragraph(mock_resolve, mock_preserve, mock_ctx):
 
     assert res["status"] == "ok"
     assert res["family"] == "ParagraphStyles"
-    mock_preserve.assert_called_once_with(mock_ctx.doc, cursor, "Heading 1")
+    mock_preserve.assert_called_once_with(mock_ctx.doc, cursor, "Heading 1", "style_props")
     cursor.setPropertyValue.assert_not_called()
+
+
+@patch("plugin.writer.styles.apply_paragraph_style_preserving_direct_char")
+@patch("plugin.writer.styles.resolve_target_cursor")
+def test_apply_style_clear_direct_is_forwarded(mock_resolve, mock_preserve, mock_ctx):
+    """clear_direct reaches the apply helper, which decides what happens to direct formatting."""
+    mock_resolve.return_value = MagicMock()
+    mock_preserve.return_value = {"direct_formatting": "cleared", "clear_direct": "style_props",
+                                  "removed_char_overrides": {"CharFontName": "Times New Roman"},
+                                  "cleared_char_properties": ["CharFontName", "CharHeight"],
+                                  "cleared_paragraph_properties": ["ParaLeftMargin"]}
+
+    res = ApplyStyle().execute(mock_ctx, style="Heading 1", target="selection", clear_direct="style_props")
+
+    assert res["status"] == "ok"
+    assert mock_preserve.call_args[0][3] == "style_props"
+    assert res["removed_char_overrides"] == {"CharFontName": "Times New Roman"}
+    assert res["cleared_char_properties"] == ["CharFontName", "CharHeight"]
+    assert res["cleared_paragraph_properties"] == ["ParaLeftMargin"]
+    assert "hint" not in res  # nothing was preserved -> nothing to warn about
+
+
+@patch("plugin.writer.styles.apply_paragraph_style_preserving_direct_char")
+@patch("plugin.writer.styles.resolve_target_cursor")
+def test_apply_style_explicit_none_reports_overrides_without_retry_hint(mock_resolve, mock_preserve, mock_ctx):
+    """clear_direct='none' still echoes what was kept. No retry-with-style_props hint: that
+    dance was for the old default=none no-op; default already shows the house font."""
+    mock_resolve.return_value = MagicMock()
+    mock_preserve.return_value = {"direct_formatting": "preserved", "clear_direct": "none",
+                                  "preserved_char_overrides": {"CharFontName": "Times New Roman", "CharHeight": 12.0}}
+
+    res = ApplyStyle().execute(mock_ctx, style="Standard", target="selection", clear_direct="none")
+
+    assert res["preserved_char_overrides"]["CharHeight"] == 12.0
+    assert "hint" not in res
+
+
+@patch("plugin.writer.styles.apply_paragraph_style_preserving_direct_char")
+@patch("plugin.writer.styles.resolve_target_cursor")
+def test_apply_style_forwards_walk_cap_warning(mock_resolve, mock_preserve, mock_ctx):
+    """Portion-capture truncate must reach the tool result, not stay a silent log line."""
+    mock_resolve.return_value = MagicMock()
+    mock_preserve.return_value = {
+        "direct_formatting": "preserved",
+        "clear_direct": "none",
+        "warning": "Walk stopped after 50000 text portions (cap 50000). Later content was not read, so formatting may be incomplete.",
+    }
+
+    res = ApplyStyle().execute(mock_ctx, style="Standard", target="selection")
+
+    assert "incomplete" in res["warning"]
+
+
+@patch("plugin.writer.styles.apply_paragraph_style_preserving_direct_char")
+@patch("plugin.writer.styles.resolve_target_cursor")
+def test_apply_style_default_allowed_on_full_document(mock_resolve, mock_preserve, mock_ctx):
+    """Default style_props is allowed on full_document so house font shows without a flag."""
+    mock_resolve.return_value = MagicMock()
+    mock_preserve.return_value = {"direct_formatting": "cleared", "clear_direct": "style_props"}
+
+    res = ApplyStyle().execute(mock_ctx, style="Standard", target="full_document")
+
+    assert res["status"] == "ok"
+    assert mock_preserve.call_args[0][3] == "style_props"
+
+
+@patch("plugin.writer.styles.apply_paragraph_style_preserving_direct_char")
+@patch("plugin.writer.styles.resolve_target_cursor")
+def test_apply_style_clear_direct_all_rejected_on_full_document(mock_resolve, mock_preserve, mock_ctx):
+    """Ctrl+M on the whole document would wipe emphasis; force the per-range path."""
+    mock_resolve.return_value = MagicMock()
+
+    res = ApplyStyle().execute(mock_ctx, style="Standard", target="full_document", clear_direct="all")
+
+    assert res["status"] == "error"
+    assert "full_document" in res["message"]
+    mock_preserve.assert_not_called()
+
+
+@patch("plugin.writer.styles.resolve_target_cursor")
+def test_apply_style_clear_direct_rejected_for_character_styles(mock_resolve, mock_ctx):
+    """Character styles do not go through the paragraph apply path, so the flag would be a no-op."""
+    mock_resolve.return_value = MagicMock()
+
+    res = ApplyStyle().execute(mock_ctx, style="Source Text", family="CharacterStyles",
+                               target="selection", clear_direct="all")
+
+    assert res["status"] == "error"
+    assert "ParagraphStyles" in res["message"]
+
+
+@patch("plugin.writer.styles.resolve_target_cursor")
+def test_apply_style_rejects_unknown_clear_direct(mock_resolve, mock_ctx):
+    mock_resolve.return_value = MagicMock()
+
+    res = ApplyStyle().execute(mock_ctx, style="Standard", target="selection", clear_direct="yes")
+
+    assert res["status"] == "error"
+    assert "clear_direct" in res["message"]
 
 
 @patch("plugin.writer.styles.apply_paragraph_style_preserving_direct_char")
@@ -187,7 +378,8 @@ def test_apply_default_character_style(mock_resolve, mock_preserve, mock_ctx):
 
 def test_update_style_with_parent():
     style = MagicMock()
-    family = _style_family({"MyStyle": style})
+    style.getParentStyle.return_value = "Standard"
+    family = _style_family({"MyStyle": style, "Standard": MagicMock()})
     mock_ctx = _ctx_with_families(ParagraphStyles=family)
 
     tool = StyleUpdate()
@@ -196,11 +388,78 @@ def test_update_style_with_parent():
     assert res["status"] == "ok"
     style.setParentStyle.assert_called_once_with("Standard")
     style.setPropertyValue.assert_called_once_with("CharWeight", 150)
+    assert "CharWeight" in res["before"]
+    assert res["after"]["ParentStyle"] == "Standard"
+
+
+def test_style_update_schema_para_adjust_is_words():
+    schema = StyleUpdate.parameters["properties"]["property_updates"]["properties"]["ParaAdjust"]
+    assert schema["type"] == "string"
+    assert schema["enum"] == ["left", "center", "right", "justify"]
+
+
+def test_update_style_para_adjust_words():
+    """ParaAdjust 0/1/2/3 is hostile (1=right); schema is left/center/right/justify."""
+    props = {"ParaAdjust": 0, "CharWeight": 100}
+    style = MagicMock()
+    style.getPropertyValue.side_effect = lambda n: props.get(n)
+    style.getParentStyle.return_value = "Standard"
+
+    def _set(name, value):
+        props[name] = value
+
+    style.setPropertyValue.side_effect = _set
+    family = _style_family({"MyStyle": style})
+    mock_ctx = _ctx_with_families(ParagraphStyles=family)
+
+    res = StyleUpdate().execute(mock_ctx, style="MyStyle", property_updates={"ParaAdjust": "center"})
+
+    assert res["status"] == "ok"
+    style.setPropertyValue.assert_called_once_with("ParaAdjust", 3)
+    assert res["before"]["ParaAdjust"] == "left"
+    assert res["after"]["ParaAdjust"] == "center"
+    assert res["updated_properties"]["ParaAdjust"] == "center"
+
+
+def test_update_style_rejects_para_adjust_integer():
+    style = MagicMock()
+    family = _style_family({"MyStyle": style})
+    mock_ctx = _ctx_with_families(ParagraphStyles=family)
+
+    res = StyleUpdate().execute(mock_ctx, style="MyStyle", property_updates={"ParaAdjust": 2})
+
+    assert res["status"] == "error"
+    assert "left" in res["message"]
+    style.setPropertyValue.assert_not_called()
+
+
+def test_update_style_unknown_suggests_close_name():
+    style = MagicMock()
+    family = _style_family({"Heading 1": style, "Text body": style})
+    mock_ctx = _ctx_with_families(ParagraphStyles=family)
+
+    res = StyleUpdate().execute(mock_ctx, style="heading 1", property_updates={"CharWeight": 150})
+
+    assert res["status"] == "error"
+    assert "Did you mean 'Heading 1'" in res["message"]
+
+
+def test_update_style_warns_when_font_not_installed():
+    style = MagicMock()
+    family = _style_family({"MyStyle": style})
+    mock_ctx = _ctx_with_families(ParagraphStyles=family)
+
+    with patch("plugin.writer.styles._installed_font_names", return_value={"liberation serif"}):
+        res = StyleUpdate().execute(
+            mock_ctx, style="MyStyle", property_updates={"CharFontName": "DefinitelyMissingFont"})
+
+    assert res["status"] == "ok"
+    assert "DefinitelyMissingFont" in res["warning"]
+    assert "substitute" in res["warning"]
 
 
 def test_create_style_standard():
-    family = _style_family(exists=False)
-    family.hasByName.return_value = False
+    family = _style_family({"Standard": MagicMock()})
     mock_ctx = _ctx_with_families(ParagraphStyles=family)
     new_style = MagicMock()
     mock_ctx.doc._created["com.sun.star.style.ParagraphStyle"] = new_style
@@ -215,10 +474,32 @@ def test_create_style_standard():
     family.insertByName.assert_called_once_with("NewStyle", new_style)
 
 
+def test_create_style_parent_not_found_suggests():
+    family = _style_family({"Standard": MagicMock(), "Heading 1": MagicMock()})
+    mock_ctx = _ctx_with_families(ParagraphStyles=family)
+
+    res = StyleCreate().execute(mock_ctx, style="NewStyle", parent_style="heading 1")
+
+    assert res["status"] == "error"
+    assert "Did you mean 'Heading 1'" in res["message"]
+    family.insertByName.assert_not_called()
+
+
+def test_create_style_rejects_para_adjust_integer():
+    family = _style_family({"Standard": MagicMock()})
+    mock_ctx = _ctx_with_families(ParagraphStyles=family)
+
+    res = StyleCreate().execute(
+        mock_ctx, style="NewStyle", parent_style="Standard", property_updates={"ParaAdjust": 3})
+
+    assert res["status"] == "error"
+    assert "justify" in res["message"] or "center" in res["message"]
+    family.insertByName.assert_not_called()
+
+
 @patch("plugin.writer.styles.NamedValue")
 def test_create_style_conditional(mock_nv):
-    family = _style_family(exists=False)
-    family.hasByName.return_value = False
+    family = _style_family({"Standard": MagicMock(), "Heading 1": MagicMock()})
     mock_ctx = _ctx_with_families(ParagraphStyles=family)
     new_style = MagicMock()
     mock_ctx.doc._created["com.sun.star.style.ConditionalParagraphStyle"] = new_style
@@ -257,6 +538,20 @@ def test_import_styles(mock_pv, mock_uno, mock_ctx):
     url, opts = mock_ctx.doc._load_styles_calls[0]
     assert url == "file:///path/to/doc.ott"
     assert isinstance(opts, tuple)
+
+
+def test_apply_style_uno_skips_windows_leftover_origin_canary() -> None:
+    """GHA 34683742049: leftover reuse flipped the origin-detection canary."""
+    from pathlib import Path
+
+    src = Path(__file__).with_name(
+        "test_apply_style_preserve_inline_uno.py"
+    ).read_text(encoding="utf-8")
+    assert "skip_windows_leftover_hidden_load" in src
+    assert "apply_style origin canary leftover reuse" in src
+    assert "34683742049" in src
+    assert 'fmt.setPropertyValue("ParaStyleName", "Standard")' in src
+    assert "35466498641" in src
 
 
 def test_apply_style_selection_failure_at_tool_layer(mock_ctx):

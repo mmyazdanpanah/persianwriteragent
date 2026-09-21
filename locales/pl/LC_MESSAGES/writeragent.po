@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: PACKAGE VERSION\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-09-04 14:15-0400\n"
+"POT-Creation-Date: 2026-09-14 16:20-0400\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: Polish <LL@li.org>\n"
@@ -73,9 +73,28 @@ msgstr "Nie można odnaleźć komórki notatnika dla tego elementu sterującego.
 msgid "Open a Writer document first."
 msgstr "Najpierw otwórz dokument programu Writer."
 
-#: plugin/notebook/writer_importer.py
+#: plugin/notebook/notebook_controls.py
 msgid "Run code cell"
 msgstr "Uruchom komórkę kodu"
+
+#: plugin/embeddings/search_ui.py
+msgid "just now"
+msgstr "przed chwilą"
+
+#: plugin/embeddings/search_ui.py
+#, python-brace-format
+msgid "{0}m ago"
+msgstr "{0} min. temu"
+
+#: plugin/embeddings/search_ui.py
+#, python-brace-format
+msgid "{0}h ago"
+msgstr "{0} godz. temu"
+
+#: plugin/embeddings/search_ui.py
+#, python-brace-format
+msgid "{0}d ago"
+msgstr "{0} dni temu"
 
 #: plugin/embeddings/search_ui.py
 msgid "Cache Status: No active document"
@@ -96,20 +115,6 @@ msgstr "Stan pamięci podręcznej: Nie zbudowano (lancedb)"
 #: plugin/embeddings/search_ui.py
 msgid "Cache Status: Not built"
 msgstr "Stan pamięci podręcznej: Nie zbudowano"
-
-#: plugin/embeddings/search_ui.py
-msgid "just now"
-msgstr "przed chwilą"
-
-#: plugin/embeddings/search_ui.py
-#, python-brace-format
-msgid "{0}m ago"
-msgstr "{0} min. temu"
-
-#: plugin/embeddings/search_ui.py
-#, python-brace-format
-msgid "{0}h ago"
-msgstr "{0} godz. temu"
 
 #: plugin/embeddings/search_ui.py
 #, python-brace-format
@@ -420,7 +425,8 @@ msgid "Status:"
 msgstr "Stan:"
 
 #: plugin/calc/python/cell_editor_ui.py plugin/chatbot/panel_wiring.py
-#: plugin/scripting/editor_ui_strings.py plugin/xdl_strings.py
+#: plugin/chatbot/panel.py plugin/scripting/editor_ui_strings.py
+#: plugin/xdl_strings.py
 msgid "Ready"
 msgstr "Gotowe"
 
@@ -567,13 +573,14 @@ msgstr "Wstawione obrazy"
 #: plugin/calc/python/geometric_recalc.py
 #, python-format
 msgid ""
-"Geometric Recalc Order skipped sheet '%s': found %s or more Python cells "
-"(discovery cap). The sheet was left unchained so a partial list is not "
-"treated as complete."
+"Geometric Recalc Order skipped sheet '%(sheet)s': found %(cap)s or more "
+"Python cells (discovery cap). The sheet was left unchained so a partial list "
+"is not treated as complete."
 msgstr ""
-"Geometryczna kolejność przeliczania pominęła arkusz „%s”: znaleziono %s lub "
-"więcej komórek Python (limit wykrywania). Arkusz pozostawiono bez zmian, aby "
-"częściowa lista nie była traktowana jako kompletna."
+"Pominięto arkusz „%(sheet)s” w kolejności przeliczania geometrycznego: "
+"znaleziono %(cap)s lub więcej komórek Python (limit wykrywania). Arkusz "
+"pozostawiono bez zmian, aby częściowa lista nie była traktowana jako "
+"kompletna."
 
 #: plugin/calc/excel_py_convert/auto_open.py
 #, python-brace-format
@@ -1335,6 +1342,10 @@ msgid ""
 msgstr ""
 "[Model {0} nie obsługuje natywnego dźwięku. Proszę wybrać model STT w "
 "ustawieniach.]"
+
+#: plugin/chatbot/panel.py
+msgid "[Peer send requires Chat mode on this sidebar.]"
+msgstr "[Wysyłanie do partnera wymaga trybu czatu na tym pasku bocznym.]"
 
 #: plugin/chatbot/web_research_chat.py
 #, python-format
@@ -3176,6 +3187,21 @@ msgstr "Narzędzia arkusza kalkulacyjnego Calc"
 
 msgid "Max Rows Display"
 msgstr "Maks. liczba wierszy"
+
+msgid "Cache Excel siblings as ODS"
+msgstr "Buforuj pliki Excel jako ODS"
+
+msgid ""
+"Convert sibling .xlsx/.xls to writeragent_ods_cache/ beside the folder so "
+"repeated DuckDB SQL reuses the ODS. Native .ods and the live workbook are "
+"never cached. Set calc.ods_cache_enabled false in writeragent.json to "
+"disable."
+msgstr ""
+"Konwertuj pliki .xlsx/.xls do folderu writeragent_ods_cache/ obok folderu "
+"źródłowego, aby powtarzane zapytania DuckDB SQL mogły ponownie wykorzystać "
+"plik ODS. Natywne pliki .ods oraz aktywny skoroszyt nigdy nie są buforowane. "
+"Ustaw calc.ods_cache_enabled na false w pliku writeragent.json, aby wyłączyć "
+"tę funkcję."
 
 msgid "Sidebar"
 msgstr "Pasek boczny"

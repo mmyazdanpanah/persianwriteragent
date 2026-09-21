@@ -189,7 +189,7 @@ endif
         dev-deploy dev-deploy-remove \
         lo-start lo-start-full lo-kill lo-restart \
         clean-cache nuke-cache nuke-cache-force unbundle \
-        log log-tail lo-log test pytest test-uno test-mock-sidebar test-run test-durations slowtests vhs test-visible lo-test-threadguard lo-test-threadguard-visible typecheck typecheck-full check-ext check-setup deploy ensure-uno _check-lo-python \
+        log log-tail lo-log test pytest test-uno test-uno-soak test-mock-sidebar test-run test-durations slowtests vhs test-visible lo-test-threadguard lo-test-threadguard-visible typecheck typecheck-full check-ext check-setup deploy ensure-uno _check-lo-python \
         verify crosshair-check crosshair-cover crosshair-check-all crosshair-check-all-deep \
         crosshair-cover-all crosshair-cover-all-deep \
         lo-start-log opengrep-lint opengrep-lint-advisory opengrep-rules-sync opengrep-rules-audit uno-thread-lint uno-thread-lint-advisory opengrep-install \
@@ -261,8 +261,11 @@ help:
 	@echo "  make mock-llm               Fake OpenAI chat server on :18766 (sidebar soak: scroll, tools, Stop, errors)"
 	@echo "  make test-uno               UNO tests only via testing_runner (serial live soffice)"
 	@echo "  make test-uno FILTER=…      Same; FILTER=path or test_* name (native runner)"
-	@echo "  make test-mock-sidebar      Packet F+B+C+D+E+G mock-LLM sidebar (visible soffice, your user profile)"
-	@echo "  make test-mock-sidebar FILTER=E   Packet letter (B/C/D/E/F/G), case id (f3a), or test_* name"
+	@echo "  make test-uno-soak          Repeat Draw UNO (or FILTER=/PAIR=) in one soffice; REPEAT=20"
+	@echo "  make test-mock-sidebar      Packet F+B+C+D+E+G+P+K mock-LLM sidebar (visible soffice, your user profile)"
+	@echo "  make test-mock-sidebar FILTER=E   Packet letter (B/C/D/E/F/G/P/K), case id (e12 / g17 / p1 / k1), or test_* name"
+	@echo "  make test-mock-sidebar FILTER=P   Dual Writer+Calc peer Packet (specialized-inner #673)"
+	@echo "  make test-mock-sidebar FILTER=K   Packet K compaction smoke (PR1 #712 + PR2 #713)"
 	@echo "  make excel-py-roundtrip     Excel↔DAG sample fidelity over PythonExcelSamples/"
 	@echo ""
 	@echo "Benchmarks (prompt optimization / eval):"
@@ -380,7 +383,7 @@ release: clean
 	cp pyproject.toml "$$RELEASE_TMP/pyproject.toml"; \
 	echo "Running tests against stripped bundle..."; \
 	echo "  (grammar_obs call-site tests self-skip via _grammar_obs_call_sites_present; whole modules ignored below)"; \
-	cd "$$RELEASE_TMP" && PYTHONPATH=. "$(abspath $(PYTHON))" -m pytest --ignore=tests/scripts --ignore=tests/compute_service --ignore=tests/test_merge_module_yaml_into_pot.py --ignore=tests/framework/test_logging.py --ignore=tests/writer/locale/test_grammar_linguistic_xcu.py --ignore=tests/scripting/test_generate_tool_proxies.py --ignore=tests/framework/test_thread_guard.py --ignore=tests/framework/test_thread_affinity.py --ignore=tests/framework/test_thread_token.py --ignore=tests/doc/test_specialized_delegation_threading.py --ignore=tests/writer/locale/test_grammar_obs.py --ignore=tests/writer/locale/test_libreharper_oxt.py --ignore=tests/chatbot/test_sidebar_test_hooks.py -k "not test_sync_tool_marshaled_from_background and not test_execute_on_main_thread_timeout and not test_execute_python_addin_from_background_thread" tests; \
+	cd "$$RELEASE_TMP" && PYTHONPATH=. "$(abspath $(PYTHON))" -m pytest --ignore=tests/scripts --ignore=tests/compute_service --ignore=tests/test_merge_module_yaml_into_pot.py --ignore=tests/framework/test_logging.py --ignore=tests/writer/locale/test_grammar_linguistic_xcu.py --ignore=tests/scripting/test_generate_tool_proxies.py --ignore=tests/framework/test_thread_guard.py --ignore=tests/framework/test_thread_affinity.py --ignore=tests/doc/test_specialized_delegation_threading.py --ignore=tests/writer/locale/test_grammar_obs.py --ignore=tests/writer/locale/test_libreharper_oxt.py --ignore=tests/chatbot/test_sidebar_test_hooks.py -k "not test_sync_tool_marshaled_from_background and not test_execute_on_main_thread_timeout and not test_execute_python_addin_from_background_thread" tests; \
 	cd "$$RELEASE_TMP" && PYTHONPATH=. $(MAKE) -f "$(PROJECT_ROOT)/Makefile" test-uno; \
 	$(MAKE) -C "$(PROJECT_ROOT)" release-build; \
 	$(MAKE) -C "$(PROJECT_ROOT)" register-built-oxt
@@ -764,7 +767,7 @@ pytest:
 mock-llm:
 	$(PYTHON) scripts/mock_llm_server.py
 
-# Optional native-runner selectors: packet letter (B/C/D/E/F/G), case id (f3a), or test_* name.
+# Optional native-runner selectors: packet letter (B/C/D/E/F/G/P), case id (f3a/p1), or test_* name.
 FILTER ?=
 
 # Fail before launching a doomed interpreter. The old silent venv fallback
@@ -800,9 +803,26 @@ test-uno: _check-lo-python
 	@$(MAKE) -C "$(PROJECT_ROOT)" lo-kill
 	PYTHONUNBUFFERED=1 $(LO_PYTHON_UNSET) $(LO_PYTHON_ENV) "$(LO_PYTHON)" -u -m plugin.testing_runner $(FILTER); EXIT_CODE=$$?; $(MAKE) -C "$(PROJECT_ROOT)" lo-kill; exit $$EXIT_CODE
 
+# Same office process, N times: stress Draw factory-open / close (URP DisposedException flakes).
+# FILTER defaults to the Draw native suite. PAIR=tree-math | dup-move expands --pair.
+#   make test-uno-soak PAIR=tree-math REPEAT=50
+#   make test-uno-soak FILTER="test_get_draw_tree test_insert_math_draw" REPEAT=50
+# FILTER prefix-matches (test_get_draw_tree also selects the blank/label test). PAIR= is exact.
+# See docs/framework/uno-test-lifecycle.md
+REPEAT ?= 20
+PAIR ?=
+ifeq ($(PAIR),)
+SOAK_FILTERS := $(or $(FILTER),test_draw_uno)
+else
+SOAK_FILTERS := --pair $(PAIR) $(FILTER)
+endif
+test-uno-soak: _check-lo-python
+	@$(MAKE) -C "$(PROJECT_ROOT)" lo-kill
+	PYTHONUNBUFFERED=1 $(LO_PYTHON_UNSET) $(LO_PYTHON_ENV) "$(LO_PYTHON)" -u -m plugin.testing_runner --repeat $(REPEAT) $(SOAK_FILTERS); EXIT_CODE=$$?; $(MAKE) -C "$(PROJECT_ROOT)" lo-kill; exit $$EXIT_CODE
+
 test-mock-sidebar: _check-lo-python
 	@$(MAKE) -C "$(PROJECT_ROOT)" lo-kill
-	WRITERAGENT_UNO_TEST_TIMEOUT=120 PYTHONUNBUFFERED=1 $(LO_PYTHON_UNSET) $(LO_PYTHON_ENV) "$(LO_PYTHON)" -u -m plugin.testing_runner --user-profile tests/chatbot/test_mock_llm_sidebar_uno.py $(FILTER); EXIT_CODE=$$?; $(MAKE) -C "$(PROJECT_ROOT)" lo-kill; exit $$EXIT_CODE
+	WRITERAGENT_UNO_TEST_TIMEOUT=120 PYTHONUNBUFFERED=1 $(LO_PYTHON_UNSET) $(LO_PYTHON_ENV) "$(LO_PYTHON)" -u -m plugin.testing_runner --user-profile $(FILTER); EXIT_CODE=$$?; $(MAKE) -C "$(PROJECT_ROOT)" lo-kill; exit $$EXIT_CODE
 
 # Cap xdist at 6 so subprocess-heavy compute_service / venv worker tests
 # do not starve handshake timeouts on an 8-core box (PYTEST_WORKERS=auto).
@@ -857,7 +877,7 @@ opengrep-lint:
 	@"$(PYTHON)" $(SCRIPTS)/run_timed.py opengrep env SEMGREP_SEND_METRICS=off "$(OPENGREP)" scan $(OPENGREP_SCAN_FLAGS) $(foreach c,$(OPENGREP_CONFIGS),-c $(c)) plugin
 
 thread-safety-lint:
-	"$(PYTHON)" scripts/lint_thread_safety.py plugin/calc/python plugin/scripting
+	"$(PYTHON)" scripts/lint_thread_safety.py plugin
 	"$(PYTHON)" scripts/analyze_thread_deadlocks.py plugin
 
 uno-thread-lint: opengrep-lint thread-safety-lint

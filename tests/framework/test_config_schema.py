@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 
 from plugin.framework.config_schema import (
+    DEFAULT_IMAGE_BASE_SIZE,
     WriterAgentConfig,
     as_bool,
     clamp_schema_value,
@@ -99,12 +100,37 @@ def test_module_yaml_defaults_bind_from_manifest_modules() -> None:
     assert schema.MODULES is schema._DEFAULT_MODULES
 
 
+def test_max_tool_rounds_schema_allows_200() -> None:
+    """Eval-2 headed trials may set 200; schema max used to clamp that to 150."""
+    from plugin.framework import config_schema as schema
+
+    assert schema.MODULES, "empty MODULES; run make manifest"
+    for key in ("chatbot.max_tool_rounds", "max_tool_rounds"):
+        field = get_config_schema(key)
+        assert field is not None, key
+        assert field["min"] == 1
+        assert field["max"] == 200
+        assert field["default"] == 15
+        assert clamp_schema_value(key, 200) == 200
+        assert clamp_schema_value(key, 201) == 200
+        assert clamp_schema_value(key, 15) == 15
+
+    cfg = WriterAgentConfig.from_dict({"endpoint": "http://x", "chatbot.max_tool_rounds": 200})
+    cfg.validate(coerce_out_of_range=True)
+    assert cfg._extra_config["chatbot.max_tool_rounds"] == 200
+
+
 def test_config_schema_has_no_forbidden_imports() -> None:
     source = _SCHEMA_PATH.read_text(encoding="utf-8")
     imported = _imported_modules(ast.parse(source))
     forbidden = sorted(mod for mod in imported if _is_forbidden(mod))
     assert forbidden == []
     assert "plugin.framework.config" not in imported
+
+
+def test_image_base_size_default_is_1024() -> None:
+    assert DEFAULT_IMAGE_BASE_SIZE == 1024
+    assert WriterAgentConfig().image_base_size == 1024
 
 
 def test_config_does_not_reexport_schema_names() -> None:

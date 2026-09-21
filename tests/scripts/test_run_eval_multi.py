@@ -8,11 +8,28 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+import pytest
+
 _PO = Path(__file__).resolve().parents[2] / "scripts" / "prompt_optimization"
 if str(_PO) not in sys.path:
     sys.path.insert(0, str(_PO))
 
 import run_eval_multi  # noqa: E402
+
+
+def test_parse_args_defaults_keep_full_catalog() -> None:
+    args = run_eval_multi.parse_args([])
+    assert args.tools == "full"
+    assert args.schema_density == "full"
+
+
+def test_parse_args_tools_preset_and_skinny() -> None:
+    args = run_eval_multi.parse_args(
+        ["--models", "openai/gpt-oss-20b", "--tools", "calc_core", "--schema-density", "skinny"]
+    )
+    assert args.tools == "calc_core"
+    assert args.schema_density == "skinny"
+    assert args.models == "openai/gpt-oss-20b"
 
 
 def test_out_path_relative_is_cwd(monkeypatch, tmp_path) -> None:
@@ -208,6 +225,63 @@ def test_pareto_tradeoff_score_f1_is_one() -> None:
     scores = run_eval_multi.pareto_tradeoff_scores(summaries)
     assert scores[id(cheap)] == 1.0
     assert scores[id(better)] == 1.0
+
+
+def test_catalog_pricing_from_token_total_does_not_change_correctness() -> None:
+    """1658 Ultra/Super stored only total_tokens; 85/15 split is documented."""
+    from model_configs import MODEL_BY_ID
+
+    ultra_cfg = MODEL_BY_ID["nvidia/nemotron-3-ultra-550b-a55b"]
+    super_cfg = MODEL_BY_ID["nvidia/nemotron-3-super-120b-a12b"]
+    ultra_corr = 0.8211764705882354
+    super_corr = 0.9035294117647058
+    ultra = {
+        "openrouter_id": ultra_cfg.openrouter_id,
+        "avg_correctness": ultra_corr,
+        "avg_metric_score": 0.5022070588235295,
+        "hard_pass_rate": 0.8235294117647058,
+        "n_examples": 17,
+        "total_tokens": 947886,
+        "pricing_known": False,
+        "avg_cost_per_example": 0.0,
+        "intelligence_per_dollar_correctness": 0.0,
+    }
+    super_row = {
+        "openrouter_id": super_cfg.openrouter_id,
+        "avg_correctness": super_corr,
+        "avg_metric_score": 0.5036711764705882,
+        "hard_pass_rate": 0.7058823529411765,
+        "n_examples": 17,
+        "total_tokens": 1374453,
+        "pricing_known": False,
+        "avg_cost_per_example": 0.0,
+        "intelligence_per_dollar_correctness": 0.0,
+    }
+
+    run_eval_multi.apply_catalog_pricing_to_summary(ultra, ultra_cfg)
+    run_eval_multi.apply_catalog_pricing_to_summary(super_row, super_cfg)
+
+    assert ultra["avg_correctness"] == ultra_corr
+    assert super_row["avg_correctness"] == super_corr
+    assert ultra["hard_pass_rate"] == 0.8235294117647058
+    assert super_row["hard_pass_rate"] == 0.7058823529411765
+    assert ultra["pricing_known"] is True
+    assert super_row["pricing_known"] is True
+    assert ultra["input_cost_per_million"] == 0.625
+    assert ultra["output_cost_per_million"] == 3.125
+    assert super_row["input_cost_per_million"] == 0.085
+    assert super_row["output_cost_per_million"] == 0.4
+    # 85/15 × catalog rates × recorded totals (17 tasks).
+    assert ultra["avg_cost_per_example"] == pytest.approx(0.055758)
+    assert super_row["avg_cost_per_example"] == pytest.approx(0.010692435838235294)
+    assert ultra["intelligence_per_dollar_correctness"] == pytest.approx(
+        (ultra_corr ** 2) / ultra["avg_cost_per_example"]
+    )
+    assert super_row["intelligence_per_dollar_correctness"] == pytest.approx(
+        (super_corr ** 2) / super_row["avg_cost_per_example"]
+    )
+    assert round(ultra["intelligence_per_dollar_correctness"]) == 12
+    assert round(super_row["intelligence_per_dollar_correctness"]) == 76
 
 
 def test_pareto_tradeoff_score_decreases_with_distance() -> None:

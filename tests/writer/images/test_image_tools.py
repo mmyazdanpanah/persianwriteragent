@@ -64,6 +64,76 @@ class TestInsertImageIntoHeaderFooter(unittest.TestCase):
         self.assertTrue(result["auto_height"])
         self.assertIs(result["graphic"], graphic)
 
+    def test_first_page_header_uses_header_text_first(self):
+        # Shared HeaderText never reaches a different-first-page letterhead;
+        # header_first must resolve HeaderTextFirst (same map as page_get/set).
+        model = MagicMock()
+        style = MagicMock()
+        first_text = MagicMock(name="HeaderTextFirst")
+        shared_text = MagicMock(name="HeaderText")
+        cursor = MagicMock()
+        graphic = MagicMock()
+
+        style.getPropertyValue.side_effect = lambda name: {
+            "HeaderIsOn": True,
+            "HeaderText": shared_text,
+            "HeaderTextFirst": first_text,
+        }.get(name, MagicMock())
+        first_text.createTextCursorByRange.return_value = cursor
+        first_text.getEnd.return_value = MagicMock()
+
+        with (
+            patch("plugin.writer.page.resolve_page_style", return_value=(style, "Standard")),
+            patch("plugin.writer.page.set_header_footer_auto_height") as set_auto,
+            patch.object(image_tools, "_insert_embedded_at_writer_cursor", return_value=graphic) as insert,
+        ):
+            result = image_tools.insert_image_into_header_footer(
+                model,
+                "/tmp/logo.png",
+                "header_first",
+                width_mm=40,
+                height_mm=20,
+            )
+
+        set_auto.assert_called_once_with(style, "header_first", True)
+        self.assertEqual(insert.call_args.kwargs.get("text_container"), first_text)
+        self.assertIsNot(insert.call_args.kwargs.get("text_container"), shared_text)
+        self.assertEqual(result["region"], "header_first")
+
+    def test_first_page_footer_uses_footer_text_first(self):
+        model = MagicMock()
+        style = MagicMock()
+        first_text = MagicMock(name="FooterTextFirst")
+        cursor = MagicMock()
+        graphic = MagicMock()
+
+        style.getPropertyValue.side_effect = lambda name: {
+            "FooterIsOn": True,
+            "FooterTextFirst": first_text,
+        }.get(name, MagicMock())
+        first_text.createTextCursorByRange.return_value = cursor
+        first_text.getEnd.return_value = MagicMock()
+
+        with (
+            patch("plugin.writer.page.resolve_page_style", return_value=(style, "Standard")),
+            patch("plugin.writer.page.set_header_footer_auto_height"),
+            patch.object(image_tools, "_insert_embedded_at_writer_cursor", return_value=graphic) as insert,
+        ):
+            result = image_tools.insert_image_into_header_footer(
+                model, "/tmp/logo.png", "footer_first",
+            )
+
+        self.assertEqual(insert.call_args.kwargs.get("text_container"), first_text)
+        self.assertEqual(result["region"], "footer_first")
+
+    def test_unknown_region_lists_page_keys(self):
+        with self.assertRaises(ValueError) as raised:
+            image_tools.insert_image_into_header_footer(
+                MagicMock(), "/tmp/logo.png", "not_a_region",
+            )
+        self.assertIn("header_first", str(raised.exception))
+        self.assertIn("footer_first", str(raised.exception))
+
 
 class TestShouldLinkImagePath(unittest.TestCase):
     def test_user_path_is_linked(self):
@@ -104,6 +174,7 @@ class TestWriterImageCursorConversion(unittest.TestCase):
 
         view_cursor = MagicMock(name="view_cursor")
         view_cursor.getStart.return_value = "range-start"
+        view_cursor.getText.return_value = doc_text
         view_cursor.jumpToStartOfPage = MagicMock()
 
         model = MagicMock()
@@ -131,9 +202,95 @@ class TestWriterImageCursorConversion(unittest.TestCase):
                 add_frame=False,
             )
 
+        # Body must clone via getStart(), not the ViewCursor itself (PR #796).
         doc_text.createTextCursorByRange.assert_called_once_with("range-start")
         doc_text.insertTextContent.assert_called_once_with(text_cursor, image_instance, False)
         image_instance.GraphicURL = "file:////home/user/photo.png"
+
+    def test_insert_uses_cell_xtext_not_body_clone(self):
+        """Cursor in a nested XText must not clone through the body."""
+        body = MagicMock()
+        body.createTextCursorByRange.side_effect = RuntimeError(
+            "End of content node doesn't have the proper start node"
+        )
+        cell_text = MagicMock()
+        text_cursor = MagicMock(name="cell_cursor")
+        cell_text.createTextCursorByRange.return_value = text_cursor
+        cell_text.insertTextContent = MagicMock()
+
+        view_cursor = MagicMock(name="view_cursor")
+        view_cursor.getStart.return_value = "cell-start"
+        view_cursor.getText.return_value = cell_text
+        view_cursor.jumpToStartOfPage = MagicMock()
+
+        image_instance = MagicMock(name="image_instance")
+        model = MagicMock()
+        model.getText.return_value = body
+        model.CurrentController = MagicMock()
+        model.CurrentController.ViewCursor = view_cursor
+        model.createInstance.return_value = image_instance
+        model.supportsService.side_effect = lambda svc: svc == "com.sun.star.text.TextDocument"
+        ctx = MagicMock()
+
+        with patch.object(image_tools, "_should_link_image_path", return_value=False):
+            image_tools._insert_image_to_writer(
+                ctx,
+                model,
+                "/home/user/photo.png",
+                width=10,
+                height=20,
+                title="t",
+                description="d",
+                add_frame=False,
+            )
+
+        body.createTextCursorByRange.assert_not_called()
+        cell_text.createTextCursorByRange.assert_called_once_with("cell-start")
+        cell_text.insertTextContent.assert_called_once_with(text_cursor, image_instance, False)
+        view_cursor.jumpToStartOfPage.assert_not_called()
+
+    def test_insert_nested_falls_back_to_clone_when_getstart_rejected(self):
+        """#796: table/frame XText that rejects getStart() still clones on the host."""
+        body = MagicMock()
+        cell_text = MagicMock()
+        text_cursor = MagicMock(name="cell_clone")
+        cell_text.createTextCursorByRange.side_effect = [
+            RuntimeError("getStart rejected"),
+            text_cursor,
+        ]
+        cell_text.insertTextContent = MagicMock()
+
+        view_cursor = MagicMock(name="view_cursor")
+        view_cursor.getStart.return_value = "cell-start"
+        view_cursor.getText.return_value = cell_text
+        view_cursor.jumpToStartOfPage = MagicMock()
+
+        image_instance = MagicMock(name="image_instance")
+        model = MagicMock()
+        model.getText.return_value = body
+        model.CurrentController = MagicMock()
+        model.CurrentController.ViewCursor = view_cursor
+        model.createInstance.return_value = image_instance
+        model.supportsService.side_effect = lambda svc: svc == "com.sun.star.text.TextDocument"
+        ctx = MagicMock()
+
+        with patch.object(image_tools, "_should_link_image_path", return_value=False):
+            image_tools._insert_image_to_writer(
+                ctx,
+                model,
+                "/home/user/photo.png",
+                width=10,
+                height=20,
+                title="t",
+                description="d",
+                add_frame=False,
+            )
+
+        body.createTextCursorByRange.assert_not_called()
+        self.assertEqual(cell_text.createTextCursorByRange.call_args_list[0].args[0], "cell-start")
+        self.assertEqual(cell_text.createTextCursorByRange.call_args_list[1].args[0], view_cursor)
+        cell_text.insertTextContent.assert_called_once_with(text_cursor, image_instance, False)
+        view_cursor.jumpToStartOfPage.assert_not_called()
 
     def test_insert_image_to_writer_linked_uses_dispatch(self):
         image_instance = MagicMock(name="linked_graphic")
@@ -197,6 +354,7 @@ class TestWriterImageCursorConversion(unittest.TestCase):
 
         view_cursor = MagicMock(name="view_cursor")
         view_cursor.getStart.side_effect = ["range1", "range2"]
+        view_cursor.getText.return_value = doc_text
         view_cursor.jumpToStartOfPage = MagicMock()
 
         model = MagicMock()
@@ -235,11 +393,14 @@ class TestWriterImageCursorConversion(unittest.TestCase):
 
         view_cursor = MagicMock(name="view_cursor")
         view_cursor.getStart.return_value = "range-start"
+        view_cursor.getText.return_value = doc_text
         view_cursor.jumpToStartOfPage = MagicMock()
 
         model = MagicMock()
         model.getText.return_value = doc_text
         model.supportsService.side_effect = lambda svc: svc == "com.sun.star.text.TextDocument"
+        model.CurrentController = MagicMock()
+        model.CurrentController.ViewCursor = view_cursor
 
         text_frame_instance = MagicMock(name="text_frame")
         frame_text_obj = MagicMock(name="frame_text_obj")
@@ -303,6 +464,149 @@ class TestReplaceGraphicSource(unittest.TestCase):
         self.assertTrue(ok)
         dispatch.assert_called_once()
         model.getText.return_value.removeTextContent.assert_called_once_with(graphic)
+
+
+class TestImageCompoundUndo(unittest.TestCase):
+    def test_insert_image_groups_undo_before_gallery(self):
+        events: list[object] = []
+
+        class FakeUndo:
+            def __init__(self, doc, title):
+                events.append(("enter", title))
+                self.title = title
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                self.close()
+
+            def close(self):
+                events.append(("close", self.title))
+
+        model = MagicMock()
+        ctx = MagicMock()
+        with (
+            patch.object(image_tools, "get_type_doc", return_value="writer"),
+            patch("plugin.doc.visual_helpers.px_to_display_units", return_value=(1000, 1000)),
+            patch.object(
+                image_tools,
+                "_insert_image_to_writer",
+                side_effect=lambda *a, **k: events.append("insert"),
+            ),
+            patch.object(
+                image_tools,
+                "add_image_to_gallery",
+                side_effect=lambda *a, **k: events.append("gallery"),
+            ),
+            patch("plugin.writer.edit_review.WriterCompoundUndo", FakeUndo),
+        ):
+            image_tools.insert_image(
+                ctx, model, "/tmp/x.png", 64, 64, add_to_gallery=True, add_frame=False,
+            )
+
+        self.assertEqual(
+            events,
+            [
+                ("enter", "WriterAgent: Insert image"),
+                "insert",
+                ("close", "WriterAgent: Insert image"),
+                "gallery",
+            ],
+        )
+
+    def test_replace_graphic_source_groups_undo(self):
+        events: list[object] = []
+
+        class FakeUndo:
+            def __init__(self, doc, title):
+                events.append(("enter", title))
+                self.title = title
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                self.close()
+
+            def close(self):
+                events.append(("close", self.title))
+
+        graphic = MagicMock()
+        graphic.getSize.return_value = MagicMock(Width=1000, Height=1000)
+        model = MagicMock()
+        model.supportsService.side_effect = lambda svc: svc == "com.sun.star.text.TextDocument"
+        ctx = MagicMock()
+        with (
+            patch.object(image_tools, "get_type_doc", return_value="writer"),
+            patch.object(image_tools, "_should_link_image_path", return_value=False),
+            patch.object(image_tools, "_safe_set_property", return_value=True),
+            patch("plugin.writer.edit_review.WriterCompoundUndo", FakeUndo),
+        ):
+            ok = image_tools.replace_graphic_source(ctx, model, graphic, "/tmp/cache/x.png")
+
+        self.assertTrue(ok)
+        self.assertEqual(
+            events,
+            [
+                ("enter", "WriterAgent: Replace image"),
+                ("close", "WriterAgent: Replace image"),
+            ],
+        )
+
+
+class TestDisplaySizeCap(unittest.TestCase):
+    def test_insert_image_caps_1024_to_135mm(self):
+        from plugin.doc import visual_helpers
+
+        captured: dict[str, int] = {}
+
+        def _capture(_ctx, _model, _path, width, height, *_args, **_kwargs):
+            captured["width"] = width
+            captured["height"] = height
+
+        model = MagicMock()
+        ctx = MagicMock()
+        with (
+            patch.object(image_tools, "get_type_doc", return_value="writer"),
+            patch.object(image_tools, "_insert_image_to_writer", side_effect=_capture),
+            patch("plugin.writer.edit_review.WriterCompoundUndo"),
+        ):
+            image_tools.insert_image(
+                ctx, model, "/tmp/x.png", 1024, 1024, add_to_gallery=False, add_frame=False,
+            )
+
+        expected = visual_helpers.px_to_display_units(1024, 1024)
+        self.assertEqual((captured["width"], captured["height"]), expected)
+        self.assertLessEqual(max(captured["width"], captured["height"]), 13500)
+        raw_w, raw_h = visual_helpers.px_to_units(1024, 1024)
+        self.assertGreater(max(raw_w, raw_h), 13500)
+
+    def test_replace_image_in_place_caps_1024_to_135mm(self):
+        from plugin.doc import visual_helpers
+
+        graphic = MagicMock()
+        captured: dict[str, int] = {}
+
+        def _capture(_ctx, _model, _graphic, _path, width_units=None, height_units=None, *_args, **_kwargs):
+            captured["width"] = width_units
+            captured["height"] = height_units
+            return True
+
+        model = MagicMock()
+        ctx = MagicMock()
+        with (
+            patch.object(image_tools, "_get_selected_graphic_object", return_value=(graphic, "writer")),
+            patch.object(image_tools, "replace_graphic_source", side_effect=_capture),
+        ):
+            ok = image_tools.replace_image_in_place(
+                ctx, model, "/tmp/x.png", 1536, 768, add_to_gallery=False,
+            )
+
+        self.assertTrue(ok)
+        expected = visual_helpers.px_to_display_units(1536, 768)
+        self.assertEqual((captured["width"], captured["height"]), expected)
+        self.assertEqual(captured["width"], 13500)
 
 
 class TestDrawPageInsertPosition(unittest.TestCase):

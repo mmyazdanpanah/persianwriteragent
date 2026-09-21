@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: PACKAGE VERSION\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-09-04 14:15-0400\n"
+"POT-Creation-Date: 2026-09-14 16:20-0400\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: Lithuanian <LL@li.org>\n"
@@ -72,9 +72,28 @@ msgstr "Nepavyko rasti šio valdiklio užrašinės ląstelės."
 msgid "Open a Writer document first."
 msgstr "Pirmiausia atidarykite „Writer“ dokumentą."
 
-#: plugin/notebook/writer_importer.py
+#: plugin/notebook/notebook_controls.py
 msgid "Run code cell"
 msgstr "Vykdyti kodo ląstelę"
+
+#: plugin/embeddings/search_ui.py
+msgid "just now"
+msgstr "ką tik"
+
+#: plugin/embeddings/search_ui.py
+#, python-brace-format
+msgid "{0}m ago"
+msgstr "prieš {0} min."
+
+#: plugin/embeddings/search_ui.py
+#, python-brace-format
+msgid "{0}h ago"
+msgstr "prieš {0} val."
+
+#: plugin/embeddings/search_ui.py
+#, python-brace-format
+msgid "{0}d ago"
+msgstr "prieš {0} d."
 
 #: plugin/embeddings/search_ui.py
 msgid "Cache Status: No active document"
@@ -95,20 +114,6 @@ msgstr "Talpyklos būsena: nesukurta (lancedb)"
 #: plugin/embeddings/search_ui.py
 msgid "Cache Status: Not built"
 msgstr "Talpyklos būsena: nesukurta"
-
-#: plugin/embeddings/search_ui.py
-msgid "just now"
-msgstr "ką tik"
-
-#: plugin/embeddings/search_ui.py
-#, python-brace-format
-msgid "{0}m ago"
-msgstr "prieš {0} min."
-
-#: plugin/embeddings/search_ui.py
-#, python-brace-format
-msgid "{0}h ago"
-msgstr "prieš {0} val."
 
 #: plugin/embeddings/search_ui.py
 #, python-brace-format
@@ -415,7 +420,8 @@ msgid "Status:"
 msgstr "Būsena:"
 
 #: plugin/calc/python/cell_editor_ui.py plugin/chatbot/panel_wiring.py
-#: plugin/scripting/editor_ui_strings.py plugin/xdl_strings.py
+#: plugin/chatbot/panel.py plugin/scripting/editor_ui_strings.py
+#: plugin/xdl_strings.py
 msgid "Ready"
 msgstr "Parengta"
 
@@ -559,13 +565,13 @@ msgstr "Įterpti paveikslėliai"
 #: plugin/calc/python/geometric_recalc.py
 #, python-format
 msgid ""
-"Geometric Recalc Order skipped sheet '%s': found %s or more Python cells "
-"(discovery cap). The sheet was left unchained so a partial list is not "
-"treated as complete."
+"Geometric Recalc Order skipped sheet '%(sheet)s': found %(cap)s or more "
+"Python cells (discovery cap). The sheet was left unchained so a partial list "
+"is not treated as complete."
 msgstr ""
-"Geometrinio perskaičiavimo tvarka praleido lapą „%s“: rasta %s ar daugiau "
-"„Python“ langelių (aptikimo riba). Lapas paliktas nepakeistas, kad dalinis "
-"sąrašas nebūtų laikomas užbaigtu."
+"Geometrinė perskaičiavimo tvarka praleido lapą „%(sheet)s“: rasta %(cap)s "
+"arba daugiau „Python“ langelių (aptikimo riba). Lapas paliktas nepakeistas, "
+"kad dalinis sąrašas nebūtų laikomas užbaigtu."
 
 #: plugin/calc/excel_py_convert/auto_open.py
 #, python-brace-format
@@ -1329,6 +1335,11 @@ msgid ""
 "Settings.]"
 msgstr ""
 "[Modelis {0} nepalaiko vietinio garso. Nustatymuose pasirinkite STT modelį.]"
+
+#: plugin/chatbot/panel.py
+msgid "[Peer send requires Chat mode on this sidebar.]"
+msgstr ""
+"[Siuntimui kolegoms šioje šoninėje juostoje reikalingas pokalbių režimas.]"
 
 #: plugin/chatbot/web_research_chat.py
 #, python-format
@@ -3158,6 +3169,21 @@ msgstr "Calc skaičiuoklės įrankiai"
 
 msgid "Max Rows Display"
 msgstr "Maks. eilučių skaičius"
+
+msgid "Cache Excel siblings as ODS"
+msgstr "Talpinti „Excel“ giminingus failus kaip ODS"
+
+msgid ""
+"Convert sibling .xlsx/.xls to writeragent_ods_cache/ beside the folder so "
+"repeated DuckDB SQL reuses the ODS. Native .ods and the live workbook are "
+"never cached. Set calc.ods_cache_enabled false in writeragent.json to "
+"disable."
+msgstr ""
+"Konvertuoti giminingus .xlsx/.xls failus į writeragent_ods_cache/ šalia "
+"aplanko, kad pakartotinės „DuckDB SQL“ užklausos pakartotinai naudotų ODS. "
+"Vietiniai .ods failai ir aktyvios darbaknygės niekada netalpinami. "
+"Nustatykite calc.ods_cache_enabled false faile writeragent.json, kad "
+"išjungtumėte."
 
 msgid "Sidebar"
 msgstr "Šoninė juosta"

@@ -12,7 +12,7 @@
 
 **Python, NumPy, and Agentic AI for LibreOffice (Writer, Calc, and Draw)**
 
-Run Python and scientific compute directly in spreadsheet formulas, edit documents with private local-first AI, conduct autonomous web research, generate diagrams, and automate office workflows — without cloud lock-in.
+Run Python and scientific compute directly in spreadsheet formulas, edit documents with private local-first AI, conduct web research, generate diagrams, and automate office workflows — without cloud lock-in.
 
 The project is distributed as three standalone extension packages (*install only one at a time*):
 
@@ -32,7 +32,7 @@ The project is distributed as three standalone extension packages (*install only
 
 - **Sidebar Chat with Multi-turn Tool Calling** — Edit, restructure, or expand documents using natural language. 9 core tools plus dozens of [specialized sub-agents](docs/writer/specialized-toolsets.md) for page layout, footnotes, bookmarks, revisions, and forms.
 - **Format-Preserving Edits** — Surgical redlines and section rewrites maintain your existing formatting (bold, italics, highlights, font sizes, tables, and nested lists) without clobbering styles.
-- **Autonomous Web Research** — Integrated private [smolagents](https://github.com/huggingface/smolagents) loop with DuckDuckGo. Synthesizes multiple web sources and updates open documents with real-time facts and citations. [Agent Search](docs/chat/search.md)
+- **Web Research** — Integrated private [smolagents](https://github.com/huggingface/smolagents) loop with DuckDuckGo. Synthesizes multiple web sources and updates open documents with real-time facts and citations. [Agent Search](docs/chat/search.md)
 - **Real-Time Grammar & Proofreading** — Local, privacy-preserving grammar checking via [Harper](https://github.com/Automattic/harper) (fast, auto-installing), [LanguageTool](https://languagetool.org), or LLM endpoints with mixed-language sentence detection. [Details](docs/writer/grammar-checker-plan.md)
 - **Math & LaTeX Import** — Converts LaTeX and MathML into native, editable LibreOffice Math objects. [Math Guide](docs/writer/math-tex.md)
 
@@ -87,7 +87,7 @@ For detailed setup instructions, see the **[Install and Troubleshooting Guide](d
 
 ![Chat Sidebar with Dashboard](Showcase/Sonnet46Spreadsheet.png)
 
-**Hermes + Opus 4.6 (Autonomous Web Research)**
+**Hermes + Opus 4.6 (Web Research)**
 
 ![Hermes-Agent / Opus-4.6 Akihabara](Showcase/HermesAkihabara.png)
 
@@ -107,7 +107,7 @@ For detailed setup instructions, see the **[Install and Troubleshooting Guide](d
 
 ## Benchmarks & Evaluation
 
-WriterAgent's **LLM Evaluation Suite** benchmarks models on Writer, Calc, and Draw tasks. The **2026-09-01 snapshot** uses the **17-task string harness** — it emulates document and tool behavior without running LibreOffice (OpenRouter, live token pricing). Full methodology: [docs/eval/benchmarks.md](docs/eval/benchmarks.md).
+WriterAgent's **LLM Evaluation Suite** benchmarks models on Writer, Calc, and Draw tasks. The **2026-09-11 snapshot** uses the **17-task string harness** — it emulates document and tool behavior without running LibreOffice (OpenRouter, live token pricing). Full methodology: [docs/eval/benchmarks.md](docs/eval/benchmarks.md).
 
 ![Cost–quality Pareto fronts](docs/eval/pareto-fronts.svg)
 
@@ -115,28 +115,31 @@ Distance-to-frontier view: [docs/eval/pareto-distance.svg](docs/eval/pareto-dist
 
 | Model | Correctness<br>avg task score (0–1) | Value<br>Correctness² ÷ $/task |
 | ----- | ----- | ----- |
-| openai/gpt-oss-120b | 0.971 | 1290 |
-| upstage/solar-pro4 | 0.741 | 800 |
-| openai/gpt-oss-20b | 0.687 | 606 |
-| poolside/laguna-xs-2.1 | 0.826 | 571 |
-| google/gemma-4-31b-it | 0.918 | 559 |
-| meta/muse-spark-1.3-contributor | 0.979 | 350 |
-| google/gemma-4-26b-a4b-it | 0.680 | 329 |
-| deepseek/deepseek-v4-flash-0731 | 0.987 | 274 |
-| poolside/laguna-s-2.1 | 0.759 | 262 |
-| openai/gpt-5.6-luna | 0.981 | 219 |
-| bytedance-seed/seed-2.0-mini | 0.918 | 200 |
-| z-ai/glm-5.3-flash | 0.913 | 193 |
-| mistralai/mistral-small-2603 | 0.629 | 188 |
-| google/gemini-3.5-flash-lite | 0.806 | 116 |
-| meta/muse-glimmer-30b | 0.987 | 85 |
-| ibm-granite/granite-4.2-8b | 0.802 | 83 |
-| inception/mercury-2.5-preview | 0.811 | 74 |
-| nvidia/nemotron-3.5-lightning | 0.315 | 37 |
-| qwen/qwen3.8-27b | 0.922 | 33 |
+| openai/gpt-oss-120b | 0.971 | 1475 |
+| openai/gpt-oss-20b | 0.805 | 911 |
+| upstage/solar-pro4 | 0.741 | 819 |
+| poolside/laguna-xs-2.1 | 0.885 | 574 |
+| google/gemma-4-31b-it | 0.918 | 548 |
+| google/gemma-4-26b-a4b-it | 0.739 | 385 |
+| meta/muse-spark-1.3-contributor | 0.979 | 354 |
+| deepseek/deepseek-v4-flash-0731 | 0.987 | 278 |
+| poolside/laguna-s-2.1 | 0.759 | 270 |
+| bytedance-seed/seed-2.0-mini | 0.918 | 222 |
+| openai/gpt-5.6-luna | 0.916 | 210 |
+| z-ai/glm-5.3-flash | 0.854 | 185 |
+| deepseek/deepseek-v4.1-flash | 0.935 | 105 |
+| google/gemini-3.5-flash-lite | 0.747 | 103 |
+| meta/muse-glimmer-30b | 0.987 | 99 |
+| ibm-granite/granite-4.2-8b | 0.861 | 96 |
+| mistralai/mistral-small-2603 | 0.629 | 94 |
+| inception/mercury-2.5-preview | 0.869 | 83 |
+| qwen/qwen3.8-flash | 0.805 | 82 |
+| nvidia/nemotron-3-super-120b-a12b | 0.904 | 76 |
+| nvidia/nemotron-3.5-lightning | 0.374 | 52 |
+| qwen/qwen3.8-27b | 0.922 | 36 |
 | minimax/minimax-m3 | 0.820 | 32 |
 | x-ai/grok-4.6 | 0.982 | 20 |
-| qwen/qwen3.8-flash | 0.118 | 12 |
+| nvidia/nemotron-3-ultra-550b-a55b | 0.821 | 12 |
 
 ---
 
@@ -170,7 +173,7 @@ A chronicle of building a Python runtime and AI suite inside LibreOffice:
 - **Week 2 & 3**: [MCP, research sub-agent, voice support, and evaluation dashboard](https://keithcu.com/wordpress/?p=5112)
 - **Week 4–6**: [State machines, formal verification, and specialized toolsets](https://keithcu.com/wordpress/?p=5245)
 - **Week 6 & 7**: [Async grammar checking and TeX import support](https://keithcu.com/wordpress/?p=5276)
-- **Week 8+**: [NumPy compute bridge, `=PY()` Calc add-in, Monaco editor, and LibrePy core split](docs/scripting/librepy-split.md)
+- **Week 8+**: [NumPy compute bridge, `=PY()`](https://keithcu.com/wordpress/?p=5310)
 
 ---
 

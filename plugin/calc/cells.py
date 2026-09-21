@@ -39,10 +39,22 @@ from plugin.calc.manipulator import CellManipulator
 # Inspector.read_range stays uncapped for UNO tests and internal callers.
 _READ_CELL_RANGE_MAX_CELLS = 80
 _READ_CELL_RANGE_PREVIEW_ROWS = 10
+# Size + peek + fill-down first; =PY only for small reductions (not a hard =PY funnel).
 _READ_CELL_RANGE_TRUNCATED_MSG = (
-    "Range is too large to load into chat (would overload the model context). "
-    "The sample below is a peek only — pass this A1 address to =PY instead of re-reading."
+    "Range is too large to load into chat (would overload the model context): "
+    "{rows} rows × {columns} columns ({cells} cells). "
+    "The sample below is a peek only — do not re-read the full range. "
+    "Row-wise ordinary Calc formulas: write_formula_range into a 1-column "
+    "(or 1-row) destination; fill-down adjusts relative refs. "
+    "Reductions that spill a small result: write =PY into one empty cell "
+    "outside the data."
 )
+# Truncated-path distinct peek only (not a public tool). High-unique columns
+# are summarized, not listed — no phone book in chat.
+_DISTINCT_PEEK_MAX_COLUMNS = 8
+_DISTINCT_PEEK_MAX_ROWS = 2000
+_DISTINCT_PEEK_LIST_CAP = 12
+_DISTINCT_PEEK_HIGH_CARDINALITY = 40
 
 from plugin.doc.visual_helpers import parse_color_to_uno_int
 from plugin.framework.deal_shim import deal
@@ -101,9 +113,91 @@ def _preview_if_large(bridge, range_name: str) -> dict[str, Any] | None:
             "columns": cols,
             "cells": cells,
             "preview_range": _format_sheet_address(range_name, local),
+            "start_column": int(addr.StartColumn),
+            "start_row": int(addr.StartRow),
         }
     except Exception:
         log.exception("Could not size range %s for read_cell_range cap; reading in full", range_name)
+        return None
+
+
+def _distinct_display(val: Any) -> str | None:
+    """Stable chat label for one getDataArray cell; skip blanks."""
+    if val is None or val == "":
+        return None
+    if isinstance(val, float) and abs(val) < 1e15 and val.is_integer():
+        return str(int(val))
+    return str(val)
+
+
+def _column_distinct_peek(data_array: Any, *, start_column: int = 0) -> list[dict[str, Any]]:
+    """Cardinality-capped distincts per column from a getDataArray grid.
+
+    First row is the header when it looks like text; high-unique columns
+    report a count only (no value list).
+    """
+    if not isinstance(data_array, (list, tuple)) or not data_array:
+        return []
+    header_row = data_array[0]
+    if not isinstance(header_row, (list, tuple)):
+        return []
+    n_cols = min(len(header_row), _DISTINCT_PEEK_MAX_COLUMNS)
+    if n_cols <= 0:
+        return []
+    body = data_array[1:]
+    out: list[dict[str, Any]] = []
+    for col_i in range(n_cols):
+        raw_header = header_row[col_i]
+        header = raw_header.strip() if isinstance(raw_header, str) and raw_header.strip() else None
+        label = header or index_to_column(start_column + col_i)
+        # Track every distinct for the count; only the first LIST_CAP go in the payload.
+        seen: set[str] = set()
+        listed: list[str] = []
+        overflow = False
+        for row in body:
+            if not isinstance(row, (list, tuple)) or col_i >= len(row):
+                continue
+            key = _distinct_display(row[col_i])
+            if key is None or key in seen:
+                continue
+            seen.add(key)
+            if len(listed) < _DISTINCT_PEEK_LIST_CAP:
+                listed.append(key)
+            if len(seen) > _DISTINCT_PEEK_HIGH_CARDINALITY:
+                overflow = True
+                break
+        entry: dict[str, Any] = {"column": label}
+        if overflow:
+            entry["unique_count"] = f"{_DISTINCT_PEEK_HIGH_CARDINALITY}+"
+            entry["skipped"] = "high cardinality"
+        else:
+            entry["unique_count"] = len(seen)
+            if len(seen) > _DISTINCT_PEEK_LIST_CAP:
+                entry["skipped"] = "high cardinality"
+            else:
+                entry["values"] = listed
+        out.append(entry)
+    return out
+
+
+def _try_column_distinct_peek(bridge, range_name: str, preview: dict[str, Any]) -> list[dict[str, Any]] | None:
+    """Scan a clipped window of the oversized range via getDataArray. Fail-soft."""
+    try:
+        start_col = int(preview["start_column"])
+        start_row = int(preview["start_row"])
+        cols = int(preview["columns"])
+        rows = int(preview["rows"])
+        end_col = start_col + min(cols, _DISTINCT_PEEK_MAX_COLUMNS) - 1
+        end_row = start_row + min(rows, _DISTINCT_PEEK_MAX_ROWS) - 1
+        local = f"{index_to_column(start_col)}{start_row + 1}:{index_to_column(end_col)}{end_row + 1}"
+        clipped = _format_sheet_address(range_name, local)
+        cell_range = bridge.resolve_range_or_address(clipped)
+        if not hasattr(cell_range, "getDataArray"):
+            return None
+        peek = _column_distinct_peek(cell_range.getDataArray(), start_column=start_col)
+        return peek or None
+    except Exception:
+        log.exception("Could not compute column distinct peek for %s", range_name)
         return None
 
 
@@ -156,6 +250,27 @@ def _a1_range_shape(range_name: str) -> tuple[int, int, int] | None:
     return cols * rows, rows, cols
 
 
+def _normalize_source_arg(raw: Any) -> tuple[str | None, str | None]:
+    """Parse optional ``source`` (A1 / Sheet.A1). Returns ``(source, error)``."""
+    if raw is None:
+        return None, None
+    if not isinstance(raw, str):
+        return None, "source must be a string A1 or Sheet.A1 address (dot sheet prefix, never Excel !)."
+    stripped = raw.strip()
+    return (stripped or None), None
+
+
+def _values_conflict_with_source(kwargs: dict[str, Any]) -> bool:
+    """True when ``source`` is set and ``values`` was also passed (including empty).
+
+    Keith rule: source and values are mutually exclusive. Empty ``values`` still
+    counts as provided so a paste-copy is not confused with a clear/write.
+    """
+    if "values" not in kwargs:
+        return False
+    return kwargs.get("values") is not None
+
+
 def _values_length_mismatch_message(range_name: str, n_vals: int, n_cells: int, rows: int, cols: int) -> str:
     """Loud error so the model can resize the array or the range (no silent zip/pad)."""
     hint = ""
@@ -176,8 +291,10 @@ class ReadCellRange(ToolBase):
     name = "read_cell_range"
     description = (
         "Reads values from the specified cell range(s). Inspection only — keep ranges small "
-        "(headers or a few dozen cells). A large dump overloads chat context; for bulk work "
-        "write =PY(..., DataRange) instead of reading the block. Date/time-formatted numeric "
+        "(headers or a few dozen cells). A large dump overloads chat context; oversized reads "
+        "return a peek plus size only. Row-wise transforms use write_formula_range (fill-down); "
+        "reductions that spill a small result use =PY into one empty cell outside the data. "
+        "Date/time-formatted numeric "
         "cells return an ISO 8601 string in `value` with `type` and `format_category` of date, "
         "time, or datetime, plus `format_code` (Calc FormatString, observability only). "
         "Elapsed/stopwatch formats (`[HH]:MM:SS`, …) return `PTnHnMnS` (e.g. PT30H) with "
@@ -225,10 +342,12 @@ class ReadCellRange(ToolBase):
             grid = inspector.read_range(range_name, include_format_info=True)
             return {"status": "ok", "result": [grid]}
         grid = inspector.read_range(preview["preview_range"], include_format_info=True)
-        return {
+        payload: dict[str, Any] = {
             "status": "ok",
             "truncated": True,
-            "message": _READ_CELL_RANGE_TRUNCATED_MSG,
+            "message": _READ_CELL_RANGE_TRUNCATED_MSG.format(
+                rows=preview["rows"], columns=preview["columns"], cells=preview["cells"]
+            ),
             "range": range_name,
             "preview_range": preview["preview_range"],
             "rows": preview["rows"],
@@ -236,6 +355,10 @@ class ReadCellRange(ToolBase):
             "cells": preview["cells"],
             "result": [grid],
         }
+        distincts = _try_column_distinct_peek(bridge, range_name, preview)
+        if distincts:
+            payload["column_distincts"] = distincts
+        return payload
 
 
 class WriteCellRange(ToolBase):
@@ -243,7 +366,18 @@ class WriteCellRange(ToolBase):
 
     name = "write_formula_range"
     description = (
-        'To run Python on sheet data, write =PY("result = …"; DataRange) into one empty cell '
+        "Writes formulas or values to a cell range(s) efficiently. Single string fills entire range; "
+        "JSON array must match range size exactly (one value per cell); or multiline CSV from a start "
+        "cell. Use an empty string or empty array to clear contents. Supports lists for non-contiguous "
+        "areas. A single ordinary Calc formula into a 1-column or 1-row range fill-down/across "
+        "adjusts relative A1 refs ($ stays absolute). Prefer plain values/ISO "
+        "dates for static cells; use an '=' formula only when the cell must stay live (e.g. TODAY(), "
+        "computed duration). Dates and times: use ISO 8601 only — YYYY-MM-DD, HH:MM[:SS], or "
+        "YYYY-MM-DDTHH:MM[:SS]. These become real Calc date/time values. Elapsed/stopwatch values: "
+        "use PTnHnMnS (e.g. PT30H, PT1H30M); these become duration serials with elapsed formatting. "
+        "Do not include a timezone offset or Z, and do not use locale forms like 08/05/2026; those "
+        "are stored as text. Prefix with an apostrophe ('2026-08-08) to force text. "
+        'Reductions that spill a small result: write =PY("result = …"; DataRange) into one empty cell '
         "outside DataRange (e.g. J1 for A1:H500, or a new sheet). That cell spills the 2D result "
         "(values are in the neighbors). A small peek of the origin or headers is enough — do not "
         "dump the input or full spill into chat; do not write =PY onto DataRange (circular). If "
@@ -252,16 +386,9 @@ class WriteCellRange(ToolBase):
         'Always use data.to_pandas() rather than pd.DataFrame(data) because to_pandas() uses row 0 as column headers; '
         'pd.DataFrame(data) treats headers as data and generates synthetic numeric columns (0..N) that spill as a junk top row. '
         "np.unique on mixed rows fails — NumPy object arrays cannot compare/hash mixed cell types. "
-        "Writes formulas or values to a cell range(s) efficiently. Single string fills entire range; "
-        "JSON array must match range size exactly (one value per cell); or multiline CSV from a start "
-        "cell. Use an empty string or empty array to clear contents. Supports lists for non-contiguous "
-        "areas. Prefer plain values/ISO "
-        "dates for static cells; use an '=' formula only when the cell must stay live (e.g. TODAY(), "
-        "computed duration). Dates and times: use ISO 8601 only — YYYY-MM-DD, HH:MM[:SS], or "
-        "YYYY-MM-DDTHH:MM[:SS]. These become real Calc date/time values. Elapsed/stopwatch values: "
-        "use PTnHnMnS (e.g. PT30H, PT1H30M); these become duration serials with elapsed formatting. "
-        "Do not include a timezone offset or Z, and do not use locale forms like 08/05/2026; those "
-        "are stored as text. Prefix with an apostrophe ('2026-08-08) to force text."
+        "DO: to copy a block onto another sheet or place, pass source and dest range; do not pass "
+        "values. Dest is the top-left (or a matching range whose start is used); the copied size is "
+        "the source extent. Relative formula refs adjust for the dest offset; $ stay."
     )
     parameters = {
         "type": "object",
@@ -272,21 +399,53 @@ class WriteCellRange(ToolBase):
                 "description": (
                     'Target range(s) (e.g. ["A1:A10"], ["Sheet1.B2:D2"]). '
                     "Use a dot for other sheets (Sheet1.B2), never Excel Sheet1!B2. "
-                    "Sheet prefixes target that sheet without switching the active sheet."
+                    "Sheet prefixes target that sheet without switching the active sheet. "
+                    "With source, this is the paste top-left (source extent is copied)."
                 ),
             },
+            # Pin vs fill-down fork lives on values (not CALC_CORE FORMULAS
+            # and not the main tool description). #657 replaced the old
+            # pin-workaround with fill-down teaching; a JSON array of copied
+            # =B2*… still pins every row to the first ref.
             "values": {
                 "type": "string",
                 "description": (
+                    "Required unless source is set (do not pass both). "
                     "Single string: fills the entire range with that value or formula "
-                    "(use '=' prefix for formulas). In formulas, other sheets are Sheet.A1 "
-                    "(dot), not Excel Sheet!A1. JSON array: must have exactly as many "
-                    "elements as cells in the range (e.g. '[\"a\", \"b\"]' for 2 cells). "
-                    "Empty string/array clears the range."
+                    "(use '=' prefix for formulas). One ordinary formula into a "
+                    "multi-cell column or row is fill-down/across — relative A1 refs "
+                    "adjust per cell ($ stays absolute). Prefer that for a related "
+                    "rate or tax column. In formulas, other sheets are Sheet.A1 "
+                    "(dot), not Excel Sheet!A1. JSON array: exact per-cell contents; "
+                    "must have exactly as many elements as cells in the range "
+                    "(e.g. '[\"a\", \"b\"]' for 2 cells). Repeating the same "
+                    "=B2*…-style formula in every element pins every row to the "
+                    "first ref — use one formula string over the whole column "
+                    "range instead. Empty string/array clears the range. "
+                    "A top-level FILTER/SORT/UNIQUE (or SEQUENCE and other "
+                    "array functions) is entered as an array formula over its "
+                    "result; occupied cells besides the origin are refused. "
+                    "=PY() is still the spill path for Python reductions."
+                ),
+            },
+            "array": {
+                "type": "boolean",
+                "description": (
+                    "Optional. true forces an array formula even for LET/XLOOKUP; "
+                    "false forces a scalar formula (setFormula / fill-down)."
+                ),
+            },
+            "source": {
+                "type": "string",
+                "description": (
+                    "Optional source block to copy (A1 or Sheet.A1, dot sheet prefix, "
+                    "never Excel Sheet1!A1). When set, dest range is the paste top-left "
+                    "(or a matching range whose start is used); copied size is the source "
+                    "extent. Do not pass values."
                 ),
             },
         },
-        "required": ["range", "values"],
+        "required": ["range"],
     }
     uno_services = ["com.sun.star.sheet.SpreadsheetDocument"]
     tier = "core"
@@ -299,15 +458,51 @@ class WriteCellRange(ToolBase):
         manipulator = CellManipulator(bridge)
         rn = kwargs.get("range") or []
         rn = [rn] if isinstance(rn, str) else (rn or [])
+        source, source_err = _normalize_source_arg(kwargs.get("source"))
+        if source_err:
+            return self._tool_error(source_err)
+
+        if len(rn) == 0:
+            return self._tool_error("range is required")
+
+        # source XOR values: a paste-copy must not also write/clear a values payload.
+        if source:
+            if _values_conflict_with_source(kwargs):
+                return self._tool_error(
+                    "Do not pass values when source is set. "
+                    "To copy a block, pass source and dest range only."
+                )
+            try:
+                with WriterCompoundUndo(ctx.doc, "WriterAgent: Copy range"):
+                    copied: dict[str, Any] | None = None
+                    for dest in rn:
+                        copied = manipulator.copy_formula_range(source, dest)
+                    if copied is None:
+                        return self._tool_error("range is required")
+                    msg = copied["message"]
+                    if len(rn) > 1:
+                        msg = (
+                            f"Copied {copied['rows_copied']}×{copied['cols_copied']} "
+                            f"from {source} onto {len(rn)} ranges."
+                        )
+                    return {
+                        "status": "ok",
+                        "message": msg,
+                        "rows_copied": copied["rows_copied"],
+                        "cols_copied": copied["cols_copied"],
+                    }
+            except Exception as e:
+                return self._tool_error(str(e))
         fov = kwargs.get("values")
+        # values is required when source is omitted (schema keeps it optional so
+        # source-only calls pass validate). Missing must not fall through as clear.
+        if fov is None:
+            return self._tool_error("values is required when source is omitted")
         # Normalize: schema is string for Gemini; accept number/list from other providers
         if isinstance(fov, (int, float)):
             fov = str(fov)
         elif isinstance(fov, list):
             fov = json.dumps(fov) if fov else ""
-
-        if len(rn) == 0:
-            return self._tool_error("range is required")
 
         # Schema already says JSON array length must match the range. Models
         # (solar-pro4) still passed 4 values into an 8-cell range; zip-style
@@ -326,18 +521,25 @@ class WriteCellRange(ToolBase):
                         _values_length_mismatch_message(r, n_vals, n_cells, rows, cols)
                     )
 
-        undo = WriterCompoundUndo(ctx.doc, "WriterAgent: Write formulas")
+        array_flag = kwargs.get("array")
+        if array_flag is not None and not isinstance(array_flag, bool):
+            if isinstance(array_flag, str) and array_flag.strip().lower() in ("true", "false"):
+                array_flag = array_flag.strip().lower() == "true"
+            else:
+                return self._tool_error("array must be a boolean")
+
         try:
-            if len(rn) == 1:
-                result = manipulator.write_formula_range(rn[0], fov)
-                return {"status": "ok", "message": result}
-            for r in rn:
-                manipulator.write_formula_range(r, fov)
-            return {"status": "ok", "message": f"Wrote to {len(rn)} ranges"}
+            with WriterCompoundUndo(ctx.doc, "WriterAgent: Write formulas"):
+                if len(rn) == 1:
+                    result = manipulator.write_formula_range(rn[0], fov, array=array_flag)
+                    if isinstance(result, dict):
+                        return {"status": "ok", **result}
+                    return {"status": "ok", "message": result}
+                for r in rn:
+                    manipulator.write_formula_range(r, fov, array=array_flag)
+                return {"status": "ok", "message": f"Wrote to {len(rn)} ranges"}
         except Exception as e:
             return self._tool_error(str(e))
-        finally:
-            undo.close()
 
 
 class InsertCellHtml(ToolBase):
@@ -563,9 +765,16 @@ class SortRange(ToolCalcRangeBase):
 
     name = "sort_range"
     intent = "edit"
+    # Action-time key/direction and "use this tool, don't rewrite the
+    # block" live here. Do not restack another SORT Don't/Do into
+    # CALC_CORE (flash merges adjacent identical shapes).
     description = (
         "Stable one-column sort of the specified range(s) by values in one column. "
         "Multi-key sorts are multiple calls (two stable one-column passes). "
+        "Do call sort_range to reorder rows (not rewrite the block with "
+        "write_formula_range) because hand-written order often leaves labels mid-table. "
+        "Pick sort_column for the metric to order by (0-based within the range); "
+        "set ascending=false when largest values should come first. "
         "Do pass has_header=true when row 1 is labels because otherwise labels "
         "sort as values. "
         "Supports lists for non-contiguous areas."
@@ -574,8 +783,20 @@ class SortRange(ToolCalcRangeBase):
         "type": "object",
         "properties": {
             "range": {"type": "array", "items": {"type": "string"}, "description": ('Range(s) to sort (e.g. ["A1:D10"] or ["A1:B10", "D1:E10"]).')},
-            "sort_column": {"type": "integer", "description": ("0-based column index within the range to sort by (default: 0)")},
-            "ascending": {"type": "boolean", "description": ("True for ascending, False for descending (default: true)")},
+            "sort_column": {
+                "type": "integer",
+                "description": (
+                    "0-based index of the key column inside the range "
+                    "(0 = leftmost; default: 0). Use the numeric/metric column, "
+                    "not the label column, when sorting by amount."
+                ),
+            },
+            "ascending": {
+                "type": "boolean",
+                "description": (
+                    "true = smallest first (default); false = largest/highest first."
+                ),
+            },
             "has_header": {
                 "type": "boolean",
                 "description": (

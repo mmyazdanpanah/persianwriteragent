@@ -115,7 +115,7 @@ def assert_main_thread(what: str) -> None:
 - Decorates primary UNO entry points (`get_desktop`, `get_active_document`, `confirm_unsaved_cell_edit`, etc.).
 - **Dev Builds (`GUARD_ON=1`)**: Displays a deduplicated modal error box on the UI thread and raises `RuntimeError`.
 - **Dev Builds with Guard Disabled (`GUARD_ON=0`)**: Logs `log.warning(msg, stack_info=True)` so call sites are captured in logs without crashing user sessions.
-- **Production Release OXTs (`make release`)**: Code packaging via `scripts/strip_code.py` replaces `thread_guard.py` with a minimal zero-overhead stub (`GUARD_ON = False`, `assert_main_thread` no-op, proxy unwrapped), while keeping `sync_host_dispatch()` and `in_sync_host_dispatch()` active for deadlock prevention.
+- **Production Release OXTs (`make release`)**: Code packaging via `scripts/strip_code.py` replaces `thread_guard.py` with a minimal zero-overhead stub (`GUARD_ON = False`, `assert_main_thread` no-op, proxy unwrapped), while keeping `sync_host_dispatch()` and `in_sync_host_dispatch()` active for deadlock prevention, and `on_main_thread()` checking `threading.current_thread() is threading.main_thread()` so secondary wait pumps off-main still marshal to the UI thread.
 
 ### A2. Thread Tagging at Birth
 In `run_in_background`, a thread-local task name is stamped on the worker thread for the duration of the task. Pooled workers (`wa-bg-*`) clear the tag in a `finally` block so recycled threads do not carry stale task identifiers. The runtime error message explicitly names the culprit task (e.g. `"touched UNO from background task 'web-search-embeddings'"`).
@@ -166,6 +166,7 @@ For fast CI tests where LibreOffice is not running:
 - `test_yellow_context_allows_inline_when_on_main_thread`: Asserts GUI formula evaluation on main thread executes inline without errors.
 - `test_notify_thread_violation_never_blocks`: Asserts guard violation reporting uses non-blocking `post_to_main_thread`.
 - `test_charts_process_events_regression_must_marshal`: Prevents regressions of the chart event loop hang (commit `0cfc6891`).
+- `test_guarded_getter_from_background_fails_with_marshal_fixture`: Asserts `@main_thread_only` on `doc_type.get_document_type` still raises from `run_in_background` under the Layer B pump. Import `plugin.doc` on the test thread before spawning — first import on the worker hung Windows xdist (GHA 34423268523: `join` timed out with only "Starting task" logged).
 
 ---
 
@@ -280,7 +281,7 @@ All UNO objects must be wrapped at birth using `guard_uno(obj)` or obtained via 
 ## 9. Specialized Sub-Agents & Tools Threading
 
 Specialized sub-agents (`plugin/doc/specialized_base.py`) run `DelegateToSpecializedBase.execute` on background worker threads when `is_async()` is True.
-- **Scaffolding**: `get_tools(doc=...)`, shapes canvas, and open-documents enumeration must marshal through `execute_on_main_thread()`.
+- **Scaffolding**: `get_tools(doc=...)`, shapes canvas, open-documents enumeration, the document_research workflow hint (peer catalog via `list_v1_peers` / `getRuntimeUID`), and `ToolContext.active_page_index` via `DrawBridge` in `build_tool_execute_fn` must marshal through `execute_on_main_thread()`.
 - **Sync Domain Tools**: Run via `SmolToolAdapter` which marshals tool execution to the main thread by default.
 - **Async Domain Tools** (`image_generate`, `delegate_read_document`): Run on caller worker threads and must marshal PyUNO access internally inside their own `execute_safe()` methods. Verified in [`tests/doc/test_specialized_delegation_threading.py`](../../tests/doc/test_specialized_delegation_threading.py).
 
@@ -304,10 +305,10 @@ The following items are tracked for future enhancement:
 |---|---|
 | **Native Socket-Bridge `=PY("1+1")` under `lo-test-threadguard`** | GUI formula bar recalculation executes on the main thread and hides bridge worker issues. Adding a native test case that assigns formulas over a socket bridge will exercise remote bridge execution paths against live LibreOffice. |
 | **Opengrep Inter-File Taint (`--taint-interfile`)** | Opengrep inter-file taint is currently in alpha (`v1.28.0-interfile.alpha.2`). Until mature, the gate uses `--taint-intrafile` and cross-file workers rely on explicit `@background` decorators. |
-| **AST Linter Target Scope** | Default scan targets add-in and scripting directories (`plugin/calc/python`, `plugin/scripting`). As async tools expand in `plugin/chatbot` and `plugin/embeddings`, consider extending custom AST visitor rules to additional specialized tool modules. |
+| **AST Linter Target Scope & Cross-File Taint** | `scripts/lint_thread_safety.py` scans `plugin/` with whole-codebase AST call graph tracing. It traces paths starting from `@background` entrypoints and `run_in_background` callbacks across files to `RED_UNO_SOURCES`, with `execute_on_main_thread` / `post_to_main_thread` and `on_main_thread()` serving as sanitizers. |
 | **`uno_thread_safety` Pytest Fixture Adoption** | The fixture is currently opt-in for unit tests. Expanding its default use in tests that touch document helpers ensures off-main mock access is caught early in unit suites. |
 | **Infection-Start Chokepoint Audits** | The viral proxy (`_UnoThreadGuardProxy`) relies on all factory origins wrapping returned objects in `guard_uno`. Any new UNO service factory or model loader must be audited to ensure it wraps returned objects at birth. |
-| **`MainThreadToken` Deprecation / Adoption** | `plugin/framework/thread_token.py` provides nominal type tokens for static checkers. Since type coloring is currently handled by Opengrep taint rules and runtime guards, evaluate whether to plumb strict tokens across red APIs or deprecate the module. |
+| **`MainThreadToken` Deprecation** | Evaluated and removed. Instead of polluting hundreds of function signatures with nominal type tokens in a language without affine types, compile-time cross-file safety is enforced via AST call-graph tracing in `scripts/lint_thread_safety.py`. |
 
 ---
 

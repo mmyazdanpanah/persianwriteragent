@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: PACKAGE VERSION\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-09-04 14:15-0400\n"
+"POT-Creation-Date: 2026-09-14 16:20-0400\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: Hindi <LL@li.org>\n"
@@ -71,9 +71,28 @@ msgstr "इस नियंत्रण के लिए नोटबुक स�
 msgid "Open a Writer document first."
 msgstr "पहले एक Writer दस्तावेज़ खोलें।"
 
-#: plugin/notebook/writer_importer.py
+#: plugin/notebook/notebook_controls.py
 msgid "Run code cell"
 msgstr "कोड सेल चलाएँ"
+
+#: plugin/embeddings/search_ui.py
+msgid "just now"
+msgstr "अभी"
+
+#: plugin/embeddings/search_ui.py
+#, python-brace-format
+msgid "{0}m ago"
+msgstr "{0} मिनट पहले"
+
+#: plugin/embeddings/search_ui.py
+#, python-brace-format
+msgid "{0}h ago"
+msgstr "{0} घंटे पहले"
+
+#: plugin/embeddings/search_ui.py
+#, python-brace-format
+msgid "{0}d ago"
+msgstr "{0} दिन पहले"
 
 #: plugin/embeddings/search_ui.py
 msgid "Cache Status: No active document"
@@ -94,20 +113,6 @@ msgstr "कैश स्थिति: निर्मित नहीं (lanced
 #: plugin/embeddings/search_ui.py
 msgid "Cache Status: Not built"
 msgstr "कैश स्थिति: निर्मित नहीं"
-
-#: plugin/embeddings/search_ui.py
-msgid "just now"
-msgstr "अभी"
-
-#: plugin/embeddings/search_ui.py
-#, python-brace-format
-msgid "{0}m ago"
-msgstr "{0} मिनट पहले"
-
-#: plugin/embeddings/search_ui.py
-#, python-brace-format
-msgid "{0}h ago"
-msgstr "{0} घंटे पहले"
 
 #: plugin/embeddings/search_ui.py
 #, python-brace-format
@@ -407,7 +412,8 @@ msgid "Status:"
 msgstr "स्थिति:"
 
 #: plugin/calc/python/cell_editor_ui.py plugin/chatbot/panel_wiring.py
-#: plugin/scripting/editor_ui_strings.py plugin/xdl_strings.py
+#: plugin/chatbot/panel.py plugin/scripting/editor_ui_strings.py
+#: plugin/xdl_strings.py
 msgid "Ready"
 msgstr "तैयार"
 
@@ -547,12 +553,13 @@ msgstr "छवियाँ सम्मिलित की गईं"
 #: plugin/calc/python/geometric_recalc.py
 #, python-format
 msgid ""
-"Geometric Recalc Order skipped sheet '%s': found %s or more Python cells "
-"(discovery cap). The sheet was left unchained so a partial list is not "
-"treated as complete."
+"Geometric Recalc Order skipped sheet '%(sheet)s': found %(cap)s or more "
+"Python cells (discovery cap). The sheet was left unchained so a partial list "
+"is not treated as complete."
 msgstr ""
-"Geometric Recalc Order ने शीट '%s' को छोड़ दिया: %s या अधिक Python सेल मिले "
-"(डिस्कवरी कैप)। शीट को अपरिवर्तित छोड़ दिया गया ताकि आंशिक सूची को पूर्ण न माना जाए।"
+"ज्यामितीय पुनर्गणना क्रम ने शीट '%(sheet)s' को छोड़ दिया: %(cap)s या अधिक पायथन सेल "
+"मिले (डिस्कवरी कैप)। शीट को अपरिवर्तित छोड़ दिया गया ताकि आंशिक सूची को पूर्ण न माना "
+"जाए।"
 
 #: plugin/calc/excel_py_convert/auto_open.py
 #, python-brace-format
@@ -1310,6 +1317,10 @@ msgid ""
 "Settings.]"
 msgstr ""
 "[मॉडल {0} नेटिव ऑडियो का समर्थन नहीं करता है। कृपया सेटिंग्स में एक STT मॉडल चुनें।]"
+
+#: plugin/chatbot/panel.py
+msgid "[Peer send requires Chat mode on this sidebar.]"
+msgstr "[पीयर सेंड के लिए इस साइडबार पर चैट मोड की आवश्यकता है।]"
 
 #: plugin/chatbot/web_research_chat.py
 #, python-format
@@ -3111,6 +3122,20 @@ msgstr "Calc स्प्रेडशीट उपकरण"
 
 msgid "Max Rows Display"
 msgstr "अधिकतम पंक्तियाँ प्रदर्शित करें"
+
+msgid "Cache Excel siblings as ODS"
+msgstr "Excel सहोदरों को ODS के रूप में कैश करें"
+
+msgid ""
+"Convert sibling .xlsx/.xls to writeragent_ods_cache/ beside the folder so "
+"repeated DuckDB SQL reuses the ODS. Native .ods and the live workbook are "
+"never cached. Set calc.ods_cache_enabled false in writeragent.json to "
+"disable."
+msgstr ""
+"सहोदर .xlsx/.xls को फ़ोल्डर के बगल में writeragent_ods_cache/ में बदलें ताकि बार-बार "
+"DuckDB SQL, ODS का पुन: उपयोग कर सके। नेटिव .ods और लाइव वर्कबुक कभी कैश नहीं किए "
+"जाते हैं। इसे अक्षम करने के लिए writeragent.json में calc.ods_cache_enabled को false "
+"पर सेट करें।"
 
 msgid "Sidebar"
 msgstr "साइडबार"

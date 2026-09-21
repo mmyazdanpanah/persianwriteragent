@@ -16,12 +16,14 @@ LibreOffice maintains a rigorous structural hierarchy of its documents via the U
 
 ### Draw and Impress (Draw Tree)
 
-The `get_draw_tree` tool extracts the hierarchical structure of a Draw page or Impress slide. It translates raw UNO objects (`com.sun.star.drawing.RectangleShape`) into semantic JSON nodes.
+The `get_draw_tree` tool extracts the hierarchical structure of a Draw page or Impress slide. It translates raw UNO objects (`com.sun.star.drawing.RectangleShape`) into semantic JSON nodes. Vision-capable chat can also call `get_image page=N` for a PNG of that page — a screenshot for layout QA, not a substitute for this tree. `get_image` `page` is **0-based**.
 
 **Features of the Draw Tree:**
 * **Hierarchy:** Grouped shapes become parent nodes with nested children.
-* **Spatial Geometry:** Extracts precise `x`, `y`, `width`, and `height` properties.
+* **Spatial Geometry:** Extracts precise `x`, `y`, `width`, and `height` properties (the bbox used for paper-form neighbor labels).
 * **Semantic Attributes:** Reads the underlying `text`, `name`, `alt_title`, and `alt_description`.
+* **Paper-form blanks:** Empty or near-empty text-capable shapes are marked `fillable=true` with an optional `label_hint` (nearest text to the left or above). Address them by `name` via `fill_draw_fields` / `shape_upsert`. This is **not** PDF/AcroForm fill — a PDF opened in Draw is an editable stand-in.
+* **ControlShapes:** Live form widgets include `control.type`, `control.name`, and current `text` / `state` so the main agent can see them without a forms delegation.
 * **Relational Logic:** For `ConnectorShape`s, it directly extracts the `StartShape` and `EndShape`, proving unambiguous flow logic for flowcharts.
 * **Visual Style:** Captures `FillColor`, `LineColor`, and `ZOrder`.
 
@@ -36,7 +38,7 @@ While the `writer_tree` extracts the heading structure, language models suffer f
 The `get_page_objects` tool jumps the view cursor to a specific physical page and extracts a highly concentrated, multimodal JSON snapshot:
 *   **Paragraphs:** The exact text visible on that physical page.
 *   **Images & Tables:** Metadata about anchored graphical objects and text tables.
-*   **Embedded Draw Shapes:** Writer documents contain a hidden "draw page" layer (`doc.getDrawPage()`). The tool cross-references shape anchors (`AT_PAGE`, `AT_PARAGRAPH`) with the boundaries of the physical page. It then extracts the exact same semantic LO-DOM (geometry, text, names) for flowcharts and diagrams embedded *within* the text report.
+*   **Embedded Draw Shapes:** Writer documents contain a hidden "draw page" layer (`doc.getDrawPage()`). Page-anchored shapes, frames, and graphics use `AnchorPageNo` (no view hop). Paragraph/character-anchored objects use the view-cursor page check (`gotoRange(anchor)` + `vc.getPage()`). Do not classify shapes by cloning the view cursor through the body `XText` after `jumpToEndOfPage` — that raises UNO `RuntimeException` when the page end sits in a table cell or frame. Scan order is leave nested XText → `lockControllers` → unlock-retry on table/frame/graphic anchors only → unlock before restore; see [get-page-objects-leave-lock.md](get-page-objects-leave-lock.md). The snapshot still includes geometry, text, and names for flowcharts and diagrams in the text report.
 
 This allows the agent to safely scale its understanding of massive documents by asking: "What am I looking at on Page 12?"
 

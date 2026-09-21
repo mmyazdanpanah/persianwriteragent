@@ -84,6 +84,43 @@ def test_libreharper_manifest_registers_harper_proofreader_only() -> None:
     assert "ai_grammar_proofreader.py" not in body
     assert "CalcAddIns" not in body
     assert "Jobs.xcu" not in body
+    # E: WriterAgent owns the sidebar. Harper file-entries must not claim chat UI.
+    root = ET.parse(path).getroot()
+    full_paths = []
+    for el in root.iter():
+        full = el.get("{http://openoffice.org/2001/manifest}full-path") or el.get("manifest:full-path")
+        if full:
+            full_paths.append(full)
+    joined = "\n".join(full_paths)
+    assert "ChatPanelFactory" not in joined
+    assert "WriterAgentDeck" not in joined
+    assert "ChatPanelDialog" not in joined
+    assert "Factories.xcu" not in joined
+    assert "Sidebar.xcu" not in joined
+    assert "panel_factory.py" not in joined
+
+
+def test_libreharper_bundle_excludes_chatpanel_ui() -> None:
+    from scripts.libreharper_bundle_paths import (
+        LIBREHARPER_FORBIDDEN_CHAT_UI_MARKERS,
+        collect_libreharper_plugin_paths,
+        is_libreharper_forbidden_chat_ui,
+    )
+
+    paths = collect_libreharper_plugin_paths(_repo_root())
+    leaked = [p for p in paths if is_libreharper_forbidden_chat_ui(p)]
+    assert leaked == []
+    assert "plugin/chatbot/panel_factory.py" in LIBREHARPER_FORBIDDEN_CHAT_UI_MARKERS
+    assert is_libreharper_forbidden_chat_ui("registry/org/openoffice/Office/UI/Factories.xcu")
+    assert is_libreharper_forbidden_chat_ui("Dialogs/ChatPanelDialog.xdl")
+    assert is_libreharper_forbidden_chat_ui("plugin/chatbot/panel_factory.py")
+    assert not is_libreharper_forbidden_chat_ui("plugin/writer/locale/harper_proofreader.py")
+    # Harper copies extension-harper/registry (grammar XCU only) and assets, not UI.
+    harper_registry = os.path.join(
+        _repo_root(), "extension-harper", "registry", "org", "openoffice", "Office"
+    )
+    assert os.path.isfile(os.path.join(harper_registry, "LinguisticLibreHarperGrammar.xcu"))
+    assert not os.path.isdir(os.path.join(harper_registry, "UI"))
 
 
 def test_grammar_work_queue_has_no_top_level_framework_client_package_import() -> None:
@@ -174,6 +211,9 @@ def test_collect_libreharper_plugin_paths() -> None:
     assert "plugin/chatbot/extension_update_check.py" in paths
     assert "plugin/chatbot/dialogs.py" in paths
     assert "plugin/framework/client/requests.py" in paths
+    # Dual-install: WriterAgent's chatbot package init imports ModuleBase.
+    assert "plugin/framework/module_base.py" in paths
+    assert "plugin/chatbot/__init__.py" not in paths
 
 
 def test_libreharper_config_always_uses_harper_and_ignores_json() -> None:
@@ -239,6 +279,27 @@ def test_harper_proofreader_initialization_starts_harper_warmup() -> None:
         reset_package_extension_id_for_tests()
 
 
+def test_harper_proofreader_skips_register_side_effects_on_no_vcl() -> None:
+    """uno.bin register/enable must not warmup harper-ls or schedule update check (#768)."""
+    from unittest.mock import MagicMock, patch
+    from plugin.writer.locale.harper_proofreader import HarperProofreader
+    from plugin.framework.uno_context import reset_package_extension_id_for_tests
+
+    try:
+        ctx = MagicMock()
+        with (
+            patch("plugin.framework.uno_context.desktop_create_is_unsafe", return_value=True),
+            patch("plugin.chatbot.extension_update_check.schedule_extension_update_check_once") as mock_update,
+            patch("plugin.writer.locale.harper.maybe_start_harper_async") as mock_start,
+        ):
+            HarperProofreader(ctx)
+        mock_update.assert_not_called()
+        mock_start.assert_not_called()
+        ctx.ServiceManager.createInstanceWithContext.assert_not_called()
+    finally:
+        reset_package_extension_id_for_tests()
+
+
 def test_harper_proofreader_skips_warmup_without_config_dir() -> None:
     from unittest.mock import MagicMock, patch
     from plugin.writer.locale.harper_proofreader import HarperProofreader
@@ -255,5 +316,71 @@ def test_harper_proofreader_skips_warmup_without_config_dir() -> None:
             mock_start.assert_not_called()
     finally:
         reset_package_extension_id_for_tests()
+
+
+def test_libreharper_bundle_covers_chatbot_package_init_for_dual_install() -> None:
+    """WriterAgent ``plugin.chatbot`` init imports ModuleBase; slim OXT must ship it.
+
+    ``make deploy-harper`` does not remove WriterAgent. ``plugin/__init__.py``
+    uses ``pkgutil.extend_path``, so the full chatbot package init can run
+    against LibreHarper's regular ``plugin.framework`` package. The shipped-
+    file import graph does not see that parent init because LibreHarper does
+    not copy ``plugin/chatbot/__init__.py``.
+    """
+    from scripts.libreharper_bundle_paths import collect_libreharper_plugin_paths
+
+    root = _repo_root()
+    shipped = set(collect_libreharper_plugin_paths(root))
+    init_path = os.path.join(root, "plugin", "chatbot", "__init__.py")
+    tree = ast.parse(open(init_path, encoding="utf-8").read(), filename="plugin/chatbot/__init__.py")
+    missing: list[str] = []
+    for node in tree.body:
+        if not isinstance(node, ast.ImportFrom) or not node.module:
+            continue
+        if not (node.module == "plugin" or node.module.startswith("plugin.")):
+            continue
+        for alias in node.names:
+            if alias.name == "*":
+                continue
+            rel = node.module.replace(".", "/") + "/" + alias.name + ".py"
+            pkg = node.module.replace(".", "/") + "/" + alias.name + "/__init__.py"
+            file_mod = node.module.replace(".", "/") + ".py"
+            if rel not in shipped and pkg not in shipped and file_mod not in shipped:
+                missing.append(f"plugin/chatbot/__init__.py -> from {node.module} import {alias.name}")
+    assert missing == []
+
+
+def test_libreharper_dual_install_can_import_extension_update_check(tmp_path) -> None:
+    """Stage slim files + WriterAgent chatbot init; update-check import must work."""
+    import shutil
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    from scripts.libreharper_bundle_paths import collect_libreharper_plugin_paths
+
+    root = Path(_repo_root())
+    stage = tmp_path / "bundle"
+    for rel in collect_libreharper_plugin_paths(str(root)):
+        dest = stage / rel
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(root / rel, dest)
+    shutil.copy2(root / "plugin" / "chatbot" / "__init__.py", stage / "plugin" / "chatbot" / "__init__.py")
+
+    code = (
+        "from plugin.chatbot.extension_update_check import schedule_extension_update_check_once\n"
+        "assert schedule_extension_update_check_once is not None\n"
+        "from plugin.framework.module_base import ModuleBase\n"
+        "assert ModuleBase is not None\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        cwd=str(stage),
+        env={**os.environ, "PYTHONPATH": str(stage), "PYTHONDONTWRITEBYTECODE": "1"},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr or result.stdout
 
 

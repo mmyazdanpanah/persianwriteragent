@@ -40,7 +40,25 @@ class TestGetProviderDefaults(unittest.TestCase):
 
     def test_openrouter_default_image_model(self):
         d = get_provider_defaults("openrouter")
-        self.assertEqual(d.get("image_model"), "google/gemini-2.5-flash-image")
+        self.assertEqual(d.get("image_model"), "google/gemini-3.1-flash-lite-image")
+
+    def test_together_default_image_model_is_flux2_dev(self):
+        from plugin.framework.default_models import DEFAULT_MODELS
+        from plugin.framework.constants import ModelCapability
+
+        d = get_provider_defaults("together")
+        self.assertEqual(d.get("image_model"), "black-forest-labs/FLUX.2-dev")
+
+        flux = next((m for m in DEFAULT_MODELS if m.get("display_name") == "FLUX.2 [dev]"), None)
+        self.assertIsNotNone(flux)
+        self.assertEqual(flux["ids"].get("together"), "black-forest-labs/FLUX.2-dev")
+        self.assertTrue(flux.get("default_image"))
+        self.assertTrue(bool(flux["capability"] & ModelCapability.IMAGE))
+
+        flash = next((m for m in DEFAULT_MODELS if m.get("ids", {}).get("together") == "google/flash-image-2.5"), None)
+        self.assertIsNotNone(flash)
+        self.assertFalse(flash.get("default_image"))
+        self.assertTrue(bool(flash["capability"] & ModelCapability.IMAGE))
 
     def test_openrouter_free_model_catalog(self):
         from plugin.framework.default_models import DEFAULT_MODELS
@@ -53,6 +71,7 @@ class TestGetProviderDefaults(unittest.TestCase):
         self.assertTrue(bool(caps & ModelCapability.CHAT))
         self.assertTrue(bool(caps & ModelCapability.TOOLS))
         self.assertTrue(bool(caps & ModelCapability.VISION))
+        self.assertEqual(free_m["context_length"], 200000)
 
     def test_gemini_31_pro_catalog(self):
         from plugin.framework.default_models import DEFAULT_MODELS
@@ -67,6 +86,20 @@ class TestGetProviderDefaults(unittest.TestCase):
         self.assertTrue(bool(caps & ModelCapability.TOOLS))
         self.assertTrue(bool(caps & ModelCapability.VISION))
         self.assertTrue(bool(caps & ModelCapability.AUDIO))
+
+    def test_writeragent_mock_catalog_window(self):
+        from plugin.framework.default_models import DEFAULT_MODELS
+        from plugin.framework.constants import ModelCapability
+
+        row = next((m for m in DEFAULT_MODELS if m.get("ids", {}).get("mock") == "writeragent-mock"), None)
+        self.assertIsNotNone(row)
+        self.assertEqual(row["context_length"], 32768)
+        self.assertFalse(row.get("default_text"))
+        self.assertTrue(bool(row["capability"] & ModelCapability.CHAT))
+        # Must not become the custom-endpoint Settings default.
+        self.assertIsNone(get_provider_defaults("custom").get("text_model"))
+        self.assertIsNone(resolve_model_id(row, "openai"))
+        self.assertIsNone(resolve_model_id(row, "custom"))
 
     def test_together_deepseek_v4_flash_catalog(self):
         from plugin.framework.default_models import DEFAULT_MODELS

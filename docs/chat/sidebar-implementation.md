@@ -26,6 +26,8 @@ Prompt text lives in [`plugin/framework/prompts.py`](../../plugin/framework/prom
 
 **Sidebar mode dropdown** (Chat, Image, Web Research, …, Librarian last) is session-only and is **not** persisted to `writeragent.json`. On load the panel selects **Librarian** when `USER.md` is empty, otherwise **Chat**. Chat and Web Research histories are per document; Librarian uses a fixed session id in the same history DB (one transcript per LibreOffice user profile). Switching modes swaps the active `ChatSession` and does not mix transcripts.
 
+**Image mode** skips the chat LLM and calls `image_generate` from [`send_handlers.py`](../../plugin/chatbot/send_handlers.py). No selection: text-to-image insert. Selected document graphic: `source_image='selection'` (img2img + replace in place). Chat/specialist img2img steering is a separate path.
+
 ### Reasoning (`[Thinking]`) and tool calls
 
 During a **tool-loop** send, the sidebar can show provider reasoning under `[Thinking]` while tools still run from native `tool_calls` (or content fallback parsers)—reasoning text is never parsed as a tool invocation. Reasoning is **display-only** for that turn: it is not written into session messages for the next API round (only `content` + `tool_calls` are). That matches common OpenAI-compat streaming behavior; provider docs often ask clients to echo reasoning back on later tool-loop turns for quality on reasoning models—a possible future change, not current behavior.
@@ -106,6 +108,7 @@ See also [../writer/math-tex.md](../writer/math-tex.md) (TeX/MathML import) and 
 
 2. **Create the panel window with ContainerWindowProvider + XDL** (not manual Toolkit/UnoControl):
    - In `getRealInterface()`, get the extension base URL via `PackageInformationProvider.getPackageLocation(EXTENSION_ID)`.
+   - **Thread hop:** URP dispatch of `WriterAgentDeck` can run `getRealInterface` on a Dummy-N thread. `get_extension_url` / PackageInformationProvider is `@main_thread_only`. Create (path init + window + wiring) goes through `_run_on_main_thread` → `execute_on_main_thread()` so ChatPanel opens with `WRITERAGENT_UNO_THREAD_GUARD` on. Verify: open the deck with the guard enabled; no `Dummy-N` `get_extension_url` abort. The test harness may still set `GUARD=0` because `WRITERAGENT_TESTING=1` inlines that hop.
    - Use `ContainerWindowProvider.createContainerWindow(dialog_url, "", parent_window, None)` with the path to your XDL (e.g. `WriterAgentDialogs/ChatPanelDialog.xdl`).
    - **Critical:** After `createContainerWindow()` returns, call **`setVisible(True)`** on the returned window. The sidebar framework does not make the panel content visible; without this call the panel shows only the title bar and empty white space.
 

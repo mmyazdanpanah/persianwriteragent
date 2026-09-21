@@ -230,38 +230,6 @@ def _try_writer_invalidate_and_pump(doc) -> None:
         log.debug("create_shape writer_invalidate: %s", ex)
 
 
-def _try_writer_select_created_shape(doc, shape) -> None:
-    """Select the new shape so the view shows handles and scrolls to it if needed."""
-    try:
-        if doc is None or not doc.supportsService("com.sun.star.text.TextDocument"):
-            return
-        ctrl = doc.getCurrentController()
-        if ctrl is None:
-            return
-        import uno
-
-        sel = None
-        try:
-            t = uno.getTypeByName("com.sun.star.view.XSelectionSupplier")
-            sel = ctrl.queryInterface(t)
-        except Exception:
-            pass
-        if sel is None:
-            try:
-                from com.sun.star.view import XSelectionSupplier
-
-                sel = ctrl.queryInterface(XSelectionSupplier)
-            except Exception:
-                sel = None
-        if sel is None:
-            log.debug("create_shape writer_select: no XSelectionSupplier")
-            return
-        sel.select(shape)
-        log.debug("create_shape writer_select: controller.select(shape) ok")
-    except Exception as ex:
-        log.debug("create_shape writer_select: %s: %s", type(ex).__name__, ex)
-
-
 def _log_create_shape_page_context(doc, bridge, page) -> None:
     """How the target draw page was chosen (Writer vs Draw / controller vs first page)."""
     try:
@@ -297,33 +265,15 @@ def _log_create_shape_page_context(doc, bridge, page) -> None:
 def _page_index_for(bridge, page):
     """Index of ``page`` in the document's draw pages collection.
 
-    ``uno.isSame`` is not available in all LibreOffice Python-UNO builds; fall back to
-    identity and ``==`` (many UNO bindings implement equality for the same underlying object).
+    Uses ``uno_same`` (``is`` → ``==`` → ``uno.isSame``). PyUNO can hand distinct
+    wrappers for one draw page; ``uno.isSame`` is also missing on some builds.
     """
+    from plugin.framework.uno_context import uno_same
+
     pages = bridge.get_pages()
-    is_same = None
-    try:
-        import uno
-
-        is_same = getattr(uno, "isSame", None)
-    except ImportError:
-        pass
-
     for i in range(pages.getCount()):
-        p = pages.getByIndex(i)
-        if p is page:
+        if uno_same(pages.getByIndex(i), page):
             return i
-        try:
-            if p == page:
-                return i
-        except Exception:
-            pass
-        if callable(is_same):
-            try:
-                if is_same(p, page):
-                    return i
-            except Exception:
-                pass
     return 0
 
 
@@ -468,10 +418,30 @@ class DrawShapes:
             raise DrawError(f"Failed to create shape: {str(e)}", code="DRAW_SHAPE_CREATION_ERROR", details={"shape_type": shape_type, "position": position, "size": size, "original_error": str(e), "error_type": type(e).__name__}) from e
 
 
+def _clamp_shape_text_autogrow(shape) -> None:
+    """Keep explicit Size after setString (Writer AT_PAGE custom shapes shrink to text)."""
+    for prop, value in (
+        ("TextAutoGrowHeight", False),
+        ("TextAutoGrowWidth", False),
+    ):
+        try:
+            shape.setPropertyValue(prop, value)
+        except Exception:
+            pass
+
+
 def _apply_shape_properties(shape, kwargs):
     """Helper to apply rich formatting properties to a shape."""
-    if kwargs.get("text") and hasattr(shape, "setString"):
-        shape.setString(kwargs["text"])
+    # "text" in kwargs (not truthy) so paper-form fills can write "" or keep a Name-only edit.
+    if "text" in kwargs and hasattr(shape, "setString"):
+        _clamp_shape_text_autogrow(shape)
+        shape.setString("" if kwargs["text"] is None else str(kwargs["text"]))
+
+    if kwargs.get("name") and hasattr(shape, "Name"):
+        try:
+            shape.Name = str(kwargs["name"])
+        except Exception:
+            pass
 
     # Background/Fill Color
     if kwargs.get("fill_color"):
@@ -582,12 +552,16 @@ _CREATE_SHAPE_SHAPE_TYPE_DESC = (
 
 class UpsertShape(ToolDrawShapeBase):
     name = "shape_upsert"
-    description = "Creates a new shape or modifies an existing shape on a page."
+    description = (
+        "Create or edit a shape on a page. When filling a paper-form blank, edit by shape Name "
+        "from get_draw_tree — draw-page index shifts when other shapes sit between fields."
+    )
     parameters = {
         "type": "object",
         "properties": {
             "action": {"type": "string", "enum": ["create", "edit"], "description": "Action to perform: 'create' a new shape, or 'edit' an existing one."},
-            "index": {"type": "integer", "description": "0-based index of the shape on the page (required only for action='edit')"},
+            "index": {"type": "integer", "description": "0-based index of the shape on the page (edit: pass index or name)"},
+            "name": {"type": "string", "description": "Shape Name. Edit: look up by Name when index is omitted. Create: set the new shape's Name so later fills stay stable."},
             "page": {"type": "integer", "description": "0-based page index (active page if omitted)"},
             "shape_type": {"type": "string", "description": _CREATE_SHAPE_SHAPE_TYPE_DESC + " (required only for action='create')"},
             "x": {"type": "integer", "description": "X position (100ths of mm) (required only for action='create')"},
@@ -621,8 +595,8 @@ class UpsertShape(ToolDrawShapeBase):
                 if r not in kwargs:
                     return False, f"Parameter '{r}' is required when action is 'create'"
         elif action == "edit":
-            if "index" not in kwargs:
-                return False, "Parameter 'index' is required when action is 'edit'"
+            if "index" not in kwargs and not str(kwargs.get("name") or "").strip():
+                return False, "Parameter 'index' or 'name' is required when action is 'edit'"
         else:
             return False, f"Unknown action: '{action}'. Must be 'create' or 'edit'"
             
@@ -697,9 +671,28 @@ class UpsertShape(ToolDrawShapeBase):
             _try_writer_at_page_shape_finalize(ctx.doc, bridge, page, shape)
             _try_writer_reapply_position_after_anchor(ctx.doc, shape, position, size)
 
+            # Re-apply EnhancedCustomShapeGeometry after add. Writer needs this after
+            # AT_PAGE anchor (pre-#527). Calc needs it too: pre-add Type alone stays
+            # Type-only (no Path/ViewBox) and CustomShapes do not paint on the sheet.
+            if (
+                is_custom_shape
+                and custom_shape_type
+                and ctx.doc is not None
+                and (
+                    ctx.doc.supportsService("com.sun.star.text.TextDocument")
+                    or ctx.doc.supportsService("com.sun.star.sheet.SpreadsheetDocument")
+                )
+            ):
+                geometry_applied, geometry_error = _apply_enhanced_custom_shape_type(
+                    shape, custom_shape_type
+                )
+
             _apply_shape_properties(shape, kwargs)
+            # setString can still resize Writer AT_PAGE custom shapes (Arch: 4001x4001 → 2249x489).
+            _try_writer_reapply_position_after_anchor(ctx.doc, shape, position, size)
             _try_writer_invalidate_and_pump(ctx.doc)
-            _try_writer_select_created_shape(ctx.doc, shape)
+            # Do not select after create: selected Writer AT_PAGE CustomShapes often
+            # show handles-only / no fill on Arch and headed Universal Sample.
             _log_shape_uno_snapshot("after_formatting", shape)
             if is_custom_shape:
                 _log_custom_shape_geometry_dump(shape, "after_formatting")
@@ -722,10 +715,14 @@ class UpsertShape(ToolDrawShapeBase):
             return result
 
         elif action == "edit":
-            try:
-                shape = page.getByIndex(kwargs["index"])
-            except Exception as e:
-                return self._tool_error(f"Failed to find shape at index {kwargs['index']}: {str(e)}")
+            from plugin.draw.tree import find_shape_on_page
+
+            # Index is fragile for peer "fill field X"; Name from get_draw_tree stays stable
+            # when non-fields sit between boxes. Index wins when both are passed.
+            lookup_name = kwargs.get("name") if "index" not in kwargs else None
+            shape_idx, shape, find_err = find_shape_on_page(page, index=kwargs.get("index"), name=lookup_name)
+            if find_err or shape is None:
+                return self._tool_error(find_err or "Shape not found.")
 
             if "x" in kwargs or "y" in kwargs:
                 pos = shape.getPosition()
@@ -735,8 +732,11 @@ class UpsertShape(ToolDrawShapeBase):
                 shape.setSize(Size(kwargs.get("width", size.Width), kwargs.get("height", size.Height)))
 
             _apply_shape_properties(shape, kwargs)
+            if "text" in kwargs and ("width" in kwargs or "height" in kwargs):
+                size = shape.getSize()
+                shape.setSize(Size(kwargs.get("width", size.Width), kwargs.get("height", size.Height)))
 
-            return {"status": "ok", "message": "Shape updated", "page": actual_idx}
+            return {"status": "ok", "message": "Shape updated", "page": actual_idx, "index": shape_idx, "name": getattr(shape, "Name", "") or ""}
 
 
 class ConnectShapes(ToolDrawShapeBase):

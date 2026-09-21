@@ -80,8 +80,30 @@ def test_error_flow():
     tr2 = next_state(tr.state, SendEvent(SendEventKind.ERROR_OCCURRED))
     assert tr2.state.is_busy is False
     assert tr2.state.has_text is True
+    assert tr2.state.has_audio is False
     ui_effect = next(e for e in tr2.effects if isinstance(e, UpdateUIEffect))
     assert ui_effect.status_text == "Error"
+
+
+def test_error_after_stop_rec_clears_has_audio():
+    """G28: STT/chat errors dispatch ERROR_OCCURRED while has_audio is still True.
+
+    The WAV is already gone (_transcribe_audio finally / stream error cleanup).
+    Keeping has_audio left a dead Send button; SEND_COMPLETED already clears it.
+    """
+    state = SendButtonState(False, False, False, False, True)
+    tr = next_state(state, SendEvent(SendEventKind.RECORD_CLICKED))
+    tr2 = next_state(tr.state, SendEvent(SendEventKind.STOP_REC_CLICKED))
+    assert tr2.state.has_audio is True
+    assert tr2.state.is_busy is True
+
+    tr3 = next_state(tr2.state, SendEvent(SendEventKind.ERROR_OCCURRED))
+    assert tr3.state.is_busy is False
+    assert tr3.state.is_recording is False
+    assert tr3.state.has_audio is False
+    ui_effect = next(e for e in tr3.effects if isinstance(e, UpdateUIEffect))
+    assert ui_effect.send_label == "Record"
+    assert ui_effect.send_enabled is True
 
 
 def test_invalid_record_does_not_emit_recording_or_send_effects():
@@ -102,6 +124,23 @@ def test_send_clicked_with_no_input_emits_no_start_send():
     tr = next_state(state, SendEvent(SendEventKind.SEND_CLICKED))
     assert tr.state == state
     assert not any(isinstance(e, StartSendEffect) for e in tr.effects)
+
+
+def test_extracted_send_sets_busy_without_start_send():
+    state = SendButtonState(False, False, False, False, True)
+    tr = next_state(state, SendEvent(SendEventKind.EXTRACTED_SEND))
+    assert tr.state.is_busy is True
+    assert not any(isinstance(e, StartSendEffect) for e in tr.effects)
+    ui_effect = next(e for e in tr.effects if isinstance(e, UpdateUIEffect))
+    assert ui_effect.send_enabled is False
+    assert ui_effect.stop_enabled is True
+
+
+def test_extracted_send_while_busy_is_noop():
+    state = SendButtonState(True, False, True, False, True)
+    tr = next_state(state, SendEvent(SendEventKind.EXTRACTED_SEND))
+    assert tr.state == state
+    assert tr.effects == []
 
 
 def test_send_clicked_with_audio_only_starts_send():

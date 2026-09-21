@@ -6,14 +6,34 @@
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 from plugin.testing_runner import (
+    _APPLICATION_ERROR_MARKER,
     _cli_filters,
+    _exit_after_summary,
+    _fail_reason,
+    _fail_reason_with_lifecycle,
     _function_name_matches,
     _is_case_id,
     _module_matches_filters,
+    _native_suite_sort_key,
+    _should_rebootstrap_after_recycle,
     _test_function_filters,
+    collect_post_test_death,
+    consume_application_error,
+    consume_office_recycle_request,
+    expand_soak_pair,
+    format_lifecycle_breadcrumb,
+    note_office_stderr_line,
+    probe_uno_bridge,
+    record_test_end,
+    record_test_start,
+    request_office_recycle_after_suite,
+    reset_lifecycle_breadcrumb,
+    reset_office_death_signals,
+    soffice_exit_code,
 )
 
 
@@ -47,6 +67,12 @@ def test_function_name_matches_packet_letter() -> None:
     assert _function_name_matches("test_d1_think_out_loud_thinking_then_html", ["D"]) is True
     assert _function_name_matches("test_foo_bar", ["F"]) is False
     assert _function_name_matches("test_e7_outline_delegate", ["B"]) is False
+    assert _function_name_matches("test_p1_total_row_peer_roundtrip", ["P"]) is True
+    assert _function_name_matches("test_p2_wait_after_accepted_deadlocks_peer", ["p"]) is True
+    assert _function_name_matches("test_p3_busy_then_queue_reply", ["P"]) is True
+    assert _function_name_matches("test_p3_writer_busy_queues_calc_reply", ["P"]) is True
+    assert _function_name_matches("test_p3_writer_busy_queues_calc_reply", ["p3"]) is True
+    assert _function_name_matches("test_panel_factory", ["P"]) is False
 
 
 def test_function_name_matches_case_id_no_prefix_bleed() -> None:
@@ -88,3 +114,321 @@ def test_module_matches_filters_by_packet_letter(tmp_path: Path) -> None:
 
 def test_cli_filters_default_empty() -> None:
     assert isinstance(_cli_filters, list)
+
+
+def test_lifecycle_breadcrumb_names_previous_and_current(monkeypatch) -> None:
+    """DisposedException on the next open must name the last TEST end, not only the victim."""
+    monkeypatch.setattr("plugin.testing_runner._soffice_pids", lambda: "4242")
+    reset_lifecycle_breadcrumb()
+    assert "previous=-" in format_lifecycle_breadcrumb()
+    assert "current=-" in format_lifecycle_breadcrumb()
+
+    record_test_start("draw.test_draw_uno.test_get_draw_tree")
+    crumb = format_lifecycle_breadcrumb()
+    assert "current=draw.test_draw_uno.test_get_draw_tree" in crumb
+    assert "start_pids=4242" in crumb
+    assert "now_pids=4242" in crumb
+
+    record_test_end("draw.test_draw_uno.test_get_draw_tree", "OK")
+    record_test_start("draw.test_draw_uno.test_insert_math_draw")
+    crumb = format_lifecycle_breadcrumb()
+    assert "previous=draw.test_draw_uno.test_get_draw_tree" in crumb
+    assert "result=OK" in crumb
+    assert "end_pids=4242" in crumb
+    assert "last_ok=draw.test_draw_uno.test_get_draw_tree" in crumb
+    assert "current=draw.test_draw_uno.test_insert_math_draw" in crumb
+    assert "pids_changed=0" in crumb
+    assert "dt_ms=" in crumb
+
+
+def test_lifecycle_breadcrumb_marks_pid_change_and_last_ok(monkeypatch) -> None:
+    pids = ["11"]
+
+    def fake_pids() -> str:
+        return pids[0]
+
+    monkeypatch.setattr("plugin.testing_runner._soffice_pids", fake_pids)
+    reset_lifecycle_breadcrumb()
+    record_test_end("suite.test_ok", "OK")
+    pids[0] = "-"
+    record_test_start("suite.test_victim")
+    crumb = format_lifecycle_breadcrumb()
+    assert "last_ok=suite.test_ok" in crumb
+    assert "pids_changed=1" in crumb
+    assert "now_pids=-" in crumb
+
+
+def test_probe_uno_bridge_states() -> None:
+    assert probe_uno_bridge(None) == "no_probe"
+    assert probe_uno_bridge(object()) == "no_probe"
+
+    class _Alive:
+        def getServiceManager(self) -> object:
+            return object()
+
+    assert probe_uno_bridge(_Alive()) == "alive"
+
+    class _Dead:
+        def getServiceManager(self) -> None:
+            raise RuntimeError("Binary URP bridge disposed during call")
+
+    assert probe_uno_bridge(_Dead()) == "disposed"
+
+    class _Boom:
+        def getServiceManager(self) -> None:
+            raise ValueError("no desktop")
+
+    assert probe_uno_bridge(_Boom()) == "error:ValueError"
+
+
+def test_expand_soak_pair_aliases() -> None:
+    assert expand_soak_pair("tree-math") == ["test_get_draw_tree", "test_insert_math_draw"]
+    assert expand_soak_pair("dup-move") == [
+        "test_duplicate_slide_copies_shapes",
+        "test_duplicate_rename_move_slide",
+    ]
+    assert expand_soak_pair("unknown") == []
+
+
+def test_function_name_matches_draw_tree_prefix_bleed() -> None:
+    """FILTER=test_get_draw_tree also selects the blank/label test; --pair must not."""
+    assert _function_name_matches(
+        "test_get_draw_tree_marks_blank_and_label_hint",
+        ["test_get_draw_tree"],
+    ) is True
+    assert "test_get_draw_tree_marks_blank_and_label_hint" not in expand_soak_pair("tree-math")
+
+
+def test_note_office_stderr_line_sets_salabort_flag() -> None:
+    reset_office_death_signals(clear_proc=True)
+    assert consume_application_error() is False
+    note_office_stderr_line("warn: something else")
+    assert consume_application_error() is False
+    note_office_stderr_line("  %s  " % _APPLICATION_ERROR_MARKER)
+    assert consume_application_error() is True
+    assert consume_application_error() is False
+    reset_office_death_signals(clear_proc=True)
+
+
+def test_collect_post_test_death_application_error() -> None:
+    reset_lifecycle_breadcrumb()
+    reset_office_death_signals(clear_proc=True)
+    note_office_stderr_line(_APPLICATION_ERROR_MARKER)
+    reason = collect_post_test_death(None)
+    assert reason is not None
+    assert "Unspecified Application Error" in reason
+    assert "Binary URP bridge" in reason
+    assert "VCL SalAbort" in reason
+    reset_office_death_signals(clear_proc=True)
+
+
+def test_collect_post_test_death_soffice_exit() -> None:
+    import plugin.testing_runner as tr
+
+    class _DeadProc:
+        def poll(self) -> int:
+            return 1
+
+    reset_lifecycle_breadcrumb()
+    reset_office_death_signals(clear_proc=True)
+    tr._soffice_proc = _DeadProc()
+    assert soffice_exit_code() == 1
+    reason = collect_post_test_death(None)
+    assert reason is not None
+    assert "soffice exited 1" in reason
+    assert "Binary URP bridge" in reason
+    reset_office_death_signals(clear_proc=True)
+
+
+def test_native_suite_sort_key_windows_puts_peer_last(monkeypatch) -> None:
+    """GHA 34551644954: other suites must run before leftover peer docs."""
+    import plugin.testing_runner as tr
+
+    monkeypatch.setattr(tr.sys, "platform", "win32")
+    paths = [
+        "/tmp/tests/chatbot/test_peer_message_uno.py",
+        "/tmp/tests/doc/test_text_helpers_uno.py",
+        "/tmp/tests/chatbot/test_slash_popup_uno.py",
+    ]
+    ordered = sorted(paths, key=_native_suite_sort_key)
+    assert ordered[-1].endswith("test_peer_message_uno.py")
+    assert ordered[0].endswith("test_slash_popup_uno.py")
+
+
+def test_native_suite_sort_key_windows_puts_draw_uno_before_peer(
+    monkeypatch,
+) -> None:
+    """GHA 34616287301: leftover Math Draw hung notebook import-filter load."""
+    import plugin.testing_runner as tr
+
+    monkeypatch.setattr(tr.sys, "platform", "win32")
+    paths = [
+        "/tmp/tests/chatbot/test_peer_message_uno.py",
+        "/tmp/tests/draw/test_draw_uno.py",
+        "/tmp/tests/notebook/test_import_filter_uno.py",
+        "/tmp/tests/draw/test_draw_forms_uno.py",
+        "/tmp/tests/impress/test_impress_uno.py",
+    ]
+    ordered = sorted(paths, key=_native_suite_sort_key)
+    names = [p.rsplit("/", 1)[-1] for p in ordered]
+    assert names[-1] == "test_peer_message_uno.py"
+    assert names[-2] == "test_draw_uno.py"
+    assert names.index("test_import_filter_uno.py") < names.index("test_draw_uno.py")
+    assert names.index("test_draw_forms_uno.py") < names.index("test_draw_uno.py")
+
+
+def test_native_suite_sort_key_windows_defers_html_paste_after_doc_research(
+    monkeypatch,
+) -> None:
+    """GHA 34648929578: leftover paste Writers poisoned Hidden Budget_read."""
+    import plugin.testing_runner as tr
+
+    monkeypatch.setattr(tr.sys, "platform", "win32")
+    paths = [
+        "/tmp/tests/calc/test_formulas_uno.py",
+        "/tmp/tests/calc/test_rich_html_uno.py",
+        "/tmp/tests/chatbot/test_slash_popup_uno.py",
+        "/tmp/tests/doc/test_document_research_uno.py",
+        "/tmp/tests/notebook/test_import_filter_uno.py",
+        "/tmp/tests/draw/test_draw_uno.py",
+        "/tmp/tests/chatbot/test_peer_message_uno.py",
+    ]
+    ordered = sorted(paths, key=_native_suite_sort_key)
+    names = [p.rsplit("/", 1)[-1] for p in ordered]
+    assert names.index("test_slash_popup_uno.py") < names.index("test_formulas_uno.py")
+    assert names.index("test_document_research_uno.py") < names.index(
+        "test_formulas_uno.py"
+    )
+    assert names.index("test_import_filter_uno.py") < names.index("test_rich_html_uno.py")
+    assert names.index("test_formulas_uno.py") < names.index("test_draw_uno.py")
+    assert names.index("test_rich_html_uno.py") < names.index("test_draw_uno.py")
+    assert names[-1] == "test_peer_message_uno.py"
+
+
+def test_native_suite_sort_key_posix_keeps_path_order(monkeypatch) -> None:
+    """Linux PR CI must not defer draw_uno; POSIX still closes Math OLE."""
+    import plugin.testing_runner as tr
+
+    monkeypatch.setattr(tr.sys, "platform", "linux")
+    paths = [
+        "/tmp/tests/chatbot/test_peer_message_uno.py",
+        "/tmp/tests/draw/test_draw_uno.py",
+        "/tmp/tests/notebook/test_import_filter_uno.py",
+    ]
+    assert sorted(paths, key=_native_suite_sort_key) == sorted(paths)
+
+
+def test_should_not_rebootstrap_when_no_remaining_suites() -> None:
+    """GHA 34551644954: recycled office hung the next scalc factory load."""
+    assert _should_rebootstrap_after_recycle(more_suites=True) is True
+    assert _should_rebootstrap_after_recycle(more_suites=False) is False
+
+
+def test_office_recycle_request_is_consumed_once() -> None:
+    """Windows Impress teardown asks the runner to recycle after the suite."""
+    import plugin.testing_runner as tr
+
+    tr._recycle_office_after_suite = False
+    assert consume_office_recycle_request() is False
+    request_office_recycle_after_suite()
+    assert consume_office_recycle_request() is True
+    assert consume_office_recycle_request() is False
+
+
+def test_lifecycle_breadcrumb_adopts_from_minus_m_main(monkeypatch) -> None:
+    """GHA 34606276107: close_doc dispose printed previous=- current=-."""
+    import types
+
+    import plugin.testing_runner as tr
+
+    reset_lifecycle_breadcrumb()
+    fake_main = types.ModuleType("__main__")
+    fake_main.__file__ = tr.__file__
+    fake_main._lifecycle_last_qual = "draw.test_draw_uno.test_get_draw_tree"
+    fake_main._lifecycle_last_result = "OK"
+    fake_main._lifecycle_last_end_pids = "7196,5792"
+    fake_main._lifecycle_last_ok_qual = "draw.test_draw_uno.test_get_draw_tree"
+    fake_main._lifecycle_last_end_mono = 1.0
+    fake_main._lifecycle_current_qual = "draw.test_draw_uno.test_insert_math_draw"
+    fake_main._lifecycle_current_start_pids = "7196,5792"
+    fake_main._lifecycle_current_start_mono = 2.0
+    fake_main._lifecycle_current_bridge = "alive"
+    monkeypatch.setitem(sys.modules, "__main__", fake_main)
+    crumb = format_lifecycle_breadcrumb()
+    assert "previous=draw.test_draw_uno.test_get_draw_tree" in crumb
+    assert "current=draw.test_draw_uno.test_insert_math_draw" in crumb
+    reset_lifecycle_breadcrumb()
+
+
+def test_office_recycle_request_reaches_minus_m_main(monkeypatch) -> None:
+    """GHA 34549510317: ``-m`` is ``__main__``; tests import the package name."""
+    import types
+
+    import plugin.testing_runner as tr
+
+    fake_main = types.ModuleType("__main__")
+    fake_main.__file__ = tr.__file__
+    fake_main._recycle_office_after_suite = False
+    monkeypatch.setitem(sys.modules, "__main__", fake_main)
+    tr._recycle_office_after_suite = False
+    request_office_recycle_after_suite()
+    assert fake_main._recycle_office_after_suite is True
+    assert consume_office_recycle_request() is True
+    assert fake_main._recycle_office_after_suite is False
+    assert tr._recycle_office_after_suite is False
+
+
+def test_exit_after_summary_hard_exits_on_clean_pass(monkeypatch) -> None:
+    """GHA 35527291175: pyuno GC SIGABRT after total_passed must not fail make."""
+    import plugin.testing_runner as tr
+
+    seen: list[int] = []
+
+    def fake_exit(code: int) -> None:
+        seen.append(code)
+        raise SystemExit("hard-exit")
+
+    monkeypatch.setattr(tr.os, "_exit", fake_exit)
+    try:
+        _exit_after_summary(0)
+    except SystemExit as exc:
+        assert exc.args == ("hard-exit",)
+    else:
+        raise AssertionError("expected os._exit on clean pass")
+    assert seen == [0]
+
+
+def test_exit_after_summary_keeps_systemexit_on_failure(monkeypatch) -> None:
+    import plugin.testing_runner as tr
+
+    def boom(code: int) -> None:
+        raise AssertionError(f"os._exit must not hide failures, got {code}")
+
+    monkeypatch.setattr(tr.os, "_exit", boom)
+    try:
+        _exit_after_summary(1)
+    except SystemExit as exc:
+        assert exc.code == 1
+    else:
+        raise AssertionError("expected SystemExit(1) on failure")
+
+
+def test_exit_after_summary_minus_m_uses_helper() -> None:
+    import plugin.testing_runner as tr
+
+    text = Path(tr.__file__).read_text(encoding="utf-8")
+    assert "if __name__ == \"__main__\":" in text
+    assert "_exit_after_summary(main())" in text
+    assert "raise SystemExit(main())" not in text
+
+
+def test_fail_reason_with_lifecycle_keeps_crumb_after_cap() -> None:
+    reset_lifecycle_breadcrumb()
+    record_test_end("suite.test_ok", "OK")
+    record_test_start("suite.test_victim")
+    long_exc = AssertionError("n" * 500)
+    out = _fail_reason_with_lifecycle(long_exc)
+    assert _fail_reason(long_exc).endswith("...")
+    assert "previous=suite.test_ok" in out
+    assert "result=OK" in out
+    assert "current=suite.test_victim" in out

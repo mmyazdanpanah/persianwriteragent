@@ -27,6 +27,7 @@ from com.sun.star.text.TextContentAnchorType import AS_CHARACTER, AT_FRAME
 from com.sun.star.awt import Size, Point
 from com.sun.star.beans import PropertyValue
 from plugin.doc import visual_helpers
+from plugin.doc.text_helpers import clone_text_range
 
 log = logging.getLogger(__name__)
 
@@ -160,20 +161,26 @@ def _create_embedded_graphic(model, inside: str, file_url: str, ctx: Any | None 
 def insert_image(ctx, model, img_path, width_px, height_px, title="", description="", add_to_gallery=True, add_frame=False, page_index=None, x_mm=None, y_mm=None):
     """
     Inserts an image into the document.
-    width_px, height_px: Size in pixels.
+    width_px, height_px: Source/generate pixels, not on-page millimetres.
+    Display size is capped (``px_to_display_units``) so a 1024px generate
+    stays a ~135mm inset instead of filling the Writer page.
     page_index / x_mm / y_mm apply to Draw/Impress (and Calc draw page); omitted x/y centers on the page.
     """
+    from plugin.writer.edit_review import WriterCompoundUndo
+
     inside = get_type_doc(model)
 
-    width_units, height_units = visual_helpers.px_to_units(width_px, height_px)
+    width_units, height_units = visual_helpers.px_to_display_units(width_px, height_px)
 
-    if inside in ["writer", "web"]:
-        _insert_image_to_writer(ctx, model, img_path, width_units, height_units, title, description, add_frame)
-    else:
-        _insert_image_to_drawpage(
-            ctx, model, inside, img_path, width_units, height_units, title, description,
-            page_index=page_index, x_mm=x_mm, y_mm=y_mm,
-        )
+    # Gallery is filesystem-only; keep it outside the document undo group.
+    with WriterCompoundUndo(model, "WriterAgent: Insert image"):
+        if inside in ["writer", "web"]:
+            _insert_image_to_writer(ctx, model, img_path, width_units, height_units, title, description, add_frame)
+        else:
+            _insert_image_to_drawpage(
+                ctx, model, inside, img_path, width_units, height_units, title, description,
+                page_index=page_index, x_mm=x_mm, y_mm=y_mm,
+            )
 
     if add_to_gallery:
         add_image_to_gallery(ctx, img_path, f"{title}\n\n{description}")
@@ -186,28 +193,31 @@ def insert_image_at_locator(ctx, model, img_path, width_mm: int | float = 80, he
     For Draw/Impress, optional page_index (0-based) and x_mm/y_mm; omitted x/y centers on the page.
     Returns the inserted graphic object, or None on failure.
     """
+    from plugin.writer.edit_review import WriterCompoundUndo
+
     inside = get_type_doc(model)
     width_units, height_units = _mm_to_units(width_mm, height_mm)
 
-    if inside in ("writer", "web"):
-        if text_cursor is not None:
-            _place_view_cursor_at_text_range(model, text_cursor)
-        if _should_link_image_path(img_path):
-            file_url = _file_url_for_path(img_path)
-            graphic = _dispatch_insert_linked_graphic(ctx, model, file_url)
-            if graphic is None:
-                graphic = _insert_embedded_at_writer_cursor(model, img_path, width_units, height_units, title, description, text_cursor, ctx=ctx)
+    with WriterCompoundUndo(model, "WriterAgent: Insert image"):
+        if inside in ("writer", "web"):
+            if text_cursor is not None:
+                _place_view_cursor_at_text_range(model, text_cursor)
+            if _should_link_image_path(img_path):
+                file_url = _file_url_for_path(img_path)
+                graphic = _dispatch_insert_linked_graphic(ctx, model, file_url)
+                if graphic is None:
+                    graphic = _insert_embedded_at_writer_cursor(model, img_path, width_units, height_units, title, description, text_cursor, ctx=ctx)
+                else:
+                    _apply_graphic_properties(graphic, width=width_units, height=height_units, title=title, description=description, inside=inside)
             else:
-                _apply_graphic_properties(graphic, width=width_units, height=height_units, title=title, description=description, inside=inside)
-        else:
-            graphic = _insert_embedded_at_writer_cursor(model, img_path, width_units, height_units, title, description, text_cursor, ctx=ctx)
-        return graphic
+                graphic = _insert_embedded_at_writer_cursor(model, img_path, width_units, height_units, title, description, text_cursor, ctx=ctx)
+            return graphic
 
-    _insert_image_to_drawpage(
-        ctx, model, inside, img_path, width_units, height_units, title, description,
-        page_index=page_index, x_mm=x_mm, y_mm=y_mm,
-    )
-    return _selection_graphic_object(model)
+        _insert_image_to_drawpage(
+            ctx, model, inside, img_path, width_units, height_units, title, description,
+            page_index=page_index, x_mm=x_mm, y_mm=y_mm,
+        )
+        return _selection_graphic_object(model)
 
 
 def insert_image_into_header_footer(
@@ -228,7 +238,14 @@ def insert_image_into_header_footer(
     Anchors ``AS_CHARACTER`` so the image contributes to line height. A
     floating ``AT_CHARACTER`` image does not grow the region, so a logo
     taller than the fixed header height overlaps the body text.
+
+    ``region`` is a ``_REGION_PROPS`` key (``header``, ``footer``,
+    ``header_first``, ``footer_first``, and the left variants). A
+    different-first-page letterhead logo belongs in ``header_first`` /
+    ``footer_first`` after ``FirstIsShared=False`` — those are separate
+    ``XText`` objects; writing the shared ``header`` never reaches them.
     """
+    from plugin.writer.edit_review import WriterCompoundUndo
     from plugin.writer.page import (
         _REGION_PROPS,
         resolve_page_style,
@@ -236,36 +253,37 @@ def insert_image_into_header_footer(
     )
 
     if region not in _REGION_PROPS:
-        raise ValueError("region must be 'header' or 'footer'")
+        raise ValueError("region must be one of: %s" % ", ".join(_REGION_PROPS))
 
-    style, resolved = resolve_page_style(model, style_name)
-    is_on_prop, text_prop = _REGION_PROPS[region]
-    if not style.getPropertyValue(is_on_prop):
-        style.setPropertyValue(is_on_prop, True)
-    if auto_height:
-        set_header_footer_auto_height(style, region, True)
+    # Enable region + auto-height + embed are separate UNO steps; group them.
+    with WriterCompoundUndo(model, "WriterAgent: Insert image in header/footer"):
+        style, resolved = resolve_page_style(model, style_name)
+        is_on_prop, text_prop = _REGION_PROPS[region]
+        if not style.getPropertyValue(is_on_prop):
+            style.setPropertyValue(is_on_prop, True)
+        if auto_height:
+            set_header_footer_auto_height(style, region, True)
 
-    region_text = style.getPropertyValue(text_prop)
-    cursor = region_text.createTextCursorByRange(region_text.getEnd())
-    width_units, height_units = _mm_to_units(width_mm, height_mm)
-    graphic = _insert_embedded_at_writer_cursor(
-        model,
-        img_path,
-        width_units,
-        height_units,
-        title,
-        description,
-        text_cursor=cursor,
-        text_container=region_text,
-        ctx=ctx,
-    )
-    return {
-        "graphic": graphic,
-        "style_name": resolved,
-        "region": region,
-        "auto_height": bool(auto_height),
-    }
-
+        region_text = style.getPropertyValue(text_prop)
+        cursor = region_text.createTextCursorByRange(region_text.getEnd())
+        width_units, height_units = _mm_to_units(width_mm, height_mm)
+        graphic = _insert_embedded_at_writer_cursor(
+            model,
+            img_path,
+            width_units,
+            height_units,
+            title,
+            description,
+            text_cursor=cursor,
+            text_container=region_text,
+            ctx=ctx,
+        )
+        return {
+            "graphic": graphic,
+            "style_name": resolved,
+            "region": region,
+            "auto_height": bool(auto_height),
+        }
 
 def _place_view_cursor_at_text_range(model, text_cursor):
     try:
@@ -273,6 +291,28 @@ def _place_view_cursor_at_text_range(model, text_cursor):
         vc.gotoRange(text_cursor.getStart(), False)
     except Exception as e:
         log.debug("_place_view_cursor_at_text_range: %s", e)
+
+
+def _cursor_for_writer_view(vc):
+    """Collapsed model cursor at the view cursor, on the host XText.
+
+    Why getStart() first: ``clone_text_range(ViewCursor)`` calls
+    ``host.createTextCursorByRange(vc)`` with the full SwXTextViewCursor.
+    That raises a bare ``RuntimeException`` (empty message) on a plain
+    Writer body — PR #796 / image insert. The pre-#796 path
+    ``createTextCursorByRange(vc.getStart())`` works.
+
+    Why host XText, not ``model.getText()``: a table-cell or frame range
+    cannot be cloned through the body ("End of content node doesn't have
+    the proper start node"). ``clone_text_range`` stays as the nested
+    fallback when getStart() is rejected.
+    """
+    host = vc.getText()
+    try:
+        return host, host.createTextCursorByRange(vc.getStart())
+    except Exception as e:
+        log.debug("_cursor_for_writer_view nested clone: %s", e)
+        return host, clone_text_range(vc)
 
 
 def _insert_embedded_at_writer_cursor(
@@ -307,17 +347,16 @@ def _insert_embedded_at_writer_cursor(
 
     view_cursor = model.CurrentController.ViewCursor
 
-    def to_text_cursor(vc):
-        return doc_text.createTextCursorByRange(vc.getStart())
+    def insert_at_view(vc):
+        host, tc = _cursor_for_writer_view(vc)
+        host.insertTextContent(tc, image, False)
 
     try:
-        tc = to_text_cursor(view_cursor)
-        doc_text.insertTextContent(tc, image, False)
+        insert_at_view(view_cursor)
     except Exception as e:
         log.debug("_insert_embedded_at_writer_cursor fallback: %s", e)
         view_cursor.jumpToStartOfPage()
-        tc = to_text_cursor(view_cursor)
-        doc_text.insertTextContent(tc, image, False)
+        insert_at_view(view_cursor)
     return image
 
 
@@ -338,7 +377,6 @@ def _insert_image_to_writer(ctx, model, img_path, width, height, title, descript
 
 
 def _insert_frame(ctx, model, img_path, width, height, title, description):
-    doc_text = model.getText()
     view_cursor = model.CurrentController.ViewCursor
     text_frame = model.createInstance("com.sun.star.text.TextFrame")
     frame_size = Size()
@@ -348,13 +386,13 @@ def _insert_frame(ctx, model, img_path, width, height, title, description):
     text_frame.setPropertyValue("AnchorType", AT_FRAME)
 
     try:
-        text_cursor = doc_text.createTextCursorByRange(view_cursor.getStart())
-        doc_text.insertTextContent(text_cursor, text_frame, False)
+        host, text_cursor = _cursor_for_writer_view(view_cursor)
+        host.insertTextContent(text_cursor, text_frame, False)
     except Exception as e:
         log.debug("_insert_frame insertTextContent fallback: %s", e)
         view_cursor.jumpToStartOfPage()
-        text_cursor = doc_text.createTextCursorByRange(view_cursor.getStart())
-        doc_text.insertTextContent(text_cursor, text_frame, False)
+        host, text_cursor = _cursor_for_writer_view(view_cursor)
+        host.insertTextContent(text_cursor, text_frame, False)
 
     frame_text = text_frame.getText()
     frame_cursor = frame_text.createTextCursor()
@@ -425,6 +463,8 @@ def replace_graphic_source(ctx, model, graphic, img_path, width_units=None, heig
     Replace an existing graphic's image source (by name), preserving object when possible.
     User paths are re-linked; temp/cache paths update GraphicURL (embed).
     """
+    from plugin.writer.edit_review import WriterCompoundUndo
+
     inside = get_type_doc(model)
     if width_units is None or height_units is None:
         try:
@@ -445,34 +485,37 @@ def replace_graphic_source(ctx, model, graphic, img_path, width_units=None, heig
             anchor = graphic.getAnchor()
             if anchor is None:
                 return False
-            _place_view_cursor_at_text_range(model, anchor)
-            new_graphic = _dispatch_insert_linked_graphic(ctx, model, file_url)
-            if new_graphic is not None:
-                model.getText().removeTextContent(graphic)
-            if new_graphic is None:
-                new_graphic = _create_embedded_graphic(model, "writer", file_url)
-                _apply_graphic_properties(
-                    new_graphic,
-                    width=width_units,
-                    height=height_units,
-                    title=title or "",
-                    description=description or "",
-                    inside=inside,
-                )
-                model.getText().insertTextContent(anchor, new_graphic, False)
-            else:
-                _apply_graphic_properties(
-                    new_graphic,
-                    width=width_units,
-                    height=height_units,
-                    title=title or "",
-                    description=description or "",
-                    inside=inside,
-                )
-        else:
-            draw_page = visual_helpers.get_active_draw_page(model, inside)
-            if draw_page is None:
-                return False
+            # Linked Writer replace inserts then removes — group into one Ctrl+Z.
+            with WriterCompoundUndo(model, "WriterAgent: Replace image"):
+                _place_view_cursor_at_text_range(model, anchor)
+                new_graphic = _dispatch_insert_linked_graphic(ctx, model, file_url)
+                if new_graphic is not None:
+                    model.getText().removeTextContent(graphic)
+                if new_graphic is None:
+                    new_graphic = _create_embedded_graphic(model, "writer", file_url)
+                    _apply_graphic_properties(
+                        new_graphic,
+                        width=width_units,
+                        height=height_units,
+                        title=title or "",
+                        description=description or "",
+                        inside=inside,
+                    )
+                    model.getText().insertTextContent(anchor, new_graphic, False)
+                else:
+                    _apply_graphic_properties(
+                        new_graphic,
+                        width=width_units,
+                        height=height_units,
+                        title=title or "",
+                        description=description or "",
+                        inside=inside,
+                    )
+                return True
+        draw_page = visual_helpers.get_active_draw_page(model, inside)
+        if draw_page is None:
+            return False
+        with WriterCompoundUndo(model, "WriterAgent: Replace image"):
             pos = graphic.getPosition()
             draw_page.remove(graphic)
             new_graphic = _dispatch_insert_linked_graphic(ctx, model, file_url)
@@ -499,28 +542,28 @@ def replace_graphic_source(ctx, model, graphic, img_path, width_units=None, heig
                     description=description or "",
                     inside=inside,
                 )
+            return True
+
+    with WriterCompoundUndo(model, "WriterAgent: Replace image"):
+        file_url = _file_url_for_path(img_path)
+        if not _safe_set_property(graphic, "GraphicURL", file_url) and ctx is not None:
+            xgraphic = _graphic_from_provider(ctx, file_url)
+            if xgraphic is not None:
+                _safe_set_property(graphic, "Graphic", xgraphic)
+        if title is not None or description is not None:
+            _apply_graphic_properties(
+                graphic,
+                width=width_units,
+                height=height_units,
+                title=title or "",
+                description=description or "",
+                inside=inside,
+            )
+        elif width_units is not None and height_units is not None:
+            sz = Size(width_units, height_units)
+            if not _safe_set_property(graphic, "Size", sz):
+                _safe_try_method(graphic, "setSize", sz)
         return True
-
-    file_url = _file_url_for_path(img_path)
-    if not _safe_set_property(graphic, "GraphicURL", file_url) and ctx is not None:
-        xgraphic = _graphic_from_provider(ctx, file_url)
-        if xgraphic is not None:
-            _safe_set_property(graphic, "Graphic", xgraphic)
-    if title is not None or description is not None:
-        _apply_graphic_properties(
-            graphic,
-            width=width_units,
-            height=height_units,
-            title=title or "",
-            description=description or "",
-            inside=inside,
-        )
-    elif width_units is not None and height_units is not None:
-        sz = Size(width_units, height_units)
-        if not _safe_set_property(graphic, "Size", sz):
-            _safe_try_method(graphic, "setSize", sz)
-    return True
-
 
 def _get_selected_graphic_object(model):
     """
@@ -542,7 +585,8 @@ def replace_image_in_place(ctx, model, img_path, width_px, height_px, title="", 
     obj, _inside = _get_selected_graphic_object(model)
     if obj is None:
         return False
-    width_units, height_units = visual_helpers.px_to_units(width_px, height_px)
+    # Same cap as insert_image: generate pixels must not become page mm.
+    width_units, height_units = visual_helpers.px_to_display_units(width_px, height_px)
     try:
         if replace_graphic_source(ctx, model, obj, img_path, width_units, height_units, title, description):
             if add_to_gallery:

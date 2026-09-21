@@ -345,6 +345,111 @@ def test_do_send_direct_image():
                 args, kwargs = mock_registry.execute.call_args
                 assert args[0] == "image_generate"
                 assert kwargs["prompt"] == "A cute dog"
+                assert "source_image" not in kwargs
+
+def _run_direct_image_send(panel, model, execute_return, selected_graphic=None):
+    """Drive ``_do_send_direct_image`` with mocked tools and drain loop."""
+    mock_main = MagicMock()
+    mock_registry = MagicMock()
+    mock_registry.execute.return_value = execute_return
+    mock_registry._services = MagicMock()
+    mock_main.get_tools.return_value = mock_registry
+
+    mock_uno = MagicMock()
+
+    class DummyBase1(object):
+        pass
+
+    class DummyBase2(object):
+        pass
+
+    mock_unohelper = MagicMock()
+    mock_unohelper.Base = DummyBase1
+    mock_awt = MagicMock()
+    mock_awt.XActionListener = DummyBase2
+    mock_awt.XItemListener = DummyBase2
+    mock_awt.XTextListener = DummyBase2
+    mock_awt.XWindowListener = DummyBase2
+    mock_awt.XKeyListener = DummyBase2
+    mock_lang = MagicMock()
+    mock_lang.XEventListener = DummyBase2
+
+    with patch.dict(
+        "sys.modules",
+        {
+            "plugin.main": mock_main,
+            "uno": mock_uno,
+            "unohelper": mock_unohelper,
+            "com.sun.star.text": MagicMock(),
+            "com.sun.star.awt": mock_awt,
+            "com.sun.star.lang": mock_lang,
+        },
+    ):
+        with patch("plugin.framework.async_stream.run_in_background") as mock_run_bg:
+            def fake_run_bg(func, **kwargs):
+                func()
+
+            mock_run_bg.side_effect = fake_run_bg
+
+            with patch("plugin.framework.async_stream.run_stream_drain_loop") as mock_run_stream:
+                def fake_drain_loop(q, toolkit, job_done, apply_chunk, on_stream_done, on_stopped, on_error, on_status_fn, ctx, stop_checker, **kwargs):
+                    while not q.empty():
+                        item = q.get()
+                        k = item[0]
+                        if k == StreamQueueKind.CHUNK:
+                            apply_chunk(item[1])
+                        elif k == StreamQueueKind.STREAM_DONE:
+                            on_stream_done(item)
+                        elif k == StreamQueueKind.STATUS:
+                            on_status_fn(item[1])
+                        elif k == StreamQueueKind.ERROR:
+                            on_error(item[1])
+                    job_done[0] = True
+
+                mock_run_stream.side_effect = fake_drain_loop
+
+                smgr = getattr(panel.ctx, "getServiceManager")()
+                smgr.createInstanceWithContext.return_value = MagicMock()
+
+                with patch(
+                    "plugin.chatbot.send_handlers.selected_graphic_object",
+                    return_value=selected_graphic,
+                ):
+                    panel._do_send_direct_image("make it look like a wizard", model)  # type: ignore
+
+    return mock_registry
+
+
+def test_direct_image_source_arg_none_without_selection():
+    from plugin.chatbot.send_handlers import _direct_image_source_arg
+
+    with patch("plugin.chatbot.send_handlers.selected_graphic_object", return_value=None):
+        assert _direct_image_source_arg(MockDocument()) is None
+
+
+def test_direct_image_source_arg_selection_when_graphic_selected():
+    from plugin.chatbot.send_handlers import _direct_image_source_arg
+
+    with patch("plugin.chatbot.send_handlers.selected_graphic_object", return_value=object()):
+        assert _direct_image_source_arg(MockDocument()) == "selection"
+
+
+def test_do_send_direct_image_with_selection_passes_source_image():
+    panel = DummyChatbotPanel()
+    model = MockDocument()
+    mock_registry = _run_direct_image_send(
+        panel,
+        model,
+        {"status": "done", "message": "Image edited successfully"},
+        selected_graphic=object(),
+    )
+
+    mock_registry.execute.assert_called_once()
+    args, kwargs = mock_registry.execute.call_args
+    assert args[0] == "image_generate"
+    assert kwargs["prompt"] == "make it look like a wizard"
+    assert kwargs["source_image"] == "selection"
+
 
 def test_do_send_direct_image_error():
     panel = DummyChatbotPanel()
@@ -969,3 +1074,42 @@ def test_run_librarian_switch_mode_calls_finished_callback():
                 panel._run_librarian("Done", model)  # type: ignore
 
     panel.on_librarian_session_finished.assert_called_once()
+
+
+def test_agent_backend_worker_does_not_call_get_document_type():
+    """run_agent must not classify the document (UNO thread violation)."""
+    panel = DummyChatbotPanel()
+    panel.session.document_context = "doc-ctx"
+    panel._get_mcp_url = MagicMock(return_value=None)
+    model = MagicMock()
+    model.getURL.return_value = "file:///tmp/doc.odt"
+
+    adapter = MagicMock()
+    adapter.is_available.return_value = True
+
+    def run_worker(_q, worker_fn, *_args, **_kwargs):
+        worker_fn()
+
+    def cfg(key, *_args, **_kwargs):
+        if key == "agent_backend.backend_id":
+            return "hermes"
+        if key == "additional_instructions":
+            return ""
+        if key == "mcp.mcp_enabled":
+            return False
+        return None
+
+    with (
+        patch("plugin.chatbot.send_handlers.get_config", side_effect=cfg),
+        patch("plugin.chatbot.send_handlers.get_backend", return_value=adapter),
+        patch.object(panel, "_run_unified_worker_drain_loop", side_effect=run_worker),
+        patch("plugin.doc.doc_type.get_document_type") as mock_gdt,
+        patch("plugin.framework.prompts.get_core_directives") as mock_gcd,
+        patch("plugin.chatbot.agent_manual.full_manual_for_model") as mock_fmm,
+    ):
+        panel._execute_agent_backend_effect("hi", model, "writer", MagicMock(), MagicMock())
+
+    adapter.send.assert_called_once()
+    mock_gdt.assert_not_called()
+    mock_gcd.assert_not_called()
+    mock_fmm.assert_not_called()

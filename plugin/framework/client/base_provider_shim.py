@@ -12,6 +12,136 @@ from typing import Any
 
 from plugin.framework.url_utils import get_url_path_and_query
 
+# Named UI / tool values → OpenRouter / Gemini aspect_ratio strings.
+_NAMED_ASPECT_RATIOS: dict[str, str] = {
+    "square": "1:1",
+    "1:1": "1:1",
+    "landscape_16_9": "16:9",
+    "landscape_16:9": "16:9",
+    "16:9": "16:9",
+    "portrait_9_16": "9:16",
+    "portrait_9:16": "9:16",
+    "9:16": "9:16",
+    "landscape_3_2": "3:2",
+    "landscape_3:2": "3:2",
+    "3:2": "3:2",
+    "portrait_2_3": "2:3",
+    "portrait_2:3": "2:3",
+    "2:3": "2:3",
+    "4:3": "4:3",
+    "3:4": "3:4",
+    "21:9": "21:9",
+    "4:5": "4:5",
+    "5:4": "5:4",
+}
+
+# Closest-match table for WxH. Keep 16:9 before 3:2 so 1792x1024 stays 16:9.
+_PIXEL_ASPECT_RATIOS: tuple[tuple[str, float], ...] = (
+    ("1:1", 1.0),
+    ("16:9", 16 / 9),
+    ("9:16", 9 / 16),
+    ("4:3", 4 / 3),
+    ("3:4", 3 / 4),
+    ("3:2", 1.5),
+    ("2:3", 2 / 3),
+    ("21:9", 21 / 9),
+    ("4:5", 4 / 5),
+    ("5:4", 5 / 4),
+)
+
+
+def canonical_aspect_ratio(
+    width: int | None = None,
+    height: int | None = None,
+    named: str | None = None,
+) -> str | None:
+    """Return a provider aspect-ratio hint (``1:1``, ``16:9``, …) or None.
+
+    Named UI/tool values win. Pixel WxH maps to the closest standard ratio
+    within a small tolerance so 64-pixel rounding (``896x512``) still yields
+    ``16:9``.
+    """
+    if named:
+        key = str(named).strip().lower().replace(" ", "_").replace("(", "").replace(")", "")
+        mapped = _NAMED_ASPECT_RATIOS.get(key)
+        if mapped:
+            return mapped
+    if not width or not height or width < 1 or height < 1:
+        return None
+    ratio = width / height
+    label, expected = min(_PIXEL_ASPECT_RATIOS, key=lambda item: abs(ratio - item[1]))
+    if abs(ratio - expected) <= 0.12:
+        return label
+    return None
+
+
+def canonical_resolution(
+    width: int | None = None,
+    height: int | None = None,
+    *,
+    family: str = "standard",
+) -> str | None:
+    """Map max(width, height) to a vendor resolution tier.
+
+    Standard (OpenRouter ``/images`` resolution, Google native): ``512``, ``1K``,
+    ``2K``, ``4K``. OpenRouter chat ``image_config.image_size`` uses ``0.5K`` for
+    the low tier (``family="openrouter_chat"``). Grok only documents ``1k`` /
+    ``2k``. Imagen only documents ``1K`` / ``2K``.
+    """
+    if not width or not height or width < 1 or height < 1:
+        return None
+    edge = max(width, height)
+    if edge <= 768:
+        tier = "512"
+    elif edge <= 1536:
+        tier = "1K"
+    elif edge <= 3072:
+        tier = "2K"
+    else:
+        tier = "4K"
+    if family == "grok":
+        return "2k" if tier in ("2K", "4K") else "1k"
+    if family == "imagen":
+        if tier == "512":
+            return "1K"
+        if tier == "4K":
+            return "2K"
+        return tier
+    # OpenRouter chat modalities path rejects "512"; enum is 0.5K|1K|2K|4K.
+    if family == "openrouter_chat":
+        return "0.5K" if tier == "512" else tier
+    return tier
+
+
+def coerce_image_data_url(image_url: str | None = None, source_image: str | None = None) -> str | None:
+    """Normalize a source image to a data URL or http(s) URL for JSON image APIs."""
+    ref = image_url or source_image
+    if not ref:
+        return None
+    if ref.startswith(("data:image", "http://", "https://")):
+        return ref
+    return "data:image/png;base64," + ref
+
+
+def coerce_raw_b64(image_url: str | None = None, source_image: str | None = None) -> str | None:
+    """Normalize a source image to raw base64 (Ollama ``images`` / Gemini ``inlineData``)."""
+    ref = image_url or source_image
+    if not ref:
+        return None
+    if ref.startswith("data:") and "," in ref:
+        return ref.split(",", 1)[1]
+    return ref
+
+
+def inline_image_mime(image_url: str | None = None, source_image: str | None = None) -> str:
+    """MIME type for an inline image part; default png when the source is raw base64."""
+    ref = image_url or source_image
+    if ref and ref.startswith("data:") and ";" in ref:
+        mime = ref[5:].split(";", 1)[0]
+        if mime:
+            return mime
+    return "image/png"
+
 
 class BaseProviderShim:
     """Base provider shim implementing standard OpenAI-compatible API format by default."""
@@ -133,13 +263,9 @@ class BaseProviderShim:
         if steps:
             data["steps"] = steps
 
-        if image_url:
-            data["image_url"] = image_url
-        elif source_image:
-            if source_image.startswith("data:image"):
-                data["image_url"] = source_image
-            else:
-                data["image_url"] = "data:image/png;base64," + source_image
+        ref = coerce_image_data_url(image_url, source_image)
+        if ref:
+            data["image_url"] = ref
 
         path = get_url_path_and_query(url)
         return "POST", path, json.dumps(data).encode("utf-8"), self.client._headers()

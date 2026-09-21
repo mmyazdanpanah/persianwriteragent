@@ -377,7 +377,8 @@ class ToolBase(ABC):
         tier:        Main chat and MCP default lists use ``"core"``. Nested
                      specialized toolsets use ``"specialized"`` or
                      ``"specialized_control"`` (hidden from default lists via
-                     ``exclude_tiers``). Default ``"core"``.
+                     ``exclude_tiers``). Sidebar-only tools use ``"chat"``
+                     (on the chat wire; hidden from MCP). Default ``"core"``.
         intent:      Optional group label (e.g. "navigate", "edit", "review",
                      "media") for ``get_tools(intent=...)`` filtering.
         is_mutation:  Whether the tool mutates the document.  ``None``
@@ -493,17 +494,20 @@ class ToolBase(ABC):
             return self.execute(ctx, **kwargs)
 
         except Exception as e:
-            from plugin.framework.errors import is_disposed_exception
+            from plugin.framework.errors import is_tool_document_disposed
 
             _log.exception("Tool '%s' execution failed", self.name if self.name else "<unknown>")
-            if is_disposed_exception(e):
+            doc = getattr(ctx, "doc", None) if ctx is not None else None
+            if is_tool_document_disposed(e, doc):
                 return self._tool_error(
                     "Document was closed or disposed by LibreOffice",
                     code="DOCUMENT_DISPOSED",
                     original_error=str(e),
                     error_type=type(e).__name__,
                 )
-            return self._tool_error(f"Tool execution failed: {str(e)}", code="TOOL_EXECUTION_ERROR", original_error=str(e), error_type=type(e).__name__)
+            # Bare RuntimeException often has an empty message; fall back to the type name.
+            err_msg = str(e).strip() or type(e).__name__
+            return self._tool_error(f"Tool execution failed: {err_msg}", code="TOOL_EXECUTION_ERROR", original_error=str(e), error_type=type(e).__name__)
 
     def get_collection(self, doc, getter_name, missing_msg=None):
         """Helper to safely fetch a named collection from a document.
@@ -834,9 +838,20 @@ class ToolRegistry:
                 from plugin.vision.vision_availability import filter_vision_delegate_schemas
 
                 schemas = filter_vision_delegate_schemas(schemas, ctx)
+            from plugin.doc.peer_message import filter_peer_message_schemas
+
+            schemas = filter_peer_message_schemas(
+                schemas, ctx, doc=kwargs.get("doc"), active_domain=active_domain
+            )
             return schemas
         elif protocol == "mcp":
-            return [to_mcp_schema(t, doc_type=doc_type) for t in tools]
+            # Never advertise peer send tools on MCP, including find_tools(domain=…).
+            from plugin.doc.peer_message import filter_peer_message_schemas
+
+            schemas = [to_mcp_schema(t, doc_type=doc_type) for t in tools]
+            return filter_peer_message_schemas(
+                schemas, kwargs.get("ctx"), doc=kwargs.get("doc"), active_domain=None
+            )
         else:
             raise ValueError(f"Unknown protocol: {protocol}")
 

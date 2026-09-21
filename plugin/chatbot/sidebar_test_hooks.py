@@ -31,6 +31,12 @@ log = logging.getLogger("writeragent.sidebar_test_hooks")
 _HOOKS_UNAVAILABLE = "sidebar test hooks are not in release builds"
 _DEBUG_SIDEBAR_PREFIX = "chatbot.debug_sidebar"
 _DEBUG_SNAPSHOT_NAME = "writeragent_debug_sidebar.json"
+# Packet K: URP tests cannot stream 24k HTML through the rich control and
+# still land those bytes on ChatSession.messages. Inflate in soffice so
+# estimate crosses the mock 32768×75% gate (and force-compact can cut).
+_INFLATE_TARGET_TOKENS = 28000
+_INFLATE_PAIR_TOKENS = 4000
+_INFLATE_MAX_PAIRS = 16
 
 # Debug-only. This module is replaced by a stub in release OXTs (no WeakSet).
 _LIVE_CHAT_PANELS: WeakSet[Any] = WeakSet()
@@ -112,6 +118,47 @@ def _history_user_tail(sl: Any) -> str:
     return ""
 
 
+def _session_snapshot_fields(sl: Any) -> dict[str, Any]:
+    """Packet K: URP cannot read ``session.messages``; snapshot from soffice."""
+    session = getattr(sl, "session", None) if sl is not None else None
+    messages = list(getattr(session, "messages", None) or []) if session is not None else []
+    compaction = getattr(session, "compaction", None) if session is not None else None
+    return {
+        "session_n_messages": len(messages),
+        "session_roles": [str(m.get("role") or "") for m in messages if isinstance(m, dict)],
+        "session_content_chars": [
+            len(str(m.get("content") or "")) for m in messages if isinstance(m, dict)
+        ],
+        "has_compaction": compaction is not None,
+        "last_compact_reason": getattr(sl, "_last_compact_reason", None) if sl is not None else None,
+    }
+
+
+def _inflate_session_history(session: Any) -> int:
+    """Append large user/assistant pads onto ``session.messages`` (no UI, no DB).
+
+    Streaming ``flood history`` through the rich control completed HTTP 200
+    but did not grow the model-facing list enough for proactive compact or
+    overflow retry (``nothing_to_compact`` / ``below_threshold``). Direct
+    append is the URP-safe grow path.
+    """
+    if session is None:
+        return 0
+    messages = getattr(session, "messages", None)
+    if not isinstance(messages, list):
+        return 0
+    from plugin.chatbot.compaction import estimate_tokens, messages_for_llm
+
+    if not messages:
+        messages.append({"role": "system", "content": "Packet K inflate"})
+    added = 0
+    while estimate_tokens(messages_for_llm(session)) < _INFLATE_TARGET_TOKENS and added < _INFLATE_MAX_PAIRS:
+        added += 1
+        messages.append({"role": "user", "content": "inflate history %d" % added})
+        messages.append({"role": "assistant", "content": "x" * (_INFLATE_PAIR_TOKENS * 4)})
+    return added
+
+
 def _write_debug_snapshot(sl: Any) -> dict[str, Any]:
     send = sl.sidebar_state.send if sl is not None else None
     audio = sl.sidebar_state.audio if sl is not None else None
@@ -130,6 +177,7 @@ def _write_debug_snapshot(sl: Any) -> dict[str, Any]:
         "history_user_tail": _history_user_tail(sl) if sl is not None else "",
         "approval_active": bool(getattr(sl, "_approval_event", None)) if sl is not None else False,
         **_slash_snapshot_fields(sl),
+        **_session_snapshot_fields(sl),
         "slash_lru": _slash_lru_names(),
     }
     with open(debug_sidebar_snapshot_path(), "w", encoding="utf-8") as handle:
@@ -149,20 +197,83 @@ def _read_debug_snapshot() -> dict[str, Any]:
     return data if isinstance(data, dict) else {}
 
 
+def _parse_debug_sidebar_command(command: str) -> tuple[str, str]:
+    """Split ``chatbot.debug_sidebar.<OP>`` / ``?OP&uid=`` into ``(op, uid)``.
+
+    ``DispatchHandler`` joins Path+Query with ``.``. LO often leaves the op
+    in Path as ``chatbot.debug_sidebar?INFLATE_HISTORY`` (Query empty). The
+    URP client may append ``&uid=<RuntimeUID>`` so soffice inflate/snapshot
+    bind that deck — not leftover Calc from ``getCurrentComponent()``.
+    Parse *before* ``upper()`` so a hyphenated uid is not rewritten.
+    """
+    rest = command
+    if command.startswith(_DEBUG_SIDEBAR_PREFIX):
+        rest = command[len(_DEBUG_SIDEBAR_PREFIX) :]
+    rest = rest.lstrip(".?")
+    op_part, _, extra = rest.partition("&")
+    op = (op_part or "SNAPSHOT").upper().replace("-", "_")
+    uid = ""
+    for part in extra.split("&"):
+        key, sep, val = part.partition("=")
+        if sep and key.lower() == "uid":
+            uid = val
+    return op, uid
+
+
 def handle_debug_sidebar_command(command: str) -> None:
-    """Run inside soffice (protocol handler). Packet G URP FSM ops.
+    """Run inside soffice (protocol handler). Packet G URP FSM ops + OPEN_CALC.
 
     ``DispatchHandler`` runs on the URP thread. ``WRITERAGENT_TESTING=1`` makes
     ``QueueExecutor.post`` inline, so Stop Rec used to start ``_do_send`` off
     the VCL thread and freeze on ``Getting document...``. Marshal FSM work onto
     the listener's executor (VCL) before StartSendEffect posts the drain.
+    ``OPEN_CALC`` uses the same post-to-VCL rule: factory ``scalc`` over URP
+    after a Writer deck never returns.
     """
     _require_debug()
     adopt_runtime_send_listeners()
-    rest = command[len(_DEBUG_SIDEBAR_PREFIX) :].lstrip(".")
-    op = (rest or "SNAPSHOT").upper().replace("-", "_")
-    sl = _listener_with_slash_popup(send_listener())
+    op, target_uid = _parse_debug_sidebar_command(command)
+    # Prefer the URP client's document uid (executeDispatch frame). #802 bound
+    # INFLATE to soffice getCurrentComponent(); leftover Calc after Packet P /
+    # E12 is often still current there, so pads missed the Writer Send deck.
+    sl = send_listener_for_uid(target_uid) if target_uid else None
+    if sl is None:
+        sl = (
+            _listener_for_current_doc()
+            if op == "INFLATE_HISTORY"
+            else _listener_with_slash_popup(send_listener())
+        )
     if op == "SNAPSHOT":
+        _write_debug_snapshot(sl)
+        return
+    # Packet K: mutate ChatSession in soffice (URP cannot touch .messages).
+    if op == "INFLATE_HISTORY":
+        if sl is None:
+            log.warning("debug_sidebar %s: no SendButtonListener", op)
+            _write_debug_snapshot(None)
+            return
+        _inflate_session_history(getattr(sl, "session", None))
+        ms = getattr(sl, "model_selector", None)
+        if ms is not None:
+            from plugin.chatbot.dialogs import set_control_text
+            from plugin.framework.client.model_fetcher import set_text_model
+
+            set_control_text(ms, "writeragent-mock")
+            set_text_model("writeragent-mock", update_lru=False)
+        _write_debug_snapshot(sl)
+        return
+    # Factory scalc over URP after a Writer deck never returns (Dummy-thread
+    # load vs VCL). Post the load onto soffice VCL; the URP client polls.
+    if op == "OPEN_CALC":
+        log.info("debug_sidebar OPEN_CALC posting factory/scalc to VCL sl=%s", sl is not None)
+        _post_to_soffice_vcl(_load_visible_calc_factory, sl=sl)
+        _write_debug_snapshot(sl)
+        return
+    if op == "KICK_PEERS":
+        # Packet P URP: queues live in soffice; the test-process kick is a no-op.
+        from plugin.doc.peer_message import kick_pending_peer_starts
+
+        kick_pending_peer_starts()
         _write_debug_snapshot(sl)
         return
     # Slash ops only touch the Ask ListBox. Run inline like SNAPSHOT —
@@ -237,6 +348,15 @@ def handle_debug_sidebar_command(command: str) -> None:
         set_force_marshal_mode(False)
 
 
+def _debug_sidebar_query(op: str, uid: str = "") -> str:
+    """``INFLATE_HISTORY`` or ``INFLATE_HISTORY&uid=34`` for executeDispatch."""
+    token = (op or "SNAPSHOT").strip()
+    uid = str(uid or "").strip()
+    if uid:
+        return "%s&uid=%s" % (token, uid)
+    return token
+
+
 def execute_debug_sidebar_op(op: str, *, ctx: Any = None) -> dict[str, Any]:
     """URP client: dispatch ``org.extension.writeragent:chatbot.debug_sidebar.<OP>`` in soffice."""
     _require_debug()
@@ -254,13 +374,24 @@ def execute_debug_sidebar_op(op: str, *, ctx: Any = None) -> dict[str, Any]:
         frame = None
     if frame is None:
         raise RuntimeError("debug_sidebar: no frame for executeDispatch")
-    url = "%s:%s?%s" % (EXTENSION_ID_WRITERAGENT, _DEBUG_SIDEBAR_PREFIX, op)
+    uid = ""
+    try:
+        from plugin.framework.uno_context import get_runtime_uid
+
+        uid = get_runtime_uid(doc) or ""
+    except Exception:
+        uid = ""
+    url = "%s:%s?%s" % (EXTENSION_ID_WRITERAGENT, _DEBUG_SIDEBAR_PREFIX, _debug_sidebar_query(op, uid))
     smgr = uno_ctx.getServiceManager()
     helper = smgr.createInstanceWithContext("com.sun.star.frame.DispatchHelper", uno_ctx)
     helper.executeDispatch(frame, url, "", 0, ())
     if op.upper() != "SNAPSHOT":
         time.sleep(0.25)
-        snap_url = "%s:%s?SNAPSHOT" % (EXTENSION_ID_WRITERAGENT, _DEBUG_SIDEBAR_PREFIX)
+        snap_url = "%s:%s?%s" % (
+            EXTENSION_ID_WRITERAGENT,
+            _DEBUG_SIDEBAR_PREFIX,
+            _debug_sidebar_query("SNAPSHOT", uid),
+        )
         helper.executeDispatch(frame, snap_url, "", 0, ())
     return _read_debug_snapshot()
 
@@ -333,15 +464,64 @@ def _send_event_or_urp(kind: SendEventKind, *, listener: Any = None) -> None:
     execute_debug_sidebar_op(kind.name)
 
 
+def _panel_frame(panel: Any) -> Any:
+    return getattr(panel, "xFrame", None) or getattr(panel, "Frame", None)
+
+
+def _frames_match(left: Any, right: Any) -> bool:
+    """True when *left* and *right* are the same frame.
+
+    PyUNO hands out distinct wrappers; bare ``is`` misses after Packet P / E12
+    reopen the Writer deck. ``uno_same`` is the product identity test.
+    """
+    if left is None or right is None:
+        return False
+    if left is right:
+        return True
+    try:
+        from plugin.framework.uno_context import uno_same
+
+        return bool(uno_same(left, right))
+    except Exception:
+        return False
+
+
+def _current_frame() -> Any:
+    """Frame of ``desktop.getCurrentComponent()``, or None.
+
+    Packet K inflate / URP debug ops must bind this frame. WeakSet[0] is
+    leftover Calc after Packet P / E12 (those panels stay alive because
+    ``_LIVE_SEND_LISTENERS`` holds a strong ref).
+    """
+    try:
+        ctx = _HOOK_CTX
+        if ctx is None:
+            from plugin.framework.uno_context import get_ctx
+
+            ctx = get_ctx()
+        doc = current_component(ctx)
+        if doc is None:
+            return None
+        return doc.getCurrentController().getFrame()
+    except Exception:
+        return None
+
+
 def sidebar_panel(frame: Any = None) -> Any:
-    """Return the live ``ChatPanelElement`` for *frame*, or the only live panel."""
+    """Return the live ``ChatPanelElement`` for *frame*, or the current doc's panel.
+
+    When *frame* is omitted and several decks are live, prefer the current
+    component. Returning ``panels[0]`` padded a leftover Calc ``ChatSession``
+    while URP Send clicked Writer (Packet K CI: n_messages=2, no summarizer).
+    """
     _require_debug()
     panels = iter_live_chat_panels()
     if not panels:
         return None
-    if frame is not None:
+    target = frame if frame is not None else _current_frame()
+    if target is not None:
         for panel in panels:
-            if getattr(panel, "xFrame", None) is frame or getattr(panel, "Frame", None) is frame:
+            if _frames_match(_panel_frame(panel), target):
                 return panel
     if len(panels) == 1:
         return panels[0]
@@ -358,6 +538,146 @@ def desktop_from_ctx(ctx: Any) -> Any:
 def current_component(ctx: Any) -> Any:
     _require_debug()
     return desktop_from_ctx(ctx).getCurrentComponent()
+
+
+def component_is_calc(doc: Any) -> bool:
+    """``supportsService`` over URP. Do not use ``is_calc`` (``@main_thread_only``)."""
+    _require_debug()
+    if doc is None:
+        return False
+    try:
+        return bool(doc.supportsService("com.sun.star.sheet.SpreadsheetDocument"))
+    except Exception:
+        return False
+
+
+def iter_desktop_components(ctx: Any) -> list[Any]:
+    """Open models from ``XDesktop.getComponents()`` (URP-safe enumeration)."""
+    _require_debug()
+    desktop = desktop_from_ctx(ctx)
+    comps = getattr(desktop, "getComponents", lambda: None)()
+    if comps is None or not hasattr(comps, "createEnumeration"):
+        return []
+    enum = comps.createEnumeration()
+    out: list[Any] = []
+    while True:
+        try:
+            if not enum.hasMoreElements():
+                break
+            out.append(enum.nextElement())
+        except Exception:
+            break
+    return out
+
+
+def find_calc_component(ctx: Any) -> Any:
+    """First open Calc model, or None. Does not load a document."""
+    _require_debug()
+    for doc in iter_desktop_components(ctx):
+        if component_is_calc(doc):
+            return doc
+    return None
+
+
+def close_component(doc: Any) -> None:
+    """Close *doc* if it is still alive. Swallows dispose-after-close."""
+    _require_debug()
+    if doc is None:
+        return
+    try:
+        if hasattr(doc, "close"):
+            doc.close(True)
+        elif hasattr(doc, "dispose"):
+            doc.dispose()
+    except Exception:
+        pass
+
+
+def _load_visible_calc_factory() -> None:
+    """Create a visible Calc on soffice VCL. ``_blank`` keeps the Writer window.
+
+    URP ``loadComponentFromURL('private:factory/scalc')`` after a Writer deck
+    never returns (120s watchdog; File→New Spreadsheet on VCL is fine). This
+    job must run via :func:`_post_to_soffice_vcl`, not on the Dummy URP thread.
+    """
+    from plugin.framework.uno_context import get_ctx, get_desktop
+
+    try:
+        desktop = get_desktop(get_ctx())
+        desktop.loadComponentFromURL("private:factory/scalc", "_blank", 0, ())
+        log.info("OPEN_CALC: loaded factory/scalc _blank on VCL")
+    except Exception:
+        log.exception("OPEN_CALC: factory/scalc _blank failed")
+        raise
+
+
+def _post_to_soffice_vcl(fn: Callable[[], None], *, sl: Any = None) -> None:
+    """Enqueue *fn* on soffice VCL. Do not run it inline on the URP Dummy thread.
+
+    ``WRITERAGENT_TESTING=1`` makes ``QueueExecutor.post`` inline. Force-marshal
+    so AsyncCallback runs the work on VCL. ``execute()`` from URP dispatch
+    deadlocks (office idle, tests wait forever) — same as Packet G FSM ops.
+    """
+    qe = getattr(sl, "queue_executor", None) if sl is not None else None
+    if qe is None:
+        from plugin.framework.queue_executor import default_executor
+
+        qe = default_executor
+    # force_marshal skips _get_async_callback inside post(); without a prior
+    # init, _poke_main_thread is a no-op and the factory load never runs
+    # (E12 2026-09-08: "poke skipped (no AsyncCallback)" after OPEN_CALC).
+    init_cb = getattr(qe, "_get_async_callback", None)
+    if callable(init_cb):
+        try:
+            init_cb()
+        except Exception:
+            log.exception("debug_sidebar: AsyncCallback init failed")
+    from plugin.framework.queue_executor import set_force_marshal_mode
+
+    set_force_marshal_mode(True)
+    try:
+        qe.post(fn)
+    finally:
+        set_force_marshal_mode(False)
+
+
+def open_calc_document(ctx: Any, *, timeout: float = 30.0) -> Any:
+    """Open a visible Calc after a Writer deck without blocking URP on factory/scalc.
+
+    Dual-peer / E12 / G17 recipe: keep Writer open, call this, then
+    :func:`adopt_chat_sidebar` on the returned model. Never call
+    ``desktop.loadComponentFromURL('private:factory/scalc', …)`` from the
+    URP test process after ``show_writeragent_chat_deck``.
+    """
+    _require_debug()
+    existing = find_calc_component(ctx)
+    if existing is not None:
+        return existing
+    execute_debug_sidebar_op("OPEN_CALC", ctx=ctx)
+    deadline = time.monotonic() + max(0.0, timeout)
+    while time.monotonic() <= deadline:
+        found = find_calc_component(ctx)
+        if found is not None:
+            return found
+        time.sleep(0.25)
+    raise RuntimeError(
+        "Calc did not appear after OPEN_CALC (factory/scalc was posted to VCL; "
+        "do not loadComponentFromURL factory/scalc over URP after a Writer deck)"
+    )
+
+
+def adopt_chat_sidebar(ctx: Any, doc: Any, *, timeout: float = 20.0) -> tuple[Any, Any]:
+    """Show WriterAgentDeck on *doc* and return ``(controls, send_listener)``."""
+    _require_debug()
+    controls = wait_for_chat_dialog_controls(ctx, timeout=timeout, doc=doc)
+    adopt_runtime_send_listeners()
+    frame = None
+    try:
+        if doc is not None:
+            frame = doc.getCurrentController().getFrame()
+    except Exception:
+        frame = None
+    return controls, send_listener(frame)
 
 
 def uno_click(control: Any) -> None:
@@ -511,12 +831,9 @@ def send_listener(frame: Any = None) -> Any:
     panel = sidebar_panel(frame)
     if panel is not None:
         sl = getattr(panel, "send_listener", None)
-        if sl is not None and getattr(sl, "slash_popup", None) is not None:
-            return sl
         if sl is not None:
-            found = _listener_with_slash_popup(sl)
-            if found is not None:
-                return found
+            # Do not steal a leftover slash-popup listener from another deck.
+            # Packet K inflate + URP Send must share this panel's ChatSession.
             return sl
     with_popup = [obj for obj in _LIVE_SEND_LISTENERS if getattr(obj, "slash_popup", None) is not None]
     if with_popup:
@@ -524,6 +841,22 @@ def send_listener(frame: Any = None) -> Any:
     if _LIVE_SEND_LISTENERS:
         return _LIVE_SEND_LISTENERS[-1]
     return None
+
+
+def _listener_for_current_doc() -> Any:
+    """SendButtonListener for the current component (Packet K inflate)."""
+    try:
+        ctx = _HOOK_CTX
+        if ctx is None:
+            from plugin.framework.uno_context import get_ctx
+
+            ctx = get_ctx()
+        sl = send_listener_for_doc(current_component(ctx))
+        if sl is not None:
+            return sl
+    except Exception:
+        pass
+    return send_listener()
 
 
 def _listener_with_slash_popup(sl: Any) -> Any:
@@ -670,8 +1003,14 @@ def show_writeragent_chat_deck(ctx: Any, doc: Any) -> None:
     _activate_writeragent_deck(provider)
 
 
-def wait_for_chat_dialog_controls(ctx: Any, timeout: float = 20.0) -> dict[str, Any] | None:
-    """Show WriterAgentDeck until query+send exist. Does not pump VCL over URP."""
+def wait_for_chat_dialog_controls(
+    ctx: Any, timeout: float = 20.0, *, doc: Any = None
+) -> dict[str, Any] | None:
+    """Show WriterAgentDeck until query+send exist. Does not pump VCL over URP.
+
+    Pass *doc* to target a specific model (Calc after :func:`open_calc_document`,
+    Packet P dual Writer+Calc). Default is ``current_component``.
+    """
     global _HOOK_CTX
     _HOOK_CTX = ctx
     _require_debug()
@@ -679,9 +1018,9 @@ def wait_for_chat_dialog_controls(ctx: Any, timeout: float = 20.0) -> dict[str, 
     last: dict[str, Any] | None = None
     while time.monotonic() <= deadline:
         try:
-            doc = current_component(ctx)
-            show_writeragent_chat_deck(ctx, doc)
-            last = chat_dialog_controls(ctx, doc)
+            target = doc if doc is not None else current_component(ctx)
+            show_writeragent_chat_deck(ctx, target)
+            last = chat_dialog_controls(ctx, target)
             if last is not None:
                 return last
         except Exception:
@@ -702,7 +1041,88 @@ def control_enabled(control: Any) -> bool | None:
         return None
 
 
-def ensure_sidebar_chat_mode(controls: dict[str, Any] | None) -> None:
+def send_listener_for_doc(doc: Any) -> Any:
+    """``send_listener`` bound to *doc*'s frame (dual-deck Packet P)."""
+    _require_debug()
+    if doc is None:
+        return None
+    try:
+        frame = doc.getCurrentController().getFrame()
+    except Exception:
+        return None
+    return send_listener(frame)
+
+
+def send_listener_for_uid(uid: str) -> Any:
+    """``SendButtonListener`` for *uid* (production live-panel map, then debug walk).
+
+    Packet K inflate must not use soffice ``getCurrentComponent()`` when the
+    URP client already named the Writer RuntimeUID. Leftover Calc after
+    Packet P / E12 stays current in soffice and used to eat INFLATE_HISTORY.
+    """
+    _require_debug()
+    token = str(uid or "").strip()
+    if not token:
+        return None
+    try:
+        from plugin.doc.live_panels import get_live_panel
+
+        panel = get_live_panel(token)
+    except Exception:
+        panel = None
+    if panel is not None:
+        sl = getattr(panel, "send_listener", None)
+        if sl is not None:
+            return sl
+    from plugin.framework.uno_context import get_runtime_uid
+
+    for sl in iter_send_listeners():
+        frame = getattr(sl, "frame", None)
+        if frame is None:
+            continue
+        try:
+            model = frame.getController().getModel()
+            if str(get_runtime_uid(model) or "") == token:
+                return sl
+        except Exception:
+            continue
+    return None
+
+
+def iter_send_listeners() -> list[Any]:
+    """All live SendButtonListeners (panels first, then adopted OXT copies)."""
+    _require_debug()
+    adopt_runtime_send_listeners()
+    out: list[Any] = []
+    seen: set[int] = set()
+    try:
+        panels = iter_live_chat_panels()
+    except Exception:
+        panels = []
+    for panel in panels:
+        sl = getattr(panel, "send_listener", None)
+        if sl is None:
+            continue
+        ident = id(sl)
+        if ident in seen:
+            continue
+        seen.add(ident)
+        out.append(sl)
+    for sl in list(_LIVE_SEND_LISTENERS):
+        ident = id(sl)
+        if ident in seen:
+            continue
+        seen.add(ident)
+        out.append(sl)
+    return out
+
+
+def ensure_sidebar_chat_mode(
+    controls: dict[str, Any] | None,
+    *,
+    doc_type: str = "writer",
+    listener: Any = None,
+) -> None:
     """Select main Chat (not Librarian) so Packet F hits the chat completions path."""
     _require_debug()
     if not controls:
@@ -715,8 +1135,8 @@ def ensure_sidebar_chat_mode(controls: dict[str, Any] | None) -> None:
             sidebar_mode_flags_for_doc_type,
         )
 
-        set_selector_mode_with_flags(sel, CHAT_MODE_CHAT, sidebar_mode_flags_for_doc_type("writer"))
-    sl = send_listener()
+        set_selector_mode_with_flags(sel, CHAT_MODE_CHAT, sidebar_mode_flags_for_doc_type(doc_type))
+    sl = listener if listener is not None else send_listener()
     if sl is not None:
         apply_fn = getattr(sl, "_apply_sidebar_mode_fn", None)
         if apply_fn is not None:
@@ -727,14 +1147,14 @@ def ensure_sidebar_chat_mode(controls: dict[str, Any] | None) -> None:
         execute_debug_sidebar_op("SET_CHAT_MODE")
 
 
-def set_query_text_via_controls(controls: dict[str, Any], text: str) -> None:
+def set_query_text_via_controls(controls: dict[str, Any], text: str, *, listener: Any = None) -> None:
     """Set the query box over URP so QueryTextListener can enable Send."""
     _require_debug()
     from plugin.chatbot.dialogs import set_control_text
 
     if "query" in controls:
         set_control_text(controls["query"], text)
-    sl = send_listener()
+    sl = listener if listener is not None else send_listener()
     if sl is not None:
         sl.dispatch(SendEvent(SendEventKind.TEXT_UPDATED, {"has_text": bool(text.strip())}))
     else:
@@ -1077,6 +1497,28 @@ def transcript_text(*, listener: Any = None) -> str:
 def transcript_contains(needle: str, *, listener: Any = None) -> bool:
     _require_debug()
     return needle in transcript_text(listener=listener)
+
+
+def inflate_sidebar_history(*, ctx: Any = None) -> dict[str, Any]:
+    """Grow ChatSession.messages in soffice past the mock compaction gate."""
+    _require_debug()
+    sl = None
+    if ctx is not None:
+        try:
+            sl = send_listener_for_doc(current_component(ctx))
+        except Exception:
+            sl = None
+    if sl is None:
+        sl = send_listener()
+    session = getattr(sl, "session", None) if sl is not None else None
+    messages = getattr(session, "messages", None)
+    # In-process listener only. A URP proxy has no ChatSession.messages list.
+    if isinstance(messages, list):
+        added = _inflate_session_history(session)
+        data = _write_debug_snapshot(sl)
+        data["inflate_pairs"] = added
+        return data
+    return execute_debug_sidebar_op("INFLATE_HISTORY", ctx=ctx)
 
 
 def clear_sidebar_chat(*, listener: Any = None) -> None:

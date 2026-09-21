@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: PACKAGE VERSION\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-09-04 14:15-0400\n"
+"POT-Creation-Date: 2026-09-14 16:20-0400\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: Finnish <LL@li.org>\n"
@@ -73,9 +73,28 @@ msgstr "Tälle ohjauselementille ei löytynyt muistikirjan solua."
 msgid "Open a Writer document first."
 msgstr "Avaa ensin Writer-asiakirja."
 
-#: plugin/notebook/writer_importer.py
+#: plugin/notebook/notebook_controls.py
 msgid "Run code cell"
 msgstr "Suorita koodisolu"
+
+#: plugin/embeddings/search_ui.py
+msgid "just now"
+msgstr "juuri nyt"
+
+#: plugin/embeddings/search_ui.py
+#, python-brace-format
+msgid "{0}m ago"
+msgstr "{0} min sitten"
+
+#: plugin/embeddings/search_ui.py
+#, python-brace-format
+msgid "{0}h ago"
+msgstr "{0} h sitten"
+
+#: plugin/embeddings/search_ui.py
+#, python-brace-format
+msgid "{0}d ago"
+msgstr "{0} pv sitten"
 
 #: plugin/embeddings/search_ui.py
 msgid "Cache Status: No active document"
@@ -96,20 +115,6 @@ msgstr "Välimuistin tila: Ei luotu (lancedb)"
 #: plugin/embeddings/search_ui.py
 msgid "Cache Status: Not built"
 msgstr "Välimuistin tila: Ei luotu"
-
-#: plugin/embeddings/search_ui.py
-msgid "just now"
-msgstr "juuri nyt"
-
-#: plugin/embeddings/search_ui.py
-#, python-brace-format
-msgid "{0}m ago"
-msgstr "{0} min sitten"
-
-#: plugin/embeddings/search_ui.py
-#, python-brace-format
-msgid "{0}h ago"
-msgstr "{0} h sitten"
 
 #: plugin/embeddings/search_ui.py
 #, python-brace-format
@@ -421,7 +426,8 @@ msgid "Status:"
 msgstr "Tila:"
 
 #: plugin/calc/python/cell_editor_ui.py plugin/chatbot/panel_wiring.py
-#: plugin/scripting/editor_ui_strings.py plugin/xdl_strings.py
+#: plugin/chatbot/panel.py plugin/scripting/editor_ui_strings.py
+#: plugin/xdl_strings.py
 msgid "Ready"
 msgstr "Valmis"
 
@@ -565,13 +571,13 @@ msgstr "Kuvat lisätty"
 #: plugin/calc/python/geometric_recalc.py
 #, python-format
 msgid ""
-"Geometric Recalc Order skipped sheet '%s': found %s or more Python cells "
-"(discovery cap). The sheet was left unchained so a partial list is not "
-"treated as complete."
+"Geometric Recalc Order skipped sheet '%(sheet)s': found %(cap)s or more "
+"Python cells (discovery cap). The sheet was left unchained so a partial list "
+"is not treated as complete."
 msgstr ""
-"Geometrinen uudelleenlaskentajärjestys ohitti laskentataulukon '%s': löytyi "
-"vähintään %s Python-solua (etsintäraja). Laskentataulukkoa ei ketjutettu, "
-"jotta osittaista luetteloa ei käsiteltäisi täydellisenä."
+"Geometrinen uudelleenlaskentajärjestys ohitti laskentataulukon '%(sheet)s': "
+"löytyi %(cap)s tai enemmän Python-soluja (löytöraja). Laskentataulukkoa ei "
+"ketjutettu, jotta osittaista luetteloa ei käsiteltäisi täydellisenä."
 
 #: plugin/calc/excel_py_convert/auto_open.py
 #, python-brace-format
@@ -1332,6 +1338,10 @@ msgid ""
 "[Model {0} does not support native audio. Please select an STT Model in "
 "Settings.]"
 msgstr "[Malli {0} ei tue natiivia ääntä. Valitse STT-malli asetuksista.]"
+
+#: plugin/chatbot/panel.py
+msgid "[Peer send requires Chat mode on this sidebar.]"
+msgstr "[Vertaislähetys vaatii Chat-tilan tässä sivupalkissa.]"
 
 #: plugin/chatbot/web_research_chat.py
 #, python-format
@@ -3151,6 +3161,21 @@ msgstr "Calc-laskentataulukkotyökalut"
 
 msgid "Max Rows Display"
 msgstr "Rivien enimmäismäärä"
+
+msgid "Cache Excel siblings as ODS"
+msgstr "Välimuistita Excel-sisarukset ODS-muodossa"
+
+msgid ""
+"Convert sibling .xlsx/.xls to writeragent_ods_cache/ beside the folder so "
+"repeated DuckDB SQL reuses the ODS. Native .ods and the live workbook are "
+"never cached. Set calc.ods_cache_enabled false in writeragent.json to "
+"disable."
+msgstr ""
+"Muunna sisarukset .xlsx/.xls muotoon writeragent_ods_cache/ kansion viereen, "
+"jotta toistuva DuckDB SQL käyttää ODS-tiedostoa uudelleen. Alkuperäisiä .ods-"
+"tiedostoja ja aktiivista työkirjaa ei koskaan välimuistiteta. Aseta "
+"calc.ods_cache_enabled false tiedostossa writeragent.json poistaaksesi tämän "
+"käytöstä."
 
 msgid "Sidebar"
 msgstr "Sivupalkki"

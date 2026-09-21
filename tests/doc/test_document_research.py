@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import os
+import sys
 import tempfile
 import time
 from unittest.mock import MagicMock, patch
@@ -13,6 +14,7 @@ from unittest.mock import MagicMock, patch
 from plugin.doc.document_research import (
     NEARBY_FILE_EXTENSIONS,
     NEARBY_IMAGE_EXTENSIONS,
+    _collect_open_file_urls,
     _system_path_from_url,
     close_document_research_document,
     guess_doc_type_from_path,
@@ -284,6 +286,99 @@ def test_list_nearby_files_file_kind_documents_explicit():
         assert [f["name"] for f in result["files"]] == ["Budget.ods"]
 
 
+def test_collect_open_file_urls_skips_broken_desktop_component():
+    """GHA 34593327841: leftover paste Writer must not abort the nearby walk."""
+    with tempfile.TemporaryDirectory() as tmp:
+        budget = os.path.join(tmp, "Budget_2026.ods")
+        with open(budget, "wb"):
+            pass
+        budget_url = path_to_file_url(budget)
+        budget_norm = os.path.normpath(os.path.abspath(budget))
+
+        broken = MagicMock(name="leftover_paste_writer")
+        broken.getController.side_effect = RuntimeError(
+            "Couldn't convert <traceback object> to a UNO type"
+        )
+
+        good = MagicMock(name="saved_calc")
+        good.getController.return_value = None
+        good.getURL.return_value = budget_url
+
+        class _Enum:
+            def __init__(self, items):
+                self._items = list(items)
+
+            def hasMoreElements(self):
+                return bool(self._items)
+
+            def nextElement(self):
+                return self._items.pop(0)
+
+        desktop = MagicMock()
+        desktop.getComponents.return_value.createEnumeration.return_value = _Enum(
+            [broken, good]
+        )
+        with (
+            patch("plugin.framework.uno_context.get_desktop", return_value=desktop),
+            patch(
+                "plugin.doc.document_research._system_path_from_url",
+                side_effect=lambda url: budget_norm if url == budget_url else None,
+            ),
+            patch("plugin.framework.thread_guard.guard_uno", side_effect=lambda obj: obj),
+        ):
+            out = _collect_open_file_urls(
+                object(), exclude_path=None, extensions=NEARBY_FILE_EXTENSIONS
+            )
+        assert out == {budget_norm: budget_url}
+
+
+def test_collect_open_file_urls_skips_geturl_failure():
+    """Same leftover family: getURL raise must not abort later components."""
+    with tempfile.TemporaryDirectory() as tmp:
+        budget = os.path.join(tmp, "Budget_2026.ods")
+        with open(budget, "wb"):
+            pass
+        budget_url = path_to_file_url(budget)
+        budget_norm = os.path.normpath(os.path.abspath(budget))
+
+        broken = MagicMock(name="leftover_no_url")
+        broken.getController.return_value = None
+        broken.getURL.side_effect = RuntimeError(
+            "Couldn't convert <traceback object> to a UNO type"
+        )
+
+        good = MagicMock(name="saved_calc")
+        good.getController.return_value = None
+        good.getURL.return_value = budget_url
+
+        class _Enum:
+            def __init__(self, items):
+                self._items = list(items)
+
+            def hasMoreElements(self):
+                return bool(self._items)
+
+            def nextElement(self):
+                return self._items.pop(0)
+
+        desktop = MagicMock()
+        desktop.getComponents.return_value.createEnumeration.return_value = _Enum(
+            [broken, good]
+        )
+        with (
+            patch("plugin.framework.uno_context.get_desktop", return_value=desktop),
+            patch(
+                "plugin.doc.document_research._system_path_from_url",
+                side_effect=lambda url: budget_norm if url == budget_url else None,
+            ),
+            patch("plugin.framework.thread_guard.guard_uno", side_effect=lambda obj: obj),
+        ):
+            out = _collect_open_file_urls(
+                object(), exclude_path=None, extensions=NEARBY_FILE_EXTENSIONS
+            )
+        assert out == {budget_norm: budget_url}
+
+
 def test_close_document_research_document_skips_reused_open():
     model = MagicMock()
     close_document_research_document(model, opened_for_document_research=False)
@@ -306,6 +401,16 @@ def test_open_document_for_read_reuses_existing_without_close_flag(mock_isfile, 
     mock_resolve.assert_called_once()
 
 
+def test_hidden_readonly_load_args_named_on_windows(monkeypatch):
+    """GHA 34636251918: leftover Hidden _default file load raised system bitmap."""
+    import plugin.doc.document_research as dr
+
+    monkeypatch.setattr(dr.sys, "platform", "win32")
+    assert dr._hidden_readonly_load_args() == ("_wa_doc_research", 8 | 55)
+    monkeypatch.setattr(dr.sys, "platform", "linux")
+    assert dr._hidden_readonly_load_args() == ("_default", 0)
+
+
 @patch("plugin.doc.document_research.get_document_type")
 @patch("plugin.framework.uno_context.get_desktop")
 @patch("plugin.doc.document_research.resolve_document_by_url", return_value=(None, None))
@@ -321,3 +426,25 @@ def test_open_document_for_read_sets_close_flag_on_new_load(mock_isfile, mock_re
     assert doc_type == "calc"
     assert model is opened_model
     assert opened_for_document_research is True
+    args = mock_desktop.return_value.loadComponentFromURL.call_args.args
+    target, flags = (
+        ("_wa_doc_research", 8 | 55) if sys.platform == "win32" else ("_default", 0)
+    )
+    assert args[1] == target
+    assert args[2] == flags
+
+
+def test_nearby_uno_env_does_not_open_second_scalc_factory():
+    """GHA 34633295036: leftover unique scalc factory failed then hung."""
+    path = os.path.join(os.path.dirname(__file__), "test_document_research_uno.py")
+    with open(path, encoding="utf-8") as handle:
+        src = handle.read()
+    assert "create_native_doc" not in src
+    assert "store budget via active" in src
+    # GHA 34639913692: Hidden load of the storeAsURL path still raised
+    # system bitmap after ``_wa_doc_research``. Windows opens a copy.
+    assert "Budget_read.ods" in src
+    assert "shutil.copy2" in src
+    # GHA 34655847157: first Hidden copy bitmap-failed; next hung 30s.
+    assert "note_windows_hidden_open_bitmap" in src
+    assert "skip_windows_hidden_open_after_bitmap" in src
