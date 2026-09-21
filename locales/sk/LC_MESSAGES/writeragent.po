@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: PACKAGE VERSION\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-09-04 14:15-0400\n"
+"POT-Creation-Date: 2026-09-14 16:20-0400\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: Slovak <LL@li.org>\n"
@@ -72,9 +72,28 @@ msgstr "Pre tento ovládací prvok sa nepodarilo nájsť bunku poznámkového bl
 msgid "Open a Writer document first."
 msgstr "Najprv otvorte dokument Writer."
 
-#: plugin/notebook/writer_importer.py
+#: plugin/notebook/notebook_controls.py
 msgid "Run code cell"
 msgstr "Spustiť bunku kódu"
+
+#: plugin/embeddings/search_ui.py
+msgid "just now"
+msgstr "práve teraz"
+
+#: plugin/embeddings/search_ui.py
+#, python-brace-format
+msgid "{0}m ago"
+msgstr "pred {0} m"
+
+#: plugin/embeddings/search_ui.py
+#, python-brace-format
+msgid "{0}h ago"
+msgstr "pred {0} h"
+
+#: plugin/embeddings/search_ui.py
+#, python-brace-format
+msgid "{0}d ago"
+msgstr "pred {0} d"
 
 #: plugin/embeddings/search_ui.py
 msgid "Cache Status: No active document"
@@ -95,20 +114,6 @@ msgstr "Stav vyrovnávacej pamäte: Nevytvorené (lancedb)"
 #: plugin/embeddings/search_ui.py
 msgid "Cache Status: Not built"
 msgstr "Stav vyrovnávacej pamäte: Nevytvorené"
-
-#: plugin/embeddings/search_ui.py
-msgid "just now"
-msgstr "práve teraz"
-
-#: plugin/embeddings/search_ui.py
-#, python-brace-format
-msgid "{0}m ago"
-msgstr "pred {0} m"
-
-#: plugin/embeddings/search_ui.py
-#, python-brace-format
-msgid "{0}h ago"
-msgstr "pred {0} h"
 
 #: plugin/embeddings/search_ui.py
 #, python-brace-format
@@ -420,7 +425,8 @@ msgid "Status:"
 msgstr "Stav:"
 
 #: plugin/calc/python/cell_editor_ui.py plugin/chatbot/panel_wiring.py
-#: plugin/scripting/editor_ui_strings.py plugin/xdl_strings.py
+#: plugin/chatbot/panel.py plugin/scripting/editor_ui_strings.py
+#: plugin/xdl_strings.py
 msgid "Ready"
 msgstr "Pripravený"
 
@@ -562,13 +568,13 @@ msgstr "Vložené obrázky"
 #: plugin/calc/python/geometric_recalc.py
 #, python-format
 msgid ""
-"Geometric Recalc Order skipped sheet '%s': found %s or more Python cells "
-"(discovery cap). The sheet was left unchained so a partial list is not "
-"treated as complete."
+"Geometric Recalc Order skipped sheet '%(sheet)s': found %(cap)s or more "
+"Python cells (discovery cap). The sheet was left unchained so a partial list "
+"is not treated as complete."
 msgstr ""
-"Geometrické poradie prepočtu preskočilo hárok „%s“: nájdených %s alebo viac "
-"buniek Pythonu (limit zisťovania). Hárok zostal nezreťazený, aby sa "
-"čiastočný zoznam nepovažoval za úplný."
+"Geometrické poradie prepočtu preskočilo hárok „%(sheet)s“: nájdených %(cap)s "
+"alebo viac buniek Pythonu (limit zisťovania). Hárok zostal nezreťazený, aby "
+"sa čiastočný zoznam nepovažoval za úplný."
 
 #: plugin/calc/excel_py_convert/auto_open.py
 #, python-brace-format
@@ -1329,6 +1335,10 @@ msgid ""
 msgstr ""
 "[Model {0} nepodporuje natívny zvuk. Prosím, vyberte model STT v "
 "Nastaveniach.]"
+
+#: plugin/chatbot/panel.py
+msgid "[Peer send requires Chat mode on this sidebar.]"
+msgstr "[Odosielanie partnerovi vyžaduje režim Četu na tomto bočnom paneli.]"
 
 #: plugin/chatbot/web_research_chat.py
 #, python-format
@@ -3153,6 +3163,20 @@ msgstr "Nástroje tabuľkového procesora Calc"
 
 msgid "Max Rows Display"
 msgstr "Maximálny počet zobrazených riadkov"
+
+msgid "Cache Excel siblings as ODS"
+msgstr "Ukladať súrodencov Excelu do vyrovnávacej pamäte ako ODS"
+
+msgid ""
+"Convert sibling .xlsx/.xls to writeragent_ods_cache/ beside the folder so "
+"repeated DuckDB SQL reuses the ODS. Native .ods and the live workbook are "
+"never cached. Set calc.ods_cache_enabled false in writeragent.json to "
+"disable."
+msgstr ""
+"Konvertovať súrodenecké súbory .xlsx/.xls do writeragent_ods_cache/ vedľa "
+"priečinka, aby opakovaný DuckDB SQL opätovne použil ODS. Natívne súbory .ods "
+"a živý zošit sa nikdy neukladajú do vyrovnávacej pamäte. Pre zakázanie "
+"nastavte calc.ods_cache_enabled na false vo writeragent.json."
 
 msgid "Sidebar"
 msgstr "Bočný panel"

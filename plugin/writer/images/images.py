@@ -42,6 +42,7 @@ def _run_on_main(fn, *args, timeout=60.0, **kwargs):
     return execute_on_main_thread(fn, *args, timeout=timeout, **kwargs)
 from .image_utils import ImageService
 from plugin.framework.config import get_config_int, get_config_bool, get_config_str
+from plugin.framework.config_schema import DEFAULT_IMAGE_BASE_SIZE
 from plugin.framework.client.model_fetcher import get_image_model
 from plugin.framework.constants import USER_AGENT
 from plugin.chatbot.config_ui_helpers import update_lru_history
@@ -61,20 +62,49 @@ from .image_tools import (
 log = logging.getLogger("writeragent.writer")
 
 
+def resolve_image_generate_is_edit(source_image: typing.Any, *, selection_available: bool) -> bool:
+    """True when image_generate should img2img the selected graphic.
+
+    Explicit ``source_image='selection'`` always edits. Omitting ``source_image``
+    also edits when a graphic is selected: the parent often rewrites
+    "make it look like a wizard" into a generate-new task and drops the
+    argument; defaulting to the selection keeps ``replace_image_in_place``.
+    Create-new when nothing is selected (clear the selection to force create).
+    """
+    if isinstance(source_image, str):
+        source_image = source_image.strip() or None
+    if source_image and str(source_image).lower() == "selection":
+        return True
+    return source_image is None and selection_available
+
+
 class ImageGenerate(ToolWriterImageBase):
     """Generate a new image from a prompt, or edit an existing image (Img2Img)."""
 
     name = "image_generate"
     intent = "media"
-    description = "Generate an image from a text prompt and insert it. To edit an existing image, pass source_image='selection' and select an image first."
+    description = (
+        "Generate an image from a text prompt and insert it. "
+        "To edit an existing image, pass source_image='selection' (or omit it while a graphic is selected)."
+    )
     parameters = {
         "type": "object",
         "properties": {
             "prompt": {"type": "string", "description": "Descriptive prompt for image generation or editing"},
-            "source_image": {"type": "string", "description": ("Optional. Use 'selection' to edit the currently selected image (Img2Img). Omit to generate a new image.")},
+            "source_image": {"type": "string", "description": (
+                "Optional. Use 'selection' to edit the currently selected image (Img2Img). "
+                "Omit while a graphic is selected to edit in place; omit with no selection to create a new image."
+            )},
             "strength": {"type": "number", "description": "For editing: how much to change the image (0.0-1.0). Ignored when generating new.", "default": 0.75},
             "aspect_ratio": {"type": "string", "enum": ["square", "landscape_16_9", "portrait_9_16", "landscape_3_2", "portrait_2_3", "1:1", "4:3", "3:4", "16:9", "9:16"], "default": "square"},
-            "base_size": {"type": "integer", "description": "Base dimension for scaling", "default": 512},
+            "base_size": {
+                "type": "integer",
+                "description": (
+                    "Generate resolution in pixels (default 1024). "
+                    "On-page display is capped independently (~135mm longer edge)."
+                ),
+                "default": DEFAULT_IMAGE_BASE_SIZE,
+            },
             "width": {"type": "integer", "description": "Override calculated width"},
             "height": {"type": "integer", "description": "Override calculated height"},
             "provider": {"type": "string", "description": "Override default provider"},
@@ -104,11 +134,14 @@ class ImageGenerate(ToolWriterImageBase):
         if isinstance(source_image, str):
             source_image = source_image.strip() or None
 
-        is_edit = source_image and source_image.lower() == "selection"
+        explicit_edit = bool(source_image and source_image.lower() == "selection")
         source_b64 = None
-        edit_width, edit_height = 512, 512
+        edit_width, edit_height = DEFAULT_IMAGE_BASE_SIZE, DEFAULT_IMAGE_BASE_SIZE
+        is_edit = False
 
-        if is_edit:
+        # Peek selection when the caller asked to edit, or omitted source_image
+        # (omitted + selected graphic → img2img; omitted + no selection → create).
+        if explicit_edit or source_image is None:
 
             def _read_selection_for_edit():
                 b64 = get_selected_image_base64(ctx.doc, ctx.ctx)
@@ -116,21 +149,24 @@ class ImageGenerate(ToolWriterImageBase):
                     return ("no_selection", None)
                 ew, eh = get_selected_image_dimensions_px(ctx.doc)
                 if ew is None:
-                    ew, eh = 512, 512
+                    ew, eh = DEFAULT_IMAGE_BASE_SIZE, DEFAULT_IMAGE_BASE_SIZE
                 return ("ok", (b64, ew, eh))
 
             tag, payload = _run_on_main(_read_selection_for_edit, timeout=mt_timeout)
-            if tag == "no_selection":
+            selection_available = tag == "ok"
+            is_edit = resolve_image_generate_is_edit(source_image, selection_available=selection_available)
+            if explicit_edit and not selection_available:
                 return self._tool_error("No image selected. Please select an image in the document first.", code="NO_SELECTION", action="edit_image")
-            if not isinstance(payload, tuple) or len(payload) != 3 or payload[1] is None or payload[2] is None:
-                return self._tool_error("Could not read selected image.", code="SELECTION_READ_ERROR")
-            source_b64, edit_width, edit_height = (str(payload[0]), int(payload[1]), int(payload[2]))
+            if is_edit:
+                if not isinstance(payload, tuple) or len(payload) != 3 or payload[1] is None or payload[2] is None:
+                    return self._tool_error("Could not read selected image.", code="SELECTION_READ_ERROR")
+                source_b64, edit_width, edit_height = (str(payload[0]), int(payload[1]), int(payload[2]))
 
         base_size = args.get("base_size", get_config_int("image_base_size"))
         try:
             base_size = int(base_size)
         except (ValueError, TypeError):
-            base_size = 512
+            base_size = DEFAULT_IMAGE_BASE_SIZE
 
         aspect = args.get("aspect_ratio", get_config_str("image_default_aspect"))
         if aspect in ("landscape_16_9", "16:9"):
@@ -156,7 +192,15 @@ class ImageGenerate(ToolWriterImageBase):
             args_copy["source_image"] = source_b64
             args_copy["strength"] = args.get("strength", 0.75)
 
-        paths, error_msg = image_svc.generate_image(prompt, provider_name=provider, width=width, height=height, status_callback=status_callback, **args_copy)
+        paths, error_msg = image_svc.generate_image(
+            prompt,
+            provider_name=provider,
+            width=width,
+            height=height,
+            aspect_ratio=aspect,
+            status_callback=status_callback,
+            **args_copy,
+        )
 
         if not paths:
             return self._tool_error(error_msg or "No image returned.", code="PROVIDER_ERROR", provider=provider)
@@ -642,6 +686,10 @@ class ImageInsert(ToolWriterImageBase):
         "Insert an image from local path or URL into the document. URLs are auto-downloaded first. "
         "For Writer letterheads, pass target='header' or 'footer' (optionally style) to insert "
         "into the page header/footer with auto-height so the logo does not overlap the body. "
+        "A different-first-page letterhead logo needs first_is_shared=false on the page style "
+        "(page_set_style_properties) so HeaderTextFirst is its own text object, then "
+        "target='header_first' (or footer_first) — otherwise the image lands in the shared "
+        "header and repeats on every page. "
         "On Draw/Impress, optional page (0-based) and x_mm/y_mm place the image; omitted x/y centers it. "
         "Sizes and positions are millimetres (not 1/100 mm)."
     )
@@ -658,8 +706,12 @@ class ImageInsert(ToolWriterImageBase):
             "height_mm": {"type": "integer", "description": "Height in millimetres (default: 80)."},
             "target": {
                 "type": "string",
-                "enum": ["body", "header", "footer"],
-                "description": "Writer insertion target (default: body). header/footer write into the page style region.",
+                "enum": ["body", "header", "footer", "header_first", "footer_first"],
+                "description": (
+                    "Writer insertion target (default: body). header/footer write the shared "
+                    "page-style region. header_first/footer_first write the first-page letterhead "
+                    "(set first_is_shared=false first, or the first page still shares HeaderText)."
+                ),
             },
             "style": {
                 "type": "string",
@@ -668,7 +720,8 @@ class ImageInsert(ToolWriterImageBase):
             "auto_height": {
                 "type": "boolean",
                 "description": (
-                    "When target is header/footer, grow the region with the image (default: true). "
+                    "When target is a header/footer region, grow the region with the image "
+                    "(default: true) so a taller logo does not overlap the body. "
                     "Set false to keep a fixed header/footer height."
                 ),
             },
@@ -695,7 +748,7 @@ class ImageInsert(ToolWriterImageBase):
         if not os.path.isfile(image_path):
             return self._tool_error(f"File not found: {image_path}", code="FILE_NOT_FOUND", path=image_path)
 
-        if target in ("header", "footer"):
+        if target in ("header", "footer", "header_first", "footer_first"):
             if visual_helpers.get_visual_doc_type(doc) not in ("writer", "web"):
                 return self._tool_error(
                     "target='%s' is only supported for Writer documents." % target,

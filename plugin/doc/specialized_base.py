@@ -25,16 +25,63 @@ from plugin.framework.prompts import (
     CALC_HIDDEN_SPECIALIZED_DOMAINS,
     WRITER_SIDEBAR_ONLY_DOMAINS,
     IMPRESS_DRAW_SIDEBAR_ONLY_DOMAINS,
+    attach_sheets_create_completion_instruction,
+    DELEGATE_SPECIALIZED_TASK_PARAM_HINT,
+    images_specialized_sub_agent_hint,
+    python_specialized_sub_agent_hint,
 )
-from plugin.framework.prompts import DELEGATE_SPECIALIZED_TASK_PARAM_HINT, python_specialized_sub_agent_hint
 from plugin.framework.i18n import _
 from plugin.chatbot.smol_agent import build_toolcalling_agent, SmolAgentExecutor, SmolToolAdapter
 from plugin.chatbot.smol_examples import get_examples_block
-from plugin.doc.document_research import get_document_research_workflow_hint
 from plugin.doc.specialized_shapes_context import format_shapes_canvas_context
 from plugin.framework import queue_executor
 
 log = logging.getLogger("writeragent.specialized")
+
+
+def _outer_turn_is_peer_work(ctx: Any) -> bool:
+    """True when this sidebar's current outer turn is a [Peer work from:…] envelope.
+
+    Nested specializes (ranges/sheets/…) otherwise look "done" to the outer and it
+    Ready-s without ``document_research`` → ``send_peer_result``. Probe the live
+    panel listener's ``_active_query_text`` and last user ``session.messages``
+    entry; RuntimeUID lookup is UNO so marshal to the main thread.
+    """
+    from plugin.framework.prompts import looks_like_peer_work_envelope
+
+    def _probe() -> bool:
+        from plugin.doc.live_panels import get_live_panel
+        from plugin.framework.uno_context import get_runtime_uid
+
+        doc = getattr(ctx, "doc", None)
+        if doc is None:
+            return False
+        uid = get_runtime_uid(doc) or ""
+        if not uid:
+            return False
+        panel = get_live_panel(uid)
+        if panel is None:
+            return False
+        listener = getattr(panel, "send_listener", None)
+        if listener is None:
+            return False
+        if looks_like_peer_work_envelope(getattr(listener, "_active_query_text", None)):
+            return True
+        session = getattr(listener, "session", None)
+        messages = getattr(session, "messages", None) if session is not None else None
+        if not messages:
+            return False
+        for msg in reversed(list(messages)):
+            if not isinstance(msg, dict) or msg.get("role") != "user":
+                continue
+            return looks_like_peer_work_envelope(msg.get("content"))
+        return False
+
+    try:
+        return bool(queue_executor.execute_on_main_thread(_probe))
+    except Exception as e:
+        log.warning("peer-work turn probe failed: %s", e)
+        return False
 
 
 def _field_from_tool_arguments(arguments: Any, field: str) -> Any:
@@ -193,114 +240,190 @@ class DelegateToSpecializedBase(ToolBase):
                 exclude_tiers=(),
                 ctx=ctx.ctx,
             )
+            peer_catalog = ""
+            document_research_hint = ""
             if domain == "document_research":
-                from plugin.doc.document_research import filter_document_research_discovery_tools
+                from plugin.doc.document_research import (
+                    filter_document_research_discovery_tools,
+                    get_document_research_workflow_hint,
+                )
+                from plugin.doc.peer_message import (
+                    PEER_TOOL_NAMES,
+                    filter_peer_tools_for_specialized,
+                    format_peer_catalog,
+                    list_v1_peers,
+                )
 
                 tools = filter_document_research_discovery_tools(tools, ctx.ctx)
-            return tools
+                tools = filter_peer_tools_for_specialized(tools, ctx.ctx, ctx.doc)
+                if any(getattr(t, "name", None) in PEER_TOOL_NAMES for t in tools):
+                    peer_catalog = format_peer_catalog(list_v1_peers(ctx.ctx, ctx.doc))
+                # #673 added list_v1_peers / getRuntimeUID to this hint. Specialized
+                # execute is async: gather the catalog here with get_tools, not on
+                # the tool-async worker.
+                document_research_hint = get_document_research_workflow_hint(
+                    ctx.ctx, getattr(ctx, "doc", None)
+                )
+            return tools, peer_catalog, document_research_hint
 
         # get_tools(doc=...) calls doc.supportsService — must not run on the sub-agent worker.
-        domain_tools = queue_executor.execute_on_main_thread(_fetch_domain_tools)
+        domain_tools, peer_catalog, document_research_hint = queue_executor.execute_on_main_thread(
+            _fetch_domain_tools
+        )
 
         if not domain_tools:
             return self._tool_error(f"No specialized tools found for domain '{domain}'. Ensure the tools are implemented and registered.")
 
-        smol_tools = [SmolToolAdapter(t, ctx, safe=True, inputs_style="specialized") for t in domain_tools]
+        # Specialized execute must see document_research so peer send tools'
+        # caller guard allows this loop (not only ctx.caller == "chat").
+        prev_active_domain = getattr(ctx, "active_domain", None)
+        ctx.active_domain = domain
+        # When an inner peer send ran, the outer must Ready (not keep tooling).
+        peer_send_invoked = False
+        # Only send_peer_result counts as peer delivery on a Peer-work receiving turn.
+        peer_result_send_invoked = False
+        # Inner tool results that already carry web-research-style `instruction`
+        # (create_sheet, etc.) so specialized finish can forward them to the outer.
+        captured_tool_results: list[Any] = []
+        create_sheet_ran = False
 
-        footnotes_hint = ""
-        if domain == "footnotes":
-            footnotes_hint = " For footnotes_insert: if the task quotes or names the document anchor (e.g. a sentence), pass that exact string as insert_after so the note is placed after that text; the task executor cannot move the view cursor."
-        shapes_canvas = ""
-        if domain == "shapes":
-            try:
-                canvas = queue_executor.execute_on_main_thread(lambda: format_shapes_canvas_context(getattr(ctx, "doc", None)))
-            except Exception as e:
-                log.warning("Failed to get shapes canvas for sub-agent: %s", e)
-                canvas = ""
-            if canvas:
-                shapes_canvas = canvas
+        class _CaptureInstructionAdapter(SmolToolAdapter):
+            def forward(self, *args: Any, **kwargs: Any) -> Any:
+                result = super().forward(*args, **kwargs)
+                if isinstance(result, dict) and result.get("instruction"):
+                    captured_tool_results.append(result)
+                return result
 
-        charts_hint = ""
-        if domain == "charts":
-            if self._agent_label == "Calc":
-                charts_hint = " When creating a chart in Calc, you MUST specify the data range explicitly (e.g. data_range='A1:B10')."
-            elif self._agent_label in ("Writer", "Draw"):
-                charts_hint = " When creating or editing a chart in Writer or Draw/Impress, you MUST specify both the `headers` and `rows` parameters."
+        try:
+            smol_tools = [_CaptureInstructionAdapter(t, ctx, safe=True, inputs_style="specialized") for t in domain_tools]
+            if peer_catalog:
+                from plugin.doc.peer_message import PEER_TOOL_NAMES
 
-        calc_ctx = ""
-        # Identity only: truthiness on a guard-proxied doc trips UNO bool on the MCP/long-running
-        # worker. UNO reads stay inside _fetch_calc_context on the main thread.
-        if self._agent_label == "Calc" and getattr(ctx, "doc", None) is not None:
-            from plugin.calc.analyzer import get_calc_context_for_chat
+                for adapter in smol_tools:
+                    if getattr(adapter, "name", None) in PEER_TOOL_NAMES:
+                        adapter.description = (str(adapter.description or "") + " " + peer_catalog).strip()
 
-            def _fetch_calc_context() -> str:
-                return "\n\n[SPREADSHEET CONTEXT]\n" + get_calc_context_for_chat(ctx.doc, ctx=ctx.ctx)
+            footnotes_hint = ""
+            if domain == "footnotes":
+                footnotes_hint = " For footnotes_insert: if the task quotes or names the document anchor (e.g. a sentence), pass that exact string as insert_after so the note is placed after that text; the task executor cannot move the view cursor."
+            shapes_canvas = ""
+            if domain == "shapes":
+                try:
+                    canvas = queue_executor.execute_on_main_thread(lambda: format_shapes_canvas_context(getattr(ctx, "doc", None)))
+                except Exception as e:
+                    log.warning("Failed to get shapes canvas for sub-agent: %s", e)
+                    canvas = ""
+                if canvas:
+                    shapes_canvas = canvas
 
-            try:
-                # Sub-agent runs on a worker thread; UNO reads must go through the main thread.
-                calc_ctx = queue_executor.execute_on_main_thread(_fetch_calc_context)
-            except Exception as e:
-                log.warning("Failed to get Calc context for sub-agent: %s", e)
+            charts_hint = ""
+            if domain == "charts":
+                if self._agent_label == "Calc":
+                    charts_hint = " When creating a chart in Calc, you MUST specify the data range explicitly (e.g. data_range='A1:B10')."
+                elif self._agent_label in ("Writer", "Draw"):
+                    charts_hint = " When creating or editing a chart in Writer or Draw/Impress, you MUST specify both the `headers` and `rows` parameters."
 
-        document_research_hint = get_document_research_workflow_hint(ctx.ctx) if domain == "document_research" else ""
-        open_docs_context = ""
-        if domain == "document_research":
-            try:
-                from plugin.doc.document_research import get_open_documents
+            calc_ctx = ""
+            # Identity only: truthiness on a guard-proxied doc trips UNO bool on the MCP/long-running
+            # worker. UNO reads stay inside _fetch_calc_context on the main thread.
+            if self._agent_label == "Calc" and getattr(ctx, "doc", None) is not None:
+                from plugin.calc.analyzer import get_calc_context_for_chat
 
-                open_docs = queue_executor.execute_on_main_thread(lambda: get_open_documents(ctx.ctx, ctx.doc))
-                if open_docs:
-                    lines = []
-                    for d in open_docs:
-                        path_or_url = d["path"] or d["url"] or "Untitled"
-                        doc_type = d["doc_type"]
-                        active_str = " (Active)" if d["is_active"] else ""
-                        lines.append(f"- {path_or_url} [{doc_type}]{active_str}")
-                    open_docs_context = (
-                        "\n\n[OPEN DOCUMENTS CONTEXT]\n"
-                        "Note: These are the currently open files in LibreOffice. "
-                        "Some of these files may be completely unrelated to the task at hand:\n"
-                        + "\n".join(lines)
-                    )
-            except Exception as e:
-                log.warning("Failed to get open documents for sub-agent: %s", e)
+                def _fetch_calc_context() -> str:
+                    return "\n\n[SPREADSHEET CONTEXT]\n" + get_calc_context_for_chat(ctx.doc, ctx=ctx.ctx)
 
-        images_hint = (
-            " Discover local image files with image_list_nearby_files before image_insert when the user refers to a photo in the folder."
-            if domain == "images"
-            else ""
-        )
-        python_hint = python_specialized_sub_agent_hint(self._agent_label) if domain == "python" else ""
-        instructions = (
-            f"You are a specialized {self._agent_label} task executor focused on the '{domain}' domain. "
-            f"You have a focused set of tools to accomplish your task. Use them to fulfill the user's request."
-            f"{footnotes_hint}{shapes_canvas}{charts_hint}{calc_ctx}{document_research_hint}{open_docs_context}{images_hint}{python_hint}"
-        )
+                try:
+                    # Sub-agent runs on a worker thread; UNO reads must go through the main thread.
+                    calc_ctx = queue_executor.execute_on_main_thread(_fetch_calc_context)
+                except Exception as e:
+                    log.warning("Failed to get Calc context for sub-agent: %s", e)
 
+            open_docs_context = ""
+            if domain == "document_research":
+                try:
+                    from plugin.doc.document_research import get_open_documents
 
-        examples_key = f"{self._agent_label.lower()}:{domain}"
-        agent = build_toolcalling_agent(ctx, smol_tools, instructions=instructions, final_answer_tool_name="specialized_workflow_finished", examples_block=get_examples_block(examples_key), status_callback=status_callback)
+                    open_docs = queue_executor.execute_on_main_thread(lambda: get_open_documents(ctx.ctx, ctx.doc))
+                    if open_docs:
+                        lines = []
+                        for d in open_docs:
+                            path_or_url = d["path"] or d["url"] or "Untitled"
+                            doc_type = d["doc_type"]
+                            active_str = " (Active)" if d["is_active"] else ""
+                            lines.append(f"- {path_or_url} [{doc_type}]{active_str}")
+                        open_docs_context = (
+                            "\n\n[OPEN DOCUMENTS CONTEXT]\n"
+                            "Note: These are the currently open files in LibreOffice. "
+                            "Some of these files may be completely unrelated to the task at hand:\n"
+                            + "\n".join(lines)
+                        )
+                except Exception as e:
+                    log.warning("Failed to get open documents for sub-agent: %s", e)
 
-        executor = SmolAgentExecutor(ctx)
+            images_hint = images_specialized_sub_agent_hint() if domain == "images" else ""
+            python_hint = python_specialized_sub_agent_hint(self._agent_label) if domain == "python" else ""
+            instructions = (
+                f"You are a specialized {self._agent_label} task executor focused on the '{domain}' domain. "
+                f"You have a focused set of tools to accomplish your task. Use them to fulfill the user's request."
+                f"{footnotes_hint}{shapes_canvas}{charts_hint}{calc_ctx}{document_research_hint}{open_docs_context}{images_hint}{python_hint}"
+            )
 
-        document_open_step_index = 0
+            examples_key = f"{self._agent_label.lower()}:{domain}"
+            agent = build_toolcalling_agent(ctx, smol_tools, instructions=instructions, final_answer_tool_name="specialized_workflow_finished", examples_block=get_examples_block(examples_key), status_callback=status_callback)
 
-        def tool_call_handler(step):
-            nonlocal document_open_step_index
-            if domain == "document_research" and step.name == "delegate_read_document" and chat_append_callback:
-                from plugin.chatbot.web_research_chat import document_open_step_chat_text
+            executor = SmolAgentExecutor(ctx)
 
-                path_or_name = _path_or_name_from_tool_arguments(step.arguments)
-                chat_append_callback(document_open_step_chat_text(path_or_name, document_open_step_index))
-                document_open_step_index += 1
-            if append_thinking_callback:
-                append_thinking_callback(f"Running specialized tool: {step.name} with {step.arguments}\n")
-            if status_callback:
-                status_callback(f"Tool: {step.name}...")
+            document_open_step_index = 0
 
-        final_ans = executor.execute_safe(agent, cast("str", task), tool_call_handler=tool_call_handler, stop_message="Specialized task stopped by user.", error_prefix="Specialized agent failed")
+            def tool_call_handler(step):
+                nonlocal document_open_step_index, peer_send_invoked, peer_result_send_invoked, create_sheet_ran
+                if step.name == "create_sheet":
+                    create_sheet_ran = True
+                if domain == "document_research" and step.name in ("send_peer_work", "send_peer_result"):
+                    peer_send_invoked = True
+                if domain == "document_research" and step.name == "send_peer_result":
+                    peer_result_send_invoked = True
+                if domain == "document_research" and step.name == "delegate_read_document" and chat_append_callback:
+                    from plugin.chatbot.web_research_chat import document_open_step_chat_text
+
+                    path_or_name = _path_or_name_from_tool_arguments(step.arguments)
+                    chat_append_callback(document_open_step_chat_text(path_or_name, document_open_step_index))
+                    document_open_step_index += 1
+                if append_thinking_callback:
+                    append_thinking_callback(f"Running specialized tool: {step.name} with {step.arguments}\n")
+                if status_callback:
+                    status_callback(f"Tool: {step.name}...")
+
+            final_ans = executor.execute_safe(agent, cast("str", task), tool_call_handler=tool_call_handler, stop_message="Specialized task stopped by user.", error_prefix="Specialized agent failed")
+        finally:
+            ctx.active_domain = prev_active_domain
 
         if isinstance(final_ans, dict) and "status" in final_ans:
-            return final_ans
+            payload = final_ans
+        else:
+            payload = {"status": "ok", "message": _(f"Specialized task ({domain}) completed."), "result": str(final_ans)}
+        # Outer never sees create_sheet's inner-only ok string; forward the same
+        # `instruction` field web research uses when empty tabs were created.
+        if domain == "sheets" or create_sheet_ran or captured_tool_results:
+            payload = attach_sheets_create_completion_instruction(
+                dict(payload),
+                create_sheet_ran=create_sheet_ran,
+                tool_results=captured_tool_results,
+            )
+        else:
+            payload = dict(payload)
 
-        return {"status": "ok", "message": _(f"Specialized task ({domain}) completed."), "result": str(final_ans)}
+        # Peer-work receiving turn: nested specialize (or research without
+        # send_peer_result) is not delivery — stamp still-required before Ready.
+        # send_peer_work alone is not delivery on this path; only send_peer_result is.
+        if not peer_result_send_invoked and _outer_turn_is_peer_work(ctx):
+            from plugin.framework.prompts import annotate_outer_peer_delivery_pending
+
+            return annotate_outer_peer_delivery_pending(payload)
+
+        if domain == "document_research":
+            from plugin.framework.prompts import annotate_outer_peer_wait
+
+            # Idle-after-send for ask / accepted delivery sends.
+            return annotate_outer_peer_wait(payload, peer_send_invoked=peer_send_invoked)
+        return payload

@@ -80,6 +80,19 @@ def mock_bi():
 
 from plugin.writer.locale import ai_grammar_proofreader as proofreader
 from plugin.writer.locale import grammar_proofread_cache as gc
+from tests.strip_bundle import is_release_build, module_source_contains
+
+
+def _grammar_obs_call_sites_present() -> bool:
+    """True when ``grammar_obs(...)`` call sites exist in ai_grammar_proofreader.
+
+    ``make release`` runs pytest against a stripped bundle (``scripts/strip_code.py`` removes
+    only ``grammar_obs`` expression statements).
+    """
+    if is_release_build():
+        return False
+    return module_source_contains(proofreader, "grammar_obs(")
+
 from plugin.writer.locale.grammar_proofread_locale import (
     GRAMMAR_PARTIAL_MIN_NONSPACE_CHARS,
     count_nonspace_chars,
@@ -222,6 +235,87 @@ def test_classify_errors_against_window_counts_before_in_after() -> None:
     assert "20+4:in" in cls["error_spans"]
     assert "40+2:after" in cls["error_spans"]
     assert "18+5:straddle" in cls["error_spans"]
+
+
+def test_rule_ids_sample_empty_and_truncated() -> None:
+    from plugin.writer.locale.ai_grammar_proofreader import _rule_ids_sample
+
+    assert _rule_ids_sample([]) == ""
+    assert _rule_ids_sample([{"rule_identifier": "harper||SpellCheck"}]) == "harper||SpellCheck"
+    many = [{"rule_identifier": f"r{i}"} for i in range(10)]
+    sample = _rule_ids_sample(many, limit=3)
+    assert sample == "r0,r1,r2,+7"
+
+
+@pytest.mark.skipif(
+    not _grammar_obs_call_sites_present(),
+    reason="Stripped release bundle removes grammar_obs(...) call sites (scripts/strip_code.py)",
+)
+def test_obs_result_window_emits_final_counts_and_rule_ids() -> None:
+    from plugin.writer.locale.ai_grammar_proofreader import _obs_result_window
+
+    a_res = types.SimpleNamespace(
+        nStartOfSentencePosition=0,
+        nBehindEndOfSentencePosition=20,
+        nStartOfNextSentencePosition=20,
+        aErrors=(object(), object()),
+    )
+    errors = [
+        {"n_error_start": 2, "n_error_length": 3, "rule_identifier": "harper||SpellCheck"},
+        {"n_error_start": 10, "n_error_length": 2, "rule_identifier": "harper||Agreement"},
+    ]
+    with patch.object(proofreader, "grammar_obs") as mock_obs:
+        _obs_result_window(
+            "doc-1",
+            "en-US",
+            a_res,
+            errors,
+            paragraph_span_count=2,
+            active_span_count=1,
+            uncached_active_count=1,
+            source="harper_fast",
+        )
+    mock_obs.assert_called_once()
+    assert mock_obs.call_args[0][0] == "do_proofreading_result_window"
+    kwargs = mock_obs.call_args.kwargs
+    assert kwargs["stage"] == "final"
+    assert kwargs["source"] == "harper_fast"
+    assert kwargs["n_errors"] == 2
+    assert kwargs["n_aErrors"] == 2
+    assert kwargs["rule_ids"] == "harper||SpellCheck,harper||Agreement"
+    assert kwargs["in_window"] == 2
+    assert kwargs["doc_id"] == "doc-1"
+
+
+@pytest.mark.skipif(
+    not _grammar_obs_call_sites_present(),
+    reason="Stripped release bundle removes grammar_obs(...) call sites (scripts/strip_code.py)",
+)
+def test_obs_result_window_empty_lint_omits_rule_ids() -> None:
+    from plugin.writer.locale.ai_grammar_proofreader import _obs_result_window
+
+    a_res = types.SimpleNamespace(
+        nStartOfSentencePosition=0,
+        nBehindEndOfSentencePosition=5,
+        nStartOfNextSentencePosition=5,
+        aErrors=(),
+    )
+    with patch.object(proofreader, "grammar_obs") as mock_obs:
+        _obs_result_window(
+            "doc-1",
+            "en-US",
+            a_res,
+            (),
+            paragraph_span_count=1,
+            active_span_count=1,
+            uncached_active_count=0,
+            source="cache",
+        )
+    kwargs = mock_obs.call_args.kwargs
+    assert kwargs["stage"] == "final"
+    assert kwargs["n_errors"] == 0
+    assert kwargs["n_aErrors"] == 0
+    assert "rule_ids" not in kwargs
 
 
 def test_apply_proofreading_end_positions_skips_space_after_sentence() -> None:
@@ -598,6 +692,91 @@ class TestTypingIntegration:
             (off2, "harper||s2"),
         }
 
+    @pytest.mark.skipif(
+        not _grammar_obs_call_sites_present(),
+        reason="Stripped release bundle removes grammar_obs(...) call sites (scripts/strip_code.py)",
+    )
+    def test_harper_fast_path_result_window_obs_is_final_after_lint(
+        self, mock_config_fixture, mock_locale_fixture, mock_queue_fixture
+    ) -> None:
+        """Cache miss + Harper lint: result_window n_errors is post-path, not pre-path 0."""
+        pr = _make_proofreader()
+        pr._provider = "harper"
+        pr._checker_identity = "harper"
+        sentence = "This are an test."
+        payload = {
+            "wrong": "are",
+            "correct": "is",
+            "n_error_start": 5,
+            "n_error_length": 3,
+            "rule_identifier": "harper||Agreement",
+            "suggestions": ["is"],
+            "reason": "grammar",
+            "type": "grammar",
+        }
+
+        def _lint(text: str, *_args: Any, **_kwargs: Any) -> dict[str, Any]:
+            assert text == sentence
+            return {"errors": [payload]}
+
+        with (
+            patch("plugin.writer.locale.grammar_proofread_text.split_into_sentences") as mock_split,
+            patch("plugin.writer.locale.harper.harper_try_lint", side_effect=_lint),
+            patch.object(proofreader, "grammar_obs") as mock_obs,
+        ):
+            mock_split.return_value = [(0, sentence)]
+            res = pr.doProofreading("test-doc", sentence, mock_locale_fixture, 0, len(sentence), ())
+
+        mock_queue_fixture.enqueue.assert_not_called()
+        assert len(res.aErrors) == 1
+        assert res.aErrors[0].aRuleIdentifier == "harper||Agreement"
+        window_calls = [c for c in mock_obs.call_args_list if c.args and c.args[0] == "do_proofreading_result_window"]
+        assert len(window_calls) == 1
+        kwargs = window_calls[0].kwargs
+        assert kwargs["stage"] == "final"
+        assert kwargs["source"] == "harper_fast"
+        assert kwargs["n_errors"] == 1
+        assert kwargs["n_aErrors"] == 1
+        assert kwargs["rule_ids"] == "harper||Agreement"
+        # Pre-path cache snapshot must not look like a final empty lint.
+        assert kwargs["n_errors"] != 0
+        partial = [c for c in mock_obs.call_args_list if c.args and c.args[0] == "do_proofreading_cache_partial_hit"]
+        assert len(partial) == 1
+        assert partial[0].kwargs["cache_error_count"] == 0
+        assert "errors_returned" not in partial[0].kwargs
+
+    @pytest.mark.skipif(
+        not _grammar_obs_call_sites_present(),
+        reason="Stripped release bundle removes grammar_obs(...) call sites (scripts/strip_code.py)",
+    )
+    def test_harper_fast_path_empty_lint_result_window_is_final_zero(
+        self, mock_config_fixture, mock_locale_fixture, mock_queue_fixture
+    ) -> None:
+        """True empty Harper lint still reports final n_errors=0 (not a paint drop)."""
+        pr = _make_proofreader()
+        pr._provider = "harper"
+        pr._checker_identity = "harper"
+        sentence = "This is fine."
+
+        with (
+            patch("plugin.writer.locale.grammar_proofread_text.split_into_sentences") as mock_split,
+            patch("plugin.writer.locale.harper.harper_try_lint", return_value={"errors": []}),
+            patch("plugin.writer.locale.grammar_proofread_text.normalize_errors_for_text", return_value=[]),
+            patch.object(proofreader, "grammar_obs") as mock_obs,
+        ):
+            mock_split.return_value = [(0, sentence)]
+            res = pr.doProofreading("test-doc", sentence, mock_locale_fixture, 0, len(sentence), ())
+
+        assert res.aErrors == ()
+        window_calls = [c for c in mock_obs.call_args_list if c.args and c.args[0] == "do_proofreading_result_window"]
+        assert len(window_calls) == 1
+        kwargs = window_calls[0].kwargs
+        assert kwargs["stage"] == "final"
+        assert kwargs["source"] == "harper_fast"
+        assert kwargs["n_errors"] == 0
+        assert kwargs["n_aErrors"] == 0
+        assert "rule_ids" not in kwargs
+
     def test_llm_incremental_still_returns_other_sentences_cached_errors(
         self, mock_config_fixture, mock_locale_fixture, mock_queue_fixture
     ) -> None:
@@ -651,12 +830,94 @@ def test_proofreader_broadcast_proofread_again_notifies_listeners(
     del mock_locale_fixture
     pr = _make_proofreader()
     listener = MagicMock()
-    assert pr.addLinguServiceEventListener(listener) is True
+    with patch("plugin.writer.locale.harper.harper_runtime_is_ready", return_value=False):
+        assert pr.addLinguServiceEventListener(listener) is True
     pr.broadcast_proofread_again()
     listener.processLinguServiceEvent.assert_called_once()
     event = listener.processLinguServiceEvent.call_args[0][0]
     assert event.nEvent == 8
     assert pr.removeLinguServiceEventListener(listener) is True
+
+
+def test_broadcast_proofread_again_without_listeners_recovers_on_first_attach(
+    mock_config_fixture, mock_locale_fixture
+) -> None:
+    """Empty-listener PROOFREAD_AGAIN must not drop the re-walk forever."""
+    del mock_locale_fixture
+    pr = _make_proofreader()
+    listener = MagicMock()
+    pr.broadcast_proofread_again()
+    assert pr._pending_proofread_again is True
+    listener.processLinguServiceEvent.assert_not_called()
+    with (
+        patch("plugin.framework.queue_executor.post_to_main_thread", side_effect=lambda fn, *a, **k: fn(*a, **k)),
+        patch("plugin.writer.locale.harper.harper_runtime_is_ready", return_value=False),
+    ):
+        assert pr.addLinguServiceEventListener(listener) is True
+    listener.processLinguServiceEvent.assert_called_once()
+    assert listener.processLinguServiceEvent.call_args[0][0].nEvent == 8
+    assert pr._pending_proofread_again is False
+    extra = MagicMock()
+    with (
+        patch("plugin.framework.queue_executor.post_to_main_thread", side_effect=lambda fn, *a, **k: fn(*a, **k)),
+        patch("plugin.writer.locale.harper.harper_runtime_is_ready", return_value=True),
+    ):
+        pr._provider = "harper"
+        assert pr.addLinguServiceEventListener(extra) is True
+    listener.processLinguServiceEvent.assert_called_once()
+    extra.processLinguServiceEvent.assert_not_called()
+
+
+def test_first_listener_while_harper_ready_triggers_one_rewalk(
+    mock_config_fixture, mock_locale_fixture
+) -> None:
+    del mock_locale_fixture
+    pr = _make_proofreader()
+    pr._provider = "harper"
+    first = MagicMock()
+    second = MagicMock()
+    with (
+        patch("plugin.framework.queue_executor.post_to_main_thread", side_effect=lambda fn, *a, **k: fn(*a, **k)),
+        patch("plugin.writer.locale.harper.harper_runtime_is_ready", return_value=True),
+    ):
+        assert pr.addLinguServiceEventListener(first) is True
+        assert pr.addLinguServiceEventListener(second) is True
+        assert pr.addLinguServiceEventListener(first) is True
+    first.processLinguServiceEvent.assert_called_once()
+    second.processLinguServiceEvent.assert_not_called()
+    assert first.processLinguServiceEvent.call_args[0][0].nEvent == 8
+
+
+def test_first_listener_while_harper_idle_does_not_rewalk(
+    mock_config_fixture, mock_locale_fixture
+) -> None:
+    del mock_locale_fixture
+    pr = _make_proofreader()
+    pr._provider = "harper"
+    listener = MagicMock()
+    with (
+        patch("plugin.framework.queue_executor.post_to_main_thread") as mock_post,
+        patch("plugin.writer.locale.harper.harper_runtime_is_ready", return_value=False),
+    ):
+        assert pr.addLinguServiceEventListener(listener) is True
+    mock_post.assert_not_called()
+    listener.processLinguServiceEvent.assert_not_called()
+    assert pr._pending_proofread_again is False
+
+
+def test_first_listener_ready_rewalk_skips_non_harper_provider(
+    mock_config_fixture, mock_locale_fixture
+) -> None:
+    del mock_locale_fixture
+    pr = _make_proofreader()
+    listener = MagicMock()
+    with (
+        patch("plugin.framework.queue_executor.post_to_main_thread") as mock_post,
+        patch("plugin.writer.locale.harper.harper_runtime_is_ready", return_value=True),
+    ):
+        assert pr.addLinguServiceEventListener(listener) is True
+    mock_post.assert_not_called()
+    listener.processLinguServiceEvent.assert_not_called()
 
 
 def test_ensure_writeragent_proofreader_configured_triggers_harper_warmup() -> None:

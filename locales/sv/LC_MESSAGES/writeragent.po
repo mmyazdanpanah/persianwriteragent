@@ -3,7 +3,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: WriterAgent 1.0\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-09-04 14:15-0400\n"
+"POT-Creation-Date: 2026-09-14 16:20-0400\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: \n"
 "Language-Team: Swedish\n"
@@ -67,9 +67,28 @@ msgstr "Kunde inte hitta notebook-cell för denna kontroll."
 msgid "Open a Writer document first."
 msgstr "Öppna ett Writer-dokument först."
 
-#: plugin/notebook/writer_importer.py
+#: plugin/notebook/notebook_controls.py
 msgid "Run code cell"
 msgstr "Kör kodcell"
+
+#: plugin/embeddings/search_ui.py
+msgid "just now"
+msgstr "just nu"
+
+#: plugin/embeddings/search_ui.py
+#, python-brace-format
+msgid "{0}m ago"
+msgstr "för {0}m sedan"
+
+#: plugin/embeddings/search_ui.py
+#, python-brace-format
+msgid "{0}h ago"
+msgstr "för {0}h sedan"
+
+#: plugin/embeddings/search_ui.py
+#, python-brace-format
+msgid "{0}d ago"
+msgstr "för {0}d sedan"
 
 #: plugin/embeddings/search_ui.py
 msgid "Cache Status: No active document"
@@ -90,20 +109,6 @@ msgstr "Cachestatus: Ej byggd (lancedb)"
 #: plugin/embeddings/search_ui.py
 msgid "Cache Status: Not built"
 msgstr "Cachestatus: Ej byggd"
-
-#: plugin/embeddings/search_ui.py
-msgid "just now"
-msgstr "just nu"
-
-#: plugin/embeddings/search_ui.py
-#, python-brace-format
-msgid "{0}m ago"
-msgstr "för {0}m sedan"
-
-#: plugin/embeddings/search_ui.py
-#, python-brace-format
-msgid "{0}h ago"
-msgstr "för {0}h sedan"
 
 #: plugin/embeddings/search_ui.py
 #, python-brace-format
@@ -413,7 +418,8 @@ msgid "Status:"
 msgstr "Status:"
 
 #: plugin/calc/python/cell_editor_ui.py plugin/chatbot/panel_wiring.py
-#: plugin/scripting/editor_ui_strings.py plugin/xdl_strings.py
+#: plugin/chatbot/panel.py plugin/scripting/editor_ui_strings.py
+#: plugin/xdl_strings.py
 msgid "Ready"
 msgstr "Redo"
 
@@ -554,13 +560,13 @@ msgstr "Bilder infogade"
 #: plugin/calc/python/geometric_recalc.py
 #, python-format
 msgid ""
-"Geometric Recalc Order skipped sheet '%s': found %s or more Python cells "
-"(discovery cap). The sheet was left unchained so a partial list is not "
-"treated as complete."
+"Geometric Recalc Order skipped sheet '%(sheet)s': found %(cap)s or more "
+"Python cells (discovery cap). The sheet was left unchained so a partial list "
+"is not treated as complete."
 msgstr ""
-"Geometrisk omberäkningsordning hoppade över bladet '%s': hittade %s eller "
-"fler Python-celler (gräns för identifiering). Bladet lämnades oförändrat så "
-"att en ofullständig lista inte behandlas som komplett."
+"Geometrisk omberäkningsordning hoppade över bladet '%(sheet)s': hittade "
+"%(cap)s eller fler Python-celler (gräns för identifiering). Bladet lämnades "
+"utan kedja så att en ofullständig lista inte behandlas som komplett."
 
 #: plugin/calc/excel_py_convert/auto_open.py
 #, python-brace-format
@@ -1325,6 +1331,10 @@ msgid ""
 msgstr ""
 "[Modellen {0} stöder inte inbyggt ljud. Välj en STT-modell i "
 "Inställningarna.]"
+
+#: plugin/chatbot/panel.py
+msgid "[Peer send requires Chat mode on this sidebar.]"
+msgstr "[Peer-sändning kräver chattläge i detta sidofält.]"
 
 #: plugin/chatbot/web_research_chat.py
 #, python-format
@@ -3144,6 +3154,20 @@ msgstr "Calc-kalkylbladsverktyg"
 
 msgid "Max Rows Display"
 msgstr "Max rader att visa"
+
+msgid "Cache Excel siblings as ODS"
+msgstr "Cacha Excel-syskonfiler som ODS"
+
+msgid ""
+"Convert sibling .xlsx/.xls to writeragent_ods_cache/ beside the folder so "
+"repeated DuckDB SQL reuses the ODS. Native .ods and the live workbook are "
+"never cached. Set calc.ods_cache_enabled false in writeragent.json to "
+"disable."
+msgstr ""
+"Konvertera syskonfiler .xlsx/.xls till writeragent_ods_cache/ bredvid mappen "
+"så att upprepad DuckDB SQL återanvänder ODS-filen. Inbyggda .ods-filer och "
+"den aktiva arbetsboken cachas aldrig. Ställ in calc.ods_cache_enabled false "
+"i writeragent.json för att inaktivera."
 
 msgid "Sidebar"
 msgstr "Sidopanel"

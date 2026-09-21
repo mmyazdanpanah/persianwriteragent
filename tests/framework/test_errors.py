@@ -541,19 +541,6 @@ class TestSecurityFix(unittest.TestCase):
         self.assertEqual(safe_python_literal_eval('(1, 2)', default='(1, 2)'), '(1, 2)')
         self.assertEqual(safe_python_literal_eval("{'a': 1}", default='fallback'), 'fallback')
 
-    def test_glm45_deserializer(self):
-        from plugin.contrib.tool_call_parsers.glm45_parser import _deserialize_value
-        self.assertEqual(_deserialize_value('True'), True)
-        self.assertEqual(_deserialize_value('true'), True)
-        self.assertEqual(_deserialize_value('123'), 123)
-        self.assertEqual(_deserialize_value("'abc'"), 'abc')
-
-    def test_qwen3_coder_deserializer(self):
-        from plugin.contrib.tool_call_parsers.qwen3_coder_parser import _try_convert_value
-        self.assertEqual(_try_convert_value('True'), True)
-        self.assertEqual(_try_convert_value('null'), None)
-        self.assertEqual(_try_convert_value('123'), 123)
-
     def test_smolagents_deserializer(self):
         self.assertEqual(safe_python_literal_eval('{"type": "string"}'), {'type': 'string'})
 
@@ -587,6 +574,36 @@ class TestSuppressDisposed(unittest.TestCase):
         self.assertTrue(is_disposed_exception(CustomRuntimeException("Runtime UNO error")))
         self.assertFalse(is_disposed_exception(UnrelatedError("Regular failure")))
         self.assertFalse(is_disposed_exception(ValueError("Bad value")))
+
+    def test_is_tool_document_disposed_live_doc_bare_runtime(self):
+        from plugin.framework.errors import (
+            DocumentDisposedError,
+            is_tool_document_disposed,
+        )
+
+        class CustomDisposedException(Exception):
+            pass
+
+        class CustomRuntimeException(Exception):
+            pass
+
+        class LiveDoc:
+            def getImplementationName(self):
+                return "SwXTextDocument"
+
+        class DeadDoc:
+            def getImplementationName(self):
+                raise CustomDisposedException("gone")
+
+        live = LiveDoc()
+        # Bare RuntimeException from a live doc is a real UNO error, not dispose.
+        self.assertFalse(is_tool_document_disposed(CustomRuntimeException(""), live))
+        self.assertTrue(is_tool_document_disposed(CustomDisposedException("Disposed"), live))
+        self.assertTrue(is_tool_document_disposed(DocumentDisposedError("gone"), live))
+        # No live probe: keep the lifecycle heuristic.
+        self.assertTrue(is_tool_document_disposed(CustomRuntimeException(""), None))
+        self.assertTrue(is_tool_document_disposed(CustomRuntimeException(""), DeadDoc()))
+        self.assertFalse(is_tool_document_disposed(ValueError("Bad value"), live))
 
     def test_suppress_disposed_with_disposed_error(self):
         from plugin.framework.errors import (

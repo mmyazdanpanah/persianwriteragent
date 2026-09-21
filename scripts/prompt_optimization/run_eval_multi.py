@@ -33,6 +33,7 @@ from eval_auth import (
     resolve_api_key,
     resolve_judge_model,
 )
+from eval_catalog import add_eval_tool_sweep_arguments
 from eval_core import ExampleEval, example_passed, run_eval_on_examples_llm
 from plugin.framework.openrouter_model_id import resolve_openrouter_catalog_id
 from model_configs import (
@@ -109,6 +110,65 @@ def _estimate_cost_usd(
             + (r.completion_tokens / 1_000_000.0) * cfg.output_cost_per_million
         )
     return total_cost
+
+
+# run_eval_multi details persist only total_tokens (no prompt/completion
+# split). When backfilling catalog rates onto a stored run, allocate the
+# total this way so cost / C²/$ is nonzero. Not measured OpenRouter usage.
+PROMPT_FRACTION_WHEN_SPLIT_UNKNOWN = 0.85
+
+
+def estimate_cost_usd_from_token_total(
+    total_tokens: int,
+    cfg: ModelConfig,
+    *,
+    prompt_fraction: float = PROMPT_FRACTION_WHEN_SPLIT_UNKNOWN,
+) -> float:
+    """Catalog-rate cost when only ``total_tokens`` is stored."""
+    if cfg.input_cost_per_million == 0.0 and cfg.output_cost_per_million == 0.0:
+        return 0.0
+    prompt_tokens = total_tokens * prompt_fraction
+    completion_tokens = total_tokens * (1.0 - prompt_fraction)
+    return (
+        (prompt_tokens / 1_000_000.0) * cfg.input_cost_per_million
+        + (completion_tokens / 1_000_000.0) * cfg.output_cost_per_million
+    )
+
+
+def apply_catalog_pricing_to_summary(
+    summary: dict[str, Any],
+    cfg: ModelConfig,
+    *,
+    prompt_fraction: float = PROMPT_FRACTION_WHEN_SPLIT_UNKNOWN,
+) -> dict[str, Any]:
+    """Fill cost / C²/$ from catalog rates. Does not change quality fields.
+
+    ``run_eval_multi`` writes ``intelligence_per_dollar_correctness`` as
+    ``avg_correctness² / avg_cost`` (and the metric twin) when cost > 0.
+    """
+    total_tokens = int(summary.get("total_tokens") or 0)
+    n_examples = int(summary.get("n_examples") or 0)
+    total_cost = estimate_cost_usd_from_token_total(
+        total_tokens, cfg, prompt_fraction=prompt_fraction
+    )
+    pricing_known = cfg.input_cost_per_million > 0 or cfg.output_cost_per_million > 0
+    avg_cost = total_cost / n_examples if n_examples else 0.0
+    avg_correctness = float(summary.get("avg_correctness") or 0.0)
+    avg_metric = float(summary.get("avg_metric_score") or 0.0)
+    if pricing_known and avg_cost > 0:
+        ipd_correctness = (avg_correctness ** 2) / avg_cost
+        ipd_metric = (avg_metric ** 2) / avg_cost
+    else:
+        ipd_correctness = 0.0
+        ipd_metric = 0.0
+    summary["input_cost_per_million"] = cfg.input_cost_per_million
+    summary["output_cost_per_million"] = cfg.output_cost_per_million
+    summary["pricing_known"] = pricing_known
+    summary["total_cost_usd"] = total_cost
+    summary["avg_cost_per_example"] = avg_cost
+    summary["intelligence_per_dollar_correctness"] = ipd_correctness
+    summary["intelligence_per_dollar_metric"] = ipd_metric
+    return summary
 
 
 PARETO_FRONTIER = "frontier"
@@ -344,6 +404,8 @@ def _run_one_model(
     student: str = "llm",
     no_judge: bool = False,
     repeats: int = 1,
+    tools_spec: str | None = None,
+    schema_density: str = "full",
 ) -> dict[str, Any]:
     """Run eval for one model (used in a worker process). Returns summary dict."""
     from dataset import ALL_EXAMPLES, to_dspy_examples
@@ -375,6 +437,8 @@ def _run_one_model(
         gold_model=gm,
         student=student,
         no_judge=no_judge or student == "scripted",
+        tools_spec=tools_spec,
+        schema_density=schema_density,
     )
     if repeats > 1:
         extra: list[ExampleEval] = []
@@ -395,6 +459,8 @@ def _run_one_model(
                     gold_model=gm,
                     student=student,
                     no_judge=no_judge or student == "scripted",
+                    tools_spec=tools_spec,
+                    schema_density=schema_density,
                 )
             )
         results = results + extra
@@ -460,7 +526,7 @@ def _run_one_model(
     }
 
 
-def main() -> int:
+def parse_args(argv: list[str] | None = None):
     p = argparse.ArgumentParser(
         description=(
             "Eval Writer assistant on dataset across multiple models and "
@@ -593,7 +659,12 @@ def main() -> int:
         default="llm",
         help="llm (default, needs API key) or scripted (replay SCRIPTS, no key).",
     )
-    args = p.parse_args()
+    add_eval_tool_sweep_arguments(p)
+    return p.parse_args(argv)
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(argv)
 
     api_base = resolve_api_base(cli_base=args.api_base)
     api_key = resolve_api_key(cli_key=args.api_key)
@@ -692,6 +763,8 @@ def main() -> int:
                     backend=args.backend,
                     verbose=args.verbose,
                     task_id=tid,
+                    tools_spec=args.tools,
+                    schema_density=args.schema_density,
                 )
                 if gerr:
                     print(f"  Warning: gold error for {tid}: {gerr}", file=sys.stderr)
@@ -757,6 +830,8 @@ def main() -> int:
         student=args.student,
         no_judge=args.no_judge or args.student == "scripted",
         repeats=max(1, args.repeats),
+        tools_spec=args.tools,
+        schema_density=args.schema_density,
     )
 
     if args.backend == "lo":

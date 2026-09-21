@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: PACKAGE VERSION\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-09-04 14:15-0400\n"
+"POT-Creation-Date: 2026-09-14 16:20-0400\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: Korean <LL@li.org>\n"
@@ -72,9 +72,28 @@ msgstr "이 컨트롤에 대한 노트북 셀을 찾을 수 없습니다."
 msgid "Open a Writer document first."
 msgstr "먼저 Writer 문서를 여십시오."
 
-#: plugin/notebook/writer_importer.py
+#: plugin/notebook/notebook_controls.py
 msgid "Run code cell"
 msgstr "코드 셀 실행"
+
+#: plugin/embeddings/search_ui.py
+msgid "just now"
+msgstr "방금 전"
+
+#: plugin/embeddings/search_ui.py
+#, python-brace-format
+msgid "{0}m ago"
+msgstr "{0}분 전"
+
+#: plugin/embeddings/search_ui.py
+#, python-brace-format
+msgid "{0}h ago"
+msgstr "{0}시간 전"
+
+#: plugin/embeddings/search_ui.py
+#, python-brace-format
+msgid "{0}d ago"
+msgstr "{0}일 전"
 
 #: plugin/embeddings/search_ui.py
 msgid "Cache Status: No active document"
@@ -95,20 +114,6 @@ msgstr "캐시 상태: 빌드되지 않음 (lancedb)"
 #: plugin/embeddings/search_ui.py
 msgid "Cache Status: Not built"
 msgstr "캐시 상태: 빌드되지 않음"
-
-#: plugin/embeddings/search_ui.py
-msgid "just now"
-msgstr "방금 전"
-
-#: plugin/embeddings/search_ui.py
-#, python-brace-format
-msgid "{0}m ago"
-msgstr "{0}분 전"
-
-#: plugin/embeddings/search_ui.py
-#, python-brace-format
-msgid "{0}h ago"
-msgstr "{0}시간 전"
 
 #: plugin/embeddings/search_ui.py
 #, python-brace-format
@@ -408,7 +413,8 @@ msgid "Status:"
 msgstr "상태:"
 
 #: plugin/calc/python/cell_editor_ui.py plugin/chatbot/panel_wiring.py
-#: plugin/scripting/editor_ui_strings.py plugin/xdl_strings.py
+#: plugin/chatbot/panel.py plugin/scripting/editor_ui_strings.py
+#: plugin/xdl_strings.py
 msgid "Ready"
 msgstr "준비"
 
@@ -549,13 +555,13 @@ msgstr "이미지 삽입됨"
 #: plugin/calc/python/geometric_recalc.py
 #, python-format
 msgid ""
-"Geometric Recalc Order skipped sheet '%s': found %s or more Python cells "
-"(discovery cap). The sheet was left unchained so a partial list is not "
-"treated as complete."
+"Geometric Recalc Order skipped sheet '%(sheet)s': found %(cap)s or more "
+"Python cells (discovery cap). The sheet was left unchained so a partial list "
+"is not treated as complete."
 msgstr ""
-"기하학적 재계산 순서에서 시트 '%s'을(를) 건너뛰었습니다: %s개 이상의 Python "
-"셀이 발견되었습니다(검색 제한). 부분 목록이 전체로 처리되지 않도록 시트는 연"
-"결되지 않은 상태로 유지되었습니다."
+"기하학적 재계산 순서에서 '%(sheet)s' 시트를 건너뛰었습니다: %(cap)s개 이상의 "
+"Python 셀이 발견되었습니다(검색 제한). 부분 목록이 전체로 처리되지 않도록 시"
+"트의 연결을 해제하지 않았습니다."
 
 #: plugin/calc/excel_py_convert/auto_open.py
 #, python-brace-format
@@ -1317,6 +1323,10 @@ msgid ""
 msgstr ""
 "[모델 {0}은(는) 기본 오디오를 지원하지 않습니다. 설정에서 STT 모델을 선택하세"
 "요.]"
+
+#: plugin/chatbot/panel.py
+msgid "[Peer send requires Chat mode on this sidebar.]"
+msgstr "[피어 전송을 사용하려면 이 사이드바에서 채팅 모드가 필요합니다.]"
 
 #: plugin/chatbot/web_research_chat.py
 #, python-format
@@ -3135,6 +3145,20 @@ msgstr "Calc 스프레드시트 도구"
 
 msgid "Max Rows Display"
 msgstr "최대 표시 행 수"
+
+msgid "Cache Excel siblings as ODS"
+msgstr "Excel 형제 파일을 ODS로 캐시"
+
+msgid ""
+"Convert sibling .xlsx/.xls to writeragent_ods_cache/ beside the folder so "
+"repeated DuckDB SQL reuses the ODS. Native .ods and the live workbook are "
+"never cached. Set calc.ods_cache_enabled false in writeragent.json to "
+"disable."
+msgstr ""
+"반복적인 DuckDB SQL 재사용을 위해 형제 .xlsx/.xls 파일을 폴더 옆의 "
+"writeragent_ods_cache/로 변환합니다. 기본 .ods 파일과 현재 열려 있는 통합 문"
+"서는 캐시되지 않습니다. 비활성화하려면 writeragent.json에서 "
+"calc.ods_cache_enabled를 false로 설정하십시오."
 
 msgid "Sidebar"
 msgstr "사이드바"

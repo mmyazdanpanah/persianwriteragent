@@ -71,6 +71,65 @@ def get_research_completion_instruction(doc_type: str | None = None) -> str:
     return RESEARCH_COMPLETION_INSTRUCTION_WRITER
 
 
+# Sheets create: specialized hop makes empty tabs; populate is the outer's job
+# (sheets required_core_tools are reads only — not write_formula_range).
+SHEETS_CREATED_NOT_POPULATED_INSTRUCTION = (
+    "If sheets were created, they are not populated (tab exists; no cells copied). "
+    "Do write_formula_range onto the new tab(s) with source to copy a block, or with values."
+)
+
+
+def get_sheets_create_completion_instruction() -> str:
+    """Return next-step instruction after specialized sheets create so the outer can populate."""
+    return SHEETS_CREATED_NOT_POPULATED_INSTRUCTION
+
+
+def _reports_empty_sheet_create(payload: dict) -> bool:
+    """True when a specialized finish/result already says a new empty tab exists."""
+    blob = " ".join(str(payload.get(key) or "") for key in ("message", "result", "answer"))
+    lower = blob.lower()
+    return "no cells copied" in lower or "new sheet named" in lower
+
+
+def first_instruction_from_tool_results(results: list | tuple | None) -> str | None:
+    """First non-empty ``instruction`` string from inner specialized tool results."""
+    if not results:
+        return None
+    for result in results:
+        if isinstance(result, dict):
+            inst = result.get("instruction")
+            if isinstance(inst, str) and inst.strip():
+                return inst
+    return None
+
+
+def attach_sheets_create_completion_instruction(
+    payload: dict,
+    *,
+    create_sheet_ran: bool = False,
+    tool_results: list | tuple | None = None,
+) -> dict:
+    """Attach create≠populate ``instruction`` on the payload the outer reads.
+
+    Same field as web research (`instruction`). Use after a sheets specialized hop
+    when ``create_sheet`` ran, an inner tool result already carried ``instruction``,
+    or the finish text reports a new empty sheet.
+    """
+    if payload.get("status") != "ok":
+        return payload
+    existing = payload.get("instruction")
+    if isinstance(existing, str) and existing.strip():
+        return payload
+    inst = first_instruction_from_tool_results(tool_results)
+    if inst is None and (create_sheet_ran or _reports_empty_sheet_create(payload)):
+        inst = SHEETS_CREATED_NOT_POPULATED_INSTRUCTION
+    if not inst:
+        return payload
+    out = dict(payload)
+    out["instruction"] = inst
+    return out
+
+
 # Canonical wording for tools that return a para_index / paragraph_index to the model. Those indexes
 # are internal addressing only; the user never sees them and they shift as the document changes, so
 # the model must refer to a place by quoting its text, not by number. Append to such tool
@@ -91,11 +150,23 @@ def delegation_math_to_python_hint(*, delegate_toolset: str) -> str:
 
 
 # Brief hint for gateway tool JSON schemas (see SPECIALIZED_TASK_RULES in system prompt).
-DELEGATE_SPECIALIZED_TASK_PARAM_HINT = "What the specialized task should accomplish."
+# Parent Nemotron Super rewrote "make it look like a wizard" into a generate-new
+# task; the specialist then omitted source_image. Schema + task rules must
+# keep the user's edit wording and name source_image='selection'.
+DELEGATE_SPECIALIZED_TASK_PARAM_HINT = (
+    "What the specialized task should accomplish. For edit/change/restyle of an "
+    "existing or selected image, instruct image_generate(source_image='selection') "
+    "and keep the user's wording so img2img replaces the graphic in place."
+)
 
 # Shared guidance for writing `task` strings when delegating to specialized sub-agents.
+# Must stay a single line (delegation templates are one line; tests assert no newlines).
 SPECIALIZED_TASK_RULES = (
-    "Pass a clear `task` describing what the specialized task should accomplish."
+    "Pass a clear `task` describing what the specialized task should accomplish. "
+    "When the user wants to edit, change, or restyle an existing or selected image, "
+    "the task must instruct image_generate(source_image='selection') and keep the "
+    "user's wording (for example 'make it look like a wizard') so img2img replaces "
+    "the graphic in place."
 )
 
 
@@ -171,6 +242,26 @@ _VENV_IMPORT_POLICY_FULL = ""
 PYTHON_VENV_AUTO_IMPORTS_TOOL_NOTE = ""
 
 PYTHON_VENV_AUTO_IMPORTS_PROMPT_LINE = ""
+
+def images_specialized_sub_agent_hint() -> str:
+    """Smol sub-agent instructions suffix for delegate_to_specialized_* (domain=\"images\").
+
+    Edit/change/restyle of an existing or selected image must go through
+    ``image_generate(source_image='selection')``. That path reads the
+    selection and ``replace_image_in_place``, so the graphic stays in the
+    same frame. A prompt-only generate (after ``image_delete`` or not)
+    creates a new image instead of img2img.
+    """
+    return (
+        " To edit, change, or restyle an existing or selected image"
+        " (for example 'make it look like a wizard'), call image_generate"
+        " with source_image='selection'."
+        " That reads the selected pixels and replace_image_in_place so the"
+        " graphic stays in the same frame."
+        " Discover local image files with image_list_nearby_files before"
+        " image_insert when the user refers to a photo in the folder."
+    )
+
 
 def python_specialized_sub_agent_hint(agent_label: str) -> str:
     """Smol sub-agent instructions suffix for delegate_to_specialized_* (domain=\"python\")."""
@@ -280,9 +371,14 @@ WRITER_APPLY_DOCUMENT_HTML_RULES = f"""APPLY_DOCUMENT_CONTENT AND HTML (CRITICAL
 - **Never** pass the entire document as old_content — that is not supported and will fail search.
 - target='search': old_content may span paragraphs, but each interior line must match a WHOLE paragraph.
   position='before'/'after' INSERTS next to the match and leaves it untouched — add a paragraph without re-sending the clause.
-- Reach: body, table cells, text frames.
+- Reach: body, table cells, text frames, headers and footers.
   Floating drawing-shape text: in place only when review is off — in record/wait it cannot become a tracked change, so the tool routes you to the shapes domain.
   Rich/block HTML in a table cell is not supported (clear error, document untouched); use plain text or inline tags.
+- Headers/footers: edit the region with page_get_header_footer_text then page_set_header_footer_text.
+  Get returns the same XHTML as get_document_content (fields as <span title="page-number"/>, tables, logos) plus images/fields lists.
+  Set imports that HTML into the region's XText so logos, tables, and page-number fields survive.
+  page_set_style_properties header_is_on=false / footer_is_on=false refuses while the region still has content; clear with page_set_header_footer_text first, then disable. Enabling is always allowed.
+  A "different first page" letterhead lives in header_first / footer_first (page_get_style_properties reports first_is_shared); style_list(family='PageStyles') gives the page-style names, and style_get_info(family='PageStyles') returns the same margins/header/footer payload.
 - `content` is a JSON array of HTML strings (one fragment per heading/paragraph).
   We wrap in <html>/<body>.
 {HTML_FRAGMENT_RULES}
@@ -294,7 +390,10 @@ WRITER_APPLY_DOCUMENT_HTML_RULES = f"""APPLY_DOCUMENT_CONTENT AND HTML (CRITICAL
   Copy tokens exactly. Prefer named styles; unknown token → Standard.
   inline style="" is a character override on top of the named style.
   data-lo-style applies only on target='full_document' — on 'beginning'/'end'/'selection'/'search' it is ignored because it would restyle adjacent text (use apply_style or a full_document rewrite).
-  v1: whole-paragraph alignment/colour/margins and table-cell styles do not round-trip.
+  v1: whole-paragraph alignment/colour/margins and table-cell styles do not round-trip on write.
+- Hand-set formatting: `data-lo-para` (e.g. `data-lo-para="margin-left:3.25cm; font-size:12pt"`) reports what a paragraph has set directly. READ-ONLY — send it back and the result says it was ignored; it is how you tell a block quote from body text in a document formatted by hand. Reported on both scope='full' and scope='range'.
+  apply_style defaults to clear_direct='style_props': the style's font name/size and paragraph indents show; bold/italic/colour stay. Pass clear_direct='none' only to keep a hand-set font. clear_direct='all' is Ctrl+M (refused on target='full_document').
+  Re-applying a style does not keep a quote indent — LibreOffice drops direct Para* (margins/alignment) when ParaStyleName is set.
 
 EXAMPLES:
 - Good: ["<h1>Title</h1>", "<p>Paragraph with <strong>bold</strong> text and \\"quotes\\".</p>"]
@@ -308,7 +407,7 @@ WRITER_SPECIALIZED_DELEGATION_TEMPLATE = (
     "SPECIALIZED WRITER (nested tools): The default tool list hides deep Writer features. "
     "When the user needs those, call delegate_to_specialized_writer_toolset with: domain one of: {domains} "
     "and a `task` string that fully specifies what the specialized task must do. The executor has the real tools for that domain. "
-    "document_research: other personal/business files in the same folder (one delegation per file set). "
+    "document_research: other personal/business files, not the open workbook (one delegation per file set). "
     "web_research: public web topics; main agent writes returned report to document (apply_document_content). "
     f"{SPECIALIZED_TASK_RULES}"
 )
@@ -320,16 +419,18 @@ WRITER_SEARCH_RULES = """SEARCH:
 - When pointing the user to a match, quote the first words of its text and its location — never an internal paragraph index."""
 
 WRITER_NAVIGATION_RULES = """NAVIGATING LARGE DOCUMENTS (map first, then drill — don't dump):
-- get_document_tree(content_strategy='heading_only') gives the heading outline plus stats and stable _mcp_ bookmark ids.
+- get_document_tree(content_strategy='heading_only') gives the heading outline plus stats and stable _mcp_ bookmark ids (session-only; not written to disk).
 - nav_heading_children (structural domain; locator='bookmark:_mcp_…' or 'heading:1.2') reads one section on demand.
 - search_in_document jumps to specific text.
 - Reserve get_document_content(scope='full') for short documents or a deliberate full read."""
 
 WRITER_IMAGES_RULES = """IMAGES:
-- Image tools live in the 'images' domain: image_insert, image_delete, image_replace, image_list, image_get_info (includes crop_mm), image_download.
+- Image tools live in the 'images' domain: image_generate, image_insert, image_delete, image_replace, image_list, image_get_info (includes crop_mm), image_download.
   Extract text and structure (layout, tables) from images with extract_structure_from_image in the 'vision' domain; inserts a high-quality representation into the document.
+- To edit, change, or restyle an existing or selected image, delegate domain=images with a task that instructs image_generate(source_image='selection') and keeps the user's wording (e.g. 'make it look like a wizard'). That runs img2img and replace_image_in_place. A generate-new paraphrase inserts a new graphic.
+- Writer letterhead logos: image_insert(target='header'|'footer'). A different first page needs page_set_style_properties(first_is_shared=false) then target='header_first' (or footer_first) — otherwise the logo lands in the shared header and repeats on every page.
 - image_set_properties resizes (width_mm/height_mm), repositions (hori_orient/vert_orient — friendly values like left/center/right/top/bottom work), and crops (crop_top_mm / crop_bottom_mm / crop_left_mm / crop_right_mm — mm trimmed per edge).
-- To actually SEE an image (vision-capable models), call get_image — by graphic name, selection=true, or page=N to render that whole page.
+- To actually SEE an image (vision-capable models), call get_image — by graphic name, selection=true, or page=N (0-based) to render that whole page.
   For a bulk read with pictures embedded, pass include_images=true to get_document_content."""
 
 
@@ -380,7 +481,7 @@ DEFAULT_WRITER_GREETING = "AI: I can edit or translate your document instantly w
 
 # : str so checkers keep this as str (Writer/Draw already are, via a str-returning call).
 #
-# Sort / header / per-row formula used to be three adjacent identical
+# Sort / header / fill-down used to be three adjacent identical
 # "Do Z because Y" lines. Small models (glm-5.3-flash) merged that blob and
 # dropped routing (hand-rolled write_formula_range instead of sort_range) while
 # still keeping the last teaching. Keep all three meanings, but give each a
@@ -389,13 +490,15 @@ DEFAULT_WRITER_GREETING = "AI: I can edit or translate your document instantly w
 # has_header is a plain constraint under SORT. Do not restack Don't+Do
 # (duplicates, ~2× prompt). Because-clause is PR 616's: rewriting by hand
 # loses the header row — do not name write_formula_range / =PY in the why.
+# FORMULAS is fill-down (not the old pin-workaround); keep a different shape
+# from SORT so flash cannot merge them.
 CALC_CORE_DIRECTIVES: str = f"""When the user wants {DELEGATION_USER_FILE_DATA_HINT} (another file/sheet by name or path, e.g. "my spreadsheet", "cell A9 from PythonInCalc"):
 - You MUST NOT ask the user where the file is stored, or to upload, paste, or share its contents.
 - You MUST call delegate_to_specialized_calc_toolset(domain="document_research") once with their described file(s) and task in task; nearby files are matched (paths not required).
 When the user wants {DELEGATION_PUBLIC_WEB_HINT}, delegate_to_specialized_calc_toolset(domain="web_research").
 Python on sheet data: write_formula_range of =PY (that tool's description).
 FORMULAS:
-Do write each row's formula with that row's cells because copying one prototype pins cell refs to the first row (e.g. Banana row uses B3, not a stamped B2).
+Write one ordinary formula into a 1-column (or 1-row) destination — write_formula_range fill-down adjusts relative refs ($ stays absolute).
 SORT:
 Do delegate_to_specialized_calc_toolset(domain="ranges") then sort_range to reorder rows (multi-key sorts are two stable one-column passes) because rewriting values by hand loses the header row.
 When row 1 is labels, pass has_header=true — otherwise labels sort as values."""
@@ -404,8 +507,11 @@ When row 1 is labels, pass has_header=true — otherwise labels sort as values."
 CALC_WORKFLOW = """WORKFLOW:
 1. get_sheet_summary for size/headers.
    read_cell_range only for a small peek (headers or a few dozen cells).
-   A large range in chat overloads the model context — for transforms, pass the A1 address to =PY instead of reading the values.
+   A large range in chat overloads the model context — the truncated result is a peek only.
+   Row-wise ordinary Calc formulas: write_formula_range (fill-down adjusts relative refs).
+   Reductions that spill a small result: =PY into one empty cell outside the data.
 2. Do the work with tools. Use ranges, not one cell at a time.
+   Empty tabs via specialized sheets (delegate domain="sheets"); then write_formula_range with source (or values) onto the new tab — create is not populate.
 3. Short confirmation; if you changed cells, name the range (e.g. "Wrote totals in B5:B8")."""
 
 
@@ -491,6 +597,176 @@ DRAW_SPECIALIZED_DELEGATION_TEMPLATE = (
 )
 
 
+# Host suffix + outer DO: after an inner peer send, idle on this loop (do not wait
+# inside document_research — that deadlocks the peer). Also used on specialize return.
+PEER_OUTER_IDLE_AFTER_SEND = (
+    "Stop tool use and Ready. "
+    "Why: the peer reply arrives as a later user turn; more document_research, python, or query tools in this turn race the peer."
+)
+
+# Outer main chat only — no send_peer_work / send_peer_result on this loop.
+# {delegate} is the Writer/Calc/Draw specialized gateway. Shown when a v1 peer is open.
+PEER_OUTER_DELEGATE_HINT = (
+    "Do {delegate}(domain=\"document_research\") for sibling Writer/Calc/Draw work. "
+    "Why: the inner agent chooses a silent read vs asking the peer sidebar; this loop must not invent the other app's tools.\n"
+    "After that inner result means a peer message was sent/accepted, or the answer says waiting for a peer reply: "
+    f"{PEER_OUTER_IDLE_AFTER_SEND} "
+    "A short chat line that the peer was asked is OK.\n"
+    "When this turn is a [Peer work from: …] envelope: do the local work with your tools "
+    "(nested domains such as ranges, sheets, charts, … are fine for that local work); "
+    "finishing those specializes is not delivery — you MUST still Do {delegate}(domain=\"document_research\") "
+    "to deliver via send_peer_result "
+    "(one string: envelope uid or url, and the HTML or result — not a JSON array). "
+    "Why: only that inner agent can deliver the peer result; finishing with only a local sidebar answer never reaches the asking peer.\n"
+    "When this turn is a [Peer result from: …] envelope: apply or insert locally and stop. Do not delegate an ack specialize. "
+    "Why: this is the answer to your earlier work request, not a new work request."
+)
+
+# Inner answer / tool-result text that means the outer should idle (not keep researching).
+_PEER_WAIT_OUTCOME_MARKERS = (
+    "waiting for a peer reply",
+    "waiting for peer",
+    "peer message was sent",
+    "message sent to the peer",
+    '"accepted": true',
+    "'accepted': true",
+    "accepted: true",
+)
+
+
+def looks_like_peer_wait_outcome(text: str) -> bool:
+    """True when specialize/research text means a peer ask was accepted or is pending."""
+    blob = (text or "").lower()
+    return any(marker in blob for marker in _PEER_WAIT_OUTCOME_MARKERS)
+
+
+# Outer must keep going after a nested specialize on a Peer-work receiving turn.
+# ranges/sheets/charts/… finishing (or document_research without send_peer_result)
+# is local work only — not peer delivery.
+PEER_OUTER_DELIVERY_STILL_REQUIRED = (
+    "Peer delivery still required: you MUST Do domain=\"document_research\" "
+    "to deliver via send_peer_result. "
+    "Why: finishing a nested specialize (ranges/sheets/charts/…) or research without "
+    "send_peer_result is not peer delivery; Ready here leaves the asking peer waiting."
+)
+
+PEER_WORK_ENVELOPE_PREFIX = "[Peer work from:"
+
+
+def looks_like_peer_work_envelope(text: str | None) -> bool:
+    """True when *text* is (or starts as) a [Peer work from:…] turn envelope."""
+    if not text:
+        return False
+    return str(text).lstrip().startswith(PEER_WORK_ENVELOPE_PREFIX)
+
+
+def annotate_outer_peer_wait(payload: dict, *, peer_send_invoked: bool = False) -> dict:
+    """Append idle-after-send on an ok document_research payload when a peer was asked.
+
+    The outer model otherwise treats “Message sent to the peer…” as unfinished work
+    and starts another document_research / query in the same turn.
+    """
+    if payload.get("status") != "ok":
+        return payload
+    blob = " ".join(str(payload.get(key) or "") for key in ("message", "result", "answer"))
+    if not (peer_send_invoked or looks_like_peer_wait_outcome(blob)):
+        return payload
+    if PEER_OUTER_IDLE_AFTER_SEND in blob:
+        return payload
+    out = dict(payload)
+    message = str(out.get("message") or "")
+    out["message"] = (message + " " + PEER_OUTER_IDLE_AFTER_SEND).strip()
+    result = str(out.get("result") or "")
+    if result:
+        out["result"] = result + "\n" + PEER_OUTER_IDLE_AFTER_SEND
+    return out
+
+
+def annotate_outer_peer_delivery_pending(payload: dict) -> dict:
+    """Stamp still-required peer delivery on an ok specialize return during Peer work.
+
+    Nested domains can finish successfully while the outer still owes
+    ``document_research`` → ``send_peer_result``. Sets ``instruction`` and appends
+    the same line on ``message`` / ``result`` so the outer cannot treat the hop as done.
+    """
+    if payload.get("status") != "ok":
+        return payload
+    blob = " ".join(
+        str(payload.get(key) or "") for key in ("message", "result", "answer", "instruction")
+    )
+    if PEER_OUTER_DELIVERY_STILL_REQUIRED in blob:
+        return payload
+    out = dict(payload)
+    message = str(out.get("message") or "")
+    out["message"] = (message + " " + PEER_OUTER_DELIVERY_STILL_REQUIRED).strip()
+    result = str(out.get("result") or "")
+    if result:
+        out["result"] = result + "\n" + PEER_OUTER_DELIVERY_STILL_REQUIRED
+    existing = out.get("instruction")
+    if isinstance(existing, str) and existing.strip():
+        out["instruction"] = (existing.rstrip() + " " + PEER_OUTER_DELIVERY_STILL_REQUIRED).strip()
+    else:
+        out["instruction"] = PEER_OUTER_DELIVERY_STILL_REQUIRED
+    return out
+
+
+# document_research specialized only. Short DO+why; catalog is appended when peers exist.
+# Hard fork ASK vs REPLY by whether the task contains a [Peer work from: …] envelope.
+# Ask path (no envelope): matching Open peers → send_peer_work only, then finish.
+# Never delegate_read_document on that open peer; never send_peer_result from the asker.
+# Soft "change/compute/write vs file fact" let the inner reopen a live peer (wasted
+# work, races the peer reply). Ask polarity: do not request a content dump so you
+# can fill elsewhere — the live sidebar owns the write tools.
+# Reply path (envelope present): send_peer_result is a side effect. Outer already
+# stuffed the HTML/result into task, so the smol "answer from the task alone →
+# finish" rule otherwise skips the send and the peer sidebar never sees the reply.
+# Naming "send_peer_result" / "reply back" in an *ask* task does NOT flip polarity —
+# only a [Peer work from: …] envelope in the task does.
+PEER_INNER_CHOICE_RULES = (
+    "ASK vs REPLY: The reply path is only when the task contains a [Peer work from: …] "
+    "envelope. Mentioning send_peer_result, reply back, or delivering a result in an ask "
+    "task does not make this the reply path — only that envelope does.\n"
+    "ASK PATH (task is about an Open peer file; no [Peer work from: …] in the task): "
+    "Do send_peer_work(document_url=<peer uid, URL, or unique name>, "
+    "message=<task; say the answer must come back as a peer result>), "
+    "then specialized_workflow_finished. "
+    "NEVER delegate_read_document on that open peer. "
+    "NEVER send_peer_result from the asker. "
+    "Why: that sidebar is live and will send_peer_result back; silent reopen only peeks, "
+    "duplicates work, and races the peer reply; send_peer_result here stamps [Peer result "
+    "from: …] onto the peer instead of waiting for their reply.\n"
+    "When sending to an Open peer about that peer's own document and the task needs a "
+    "change, fill, or write, Do ask that peer in message to perform the edit/fill and "
+    "include the values/facts to write. "
+    "Why: that live sidebar owns the write tools for that file; asking only for a dump of "
+    "blank/current content so you can fill it elsewhere skips the peer write path.\n"
+    "Do delegate_read_document only when the file is not in Open peers (nearby on disk / "
+    "no live sidebar). "
+    "Why: there is no live sidebar to ask.\n"
+    "REPLY PATH (task is to reply to a [Peer work from: …] envelope — outer stuffed "
+    "uid/url + HTML/result): you MUST send_peer_result("
+    "document_url=<uid or url from the envelope>, message=<one HTML/result string>) "
+    "before specialized_workflow_finished — that tool stamps [Peer result from: …]. "
+    "Why: putting the reply only in answer stays inside this loop — the peer sidebar "
+    "never sees it.\n"
+    "On the reply path only: HTML, table, or other result text in the task is the "
+    "message argument to send_peer_result, not a final answer. "
+    "Why: the outer already did the local work; your job is deliver via the tool.\n"
+    "Do send_peer_result on a peer-reply task even when you can answer from the task alone. "
+    "Why: that rule is for silent research finishes; peer delivery is a tool side effect.\n"
+    "After ok/accepted (ask or reply) you MUST call specialized_workflow_finished immediately. "
+    "Why: the peer runs after this loop exits; waiting deadlocks the reply."
+)
+
+
+# F: omitted from the assembled Draw prompt when the chat model has no vision.
+# Wording matches #782: say 0-based once; no sibling-tool list / "first page is 0".
+DRAW_GET_IMAGE_TOOL_LINE = (
+    "- get_image: page=N (0-based) renders that page as a PNG so a vision model can "
+    "see the layout. Use alongside get_draw_tree, not instead of it. image= / selection= "
+    "fetch an embedded GraphicObjectShape."
+)
+
 DEFAULT_DRAW_CHAT_SYSTEM_PROMPT_TEMPLATE = """You are a LibreOffice Draw/Impress assistant who creates polished, professional, and colorful visual content.
 Do not explain - do the operation directly using tools. Perform as many steps as needed in one turn when possible.
 
@@ -501,21 +777,30 @@ Do not explain - do the operation directly using tools. Perform as many steps as
 WORKFLOW:
 1. Understand the user's request.
 2. If needed, use list_pages, read_slide_text, or get_presentation_info to understand current slides and layout.
-3. Use the specialized delegation tool to perform shape operations (create, edit, group, etc.), transitions, masters, notes, or charts.
+3. Use the specialized delegation tool to perform shape operations (create, edit, group, paper-form fill via fill_draw_fields), transitions, masters, notes, or charts.
 4. Give a short confirmation; when you changed pages/shapes, mention them.
+
+IMPRESS TEXT FILLS:
+1. Prefer list_placeholders(page=N) before set_placeholder_text.
+2. If count=0 or set_placeholder_text returns available=[], call set_slide_layout or delegate_to_specialized_draw_toolset(domain="slide_layouts", task="set layout 'text' on page N") then list_placeholders again.
+3. If roles are missing but indices exist, set_placeholder_text(index=i, text=…).
+4. page on these tools is 0-based.
 
 TOOLS (grouped by use):
 
 READ:
 - list_pages: List pages/slides in the document.
+- list_designs: List shipped Impress .otp designs (e.g. Metropolis).
 - read_slide_text: Extract text content and speaker notes from a slide.
 - get_presentation_info: Slide count, dimensions, master slide names, and Impress status.
-- get_draw_tree: Semantic tree (DOM) of shapes, layout, and hierarchy on a page.
+- get_draw_tree: Semantic tree (DOM) of shapes, layout, and hierarchy on a page. Empty/near-empty text boxes are fill targets (fillable, label_hint, name); ControlShapes include type/name/value/state. Address by name. Do not spawn ControlShapes to fill paper-form blanks.
+""" + DRAW_GET_IMAGE_TOOL_LINE + """
 - list_placeholders: List text placeholders (title, subtitle, body) on a slide (Impress).
 - get_placeholder_text: Get text from a slide placeholder by role or index.
 
 WRITE:
-- add_slide: Insert a new slide (page) at specified index.
+- add_slide: Insert a new slide (page) at specified index (inherits the assigned master).
+- apply_design: Restyle the open Impress deck from a listed .otp (clone_master). Does not open a new presentation.
 - delete_slide: Remove a slide (page) by index.
 - set_active_page: Switch active slide/page.
 - set_placeholder_text: Set text on a slide placeholder by role or index (Impress).
@@ -536,58 +821,152 @@ DEFAULT_CALC_CHAT_SYSTEM_PROMPT = ""
 DEFAULT_DRAW_CHAT_SYSTEM_PROMPT = ""
 
 
+def peer_outer_delegate_tool_name(model) -> str:
+    """Writer / Calc / Draw specialized gateway used for document_research peer work."""
+    from plugin.doc.doc_type import is_calc, is_draw
+
+    if is_calc(model):
+        return "delegate_to_specialized_calc_toolset"
+    if is_draw(model):
+        return "delegate_to_specialized_draw_toolset"
+    return "delegate_to_specialized_writer_toolset"
+
+
+def format_peer_outer_delegate_hint(model) -> str:
+    """Outer DO+why with the matching specialized gateway name."""
+    return PEER_OUTER_DELEGATE_HINT.format(delegate=peer_outer_delegate_tool_name(model))
+
+
+def get_peer_messaging_prompt_block(model, ctx) -> str:
+    """Thin outer pointer when a v1 peer is open. No send_peer_work/result on this loop.
+
+    ``list_v1_peers`` touches UNO (RuntimeUID / desktop catalog). Chat refresh can
+    run off-main; marshal like ``get_peer_inner_choice_block`` so the hint is not
+    silently dropped when assert_main_thread fails.
+    """
+    if ctx is None or model is None:
+        return ""
+
+    def _build() -> str:
+        from plugin.doc.peer_message import list_v1_peers
+
+        peers = list_v1_peers(ctx, model)
+        if not peers:
+            return ""
+        return format_peer_outer_delegate_hint(model)
+
+    try:
+        from plugin.framework.queue_executor import execute_on_main_thread
+        from plugin.framework.thread_guard import on_main_thread
+
+        if on_main_thread():
+            return _build()
+        return execute_on_main_thread(_build)
+    except Exception:
+        return ""
+
+
+def get_peer_inner_choice_block(uno_ctx, doc) -> str:
+    """Short inner read-vs-peer rules plus catalog. Empty when no v1 peer is open.
+
+    ``list_v1_peers`` reads RuntimeUID and the desktop catalog (UNO). Specialized
+    execute runs on a tool-async worker, so this marshals when called off-main.
+    """
+    if uno_ctx is None:
+        return ""
+
+    def _build() -> str:
+        from plugin.doc.peer_message import format_peer_catalog, list_v1_peers
+
+        peers = list_v1_peers(uno_ctx, doc)
+        if not peers:
+            return ""
+        return PEER_INNER_CHOICE_RULES + "\n" + format_peer_catalog(peers)
+
+    try:
+        from plugin.framework.queue_executor import execute_on_main_thread
+        from plugin.framework.thread_guard import on_main_thread
+
+        if on_main_thread():
+            return _build()
+        return execute_on_main_thread(_build)
+    except Exception:
+        return ""
+
+
+def get_core_directives_for_type(doc_type: str | None) -> str:
+    """Core directives from a cached doc-type label (no UNO / no document model)."""
+    label = (doc_type or "writer").strip().lower()
+    if label == "calc":
+        return CALC_CORE_DIRECTIVES
+    if label in ("draw", "impress"):
+        return DRAW_CORE_DIRECTIVES
+    return WRITER_CORE_DIRECTIVES
+
+
 def get_core_directives(model) -> str:
     """Return the application-specific core directives dynamically based on document type."""
     from plugin.doc.doc_type import is_calc, is_draw
     if is_calc(model):
-        return CALC_CORE_DIRECTIVES
-    elif is_draw(model):
-        return DRAW_CORE_DIRECTIVES
-    else:
-        return WRITER_CORE_DIRECTIVES
+        return get_core_directives_for_type("calc")
+    if is_draw(model):
+        return get_core_directives_for_type("draw")
+    return get_core_directives_for_type("writer")
 
 
-def _catalog_entries_from_base(base_cls, *, agent_label: str | None = None, ctx=None) -> list[dict[str, str]]:
-    """Build ``[{domain, description}, …]`` for one specialized base class (delegate/MCP catalog)."""
+def _catalog_entries_from_base(base_cls, *, agent_label: str | None = None, ctx=None,
+                               for_discovery: bool = False) -> list[dict[str, str]]:
+    """Build ``[{domain, description}, …]`` for one specialized base class (delegate/MCP catalog).
+
+    ``for_discovery`` skips the exclusions that only shape a chat prompt. CALC_HIDDEN_SPECIALIZED_
+    DOMAINS keeps Python delegation out of the Calc sidebar's suggestions, but the MCP tool list
+    exposes those tools regardless — so applying it to find_tools made them callable and
+    undiscoverable at once. The sidebar-only domains stay excluded either way: the flat tool list
+    drops them too, so both modes agree without help.
+    """
     entries: list[dict[str, str]] = []
     for cls in base_cls.__subclasses__():
         domain = getattr(cls, "specialized_domain", None)
         desc = getattr(cls, "specialized_domain_description", None)
         if not domain:
             continue
-        if agent_label == "Calc" and domain in CALC_HIDDEN_SPECIALIZED_DOMAINS:
+        if agent_label == "Calc" and domain in CALC_HIDDEN_SPECIALIZED_DOMAINS and not for_discovery:
             continue
         if agent_label == "Writer" and domain in WRITER_SIDEBAR_ONLY_DOMAINS:
             continue
         if agent_label == "Draw" and domain in IMPRESS_DRAW_SIDEBAR_ONLY_DOMAINS:
             continue
-        if domain == "vision" and ctx is not None:
-            from plugin.vision.vision_availability import vision_venv_configured
+        if ctx is not None:
+            from plugin.vision.vision_availability import specialized_domain_available
 
-            if not vision_venv_configured(ctx):
+            if not specialized_domain_available(str(domain), ctx):
                 continue
         entries.append({"domain": str(domain), "description": str(desc or "")})
     return entries
 
 
-def get_specialized_domain_catalog(*, agent_label: str | None, ctx=None) -> list[dict[str, str]]:
+def get_specialized_domain_catalog(*, agent_label: str | None, ctx=None,
+                                   for_discovery: bool = False) -> list[dict[str, str]]:
     """Full specialized domain catalog — same entries as sidebar/delegate domain hints.
 
     ``agent_label`` is ``Writer`` / ``Calc`` / ``Draw`` for one app, or ``None`` to merge
     all three (e.g. MCP ``find_tools`` with no document open).
+
+    ``for_discovery`` is set by MCP ``find_tools``: it keeps the domains whose exclusion only
+    shapes a chat prompt, so discovery covers everything the flat tool list exposes.
     """
     if agent_label == "Calc":
         from plugin.calc.base import ToolCalcSpecialBase
 
-        entries = _catalog_entries_from_base(ToolCalcSpecialBase, agent_label="Calc", ctx=ctx)
+        entries = _catalog_entries_from_base(ToolCalcSpecialBase, agent_label="Calc", ctx=ctx, for_discovery=for_discovery)
     elif agent_label == "Draw":
         from plugin.draw.base import ToolDrawSpecialBase
 
-        entries = _catalog_entries_from_base(ToolDrawSpecialBase, agent_label="Draw", ctx=ctx)
+        entries = _catalog_entries_from_base(ToolDrawSpecialBase, agent_label="Draw", ctx=ctx, for_discovery=for_discovery)
     elif agent_label == "Writer":
         from plugin.writer.specialized_base import ToolWriterSpecialBase
 
-        entries = _catalog_entries_from_base(ToolWriterSpecialBase, agent_label="Writer", ctx=ctx)
+        entries = _catalog_entries_from_base(ToolWriterSpecialBase, agent_label="Writer", ctx=ctx, for_discovery=for_discovery)
     else:
         from plugin.calc.base import ToolCalcSpecialBase
         from plugin.draw.base import ToolDrawSpecialBase
@@ -663,6 +1042,16 @@ def get_specialized_delegation_tool_hint(special_base_class, agent_label: str, *
     return template.format(domains=domains_str)
 
 
+def _apply_draw_get_image_tool_line(prompt: str) -> str:
+    """Omit the Draw/Impress get_image TOOLS bullet when the chat model has no vision."""
+    from plugin.vision.vision_availability import chat_text_model_has_native_vision
+
+    if chat_text_model_has_native_vision():
+        return prompt
+    line = DRAW_GET_IMAGE_TOOL_LINE
+    return prompt.replace(line + "\n", "").replace(line, "")
+
+
 def get_vision_core_directive(model, ctx) -> str:
     """OCR delegation hint when local vision stack is configured (Writer/Calc only)."""
     if ctx is None:
@@ -718,6 +1107,9 @@ def get_chat_system_prompt_for_document(model, additional_instructions="", ctx=N
         global DEFAULT_DRAW_CHAT_SYSTEM_PROMPT
         if not DEFAULT_DRAW_CHAT_SYSTEM_PROMPT:
             DEFAULT_DRAW_CHAT_SYSTEM_PROMPT = base
+        # F: drop the get_image TOOLS bullet when the selected model cannot see PNGs.
+        # After the cache so DEFAULT_DRAW_CHAT_SYSTEM_PROMPT stays the ungated template.
+        base = _apply_draw_get_image_tool_line(base)
     else:
         base = DEFAULT_CHAT_SYSTEM_PROMPT_TEMPLATE.replace("{specialized_delegation}", delegation)
         base = base.replace("{core_directives}", WRITER_CORE_DIRECTIVES)
@@ -732,6 +1124,10 @@ def get_chat_system_prompt_for_document(model, additional_instructions="", ctx=N
     vision_directive = get_vision_core_directive(model, ctx)
     if vision_directive:
         base += "\n\n" + vision_directive
+
+    peer_block = get_peer_messaging_prompt_block(model, ctx)
+    if peer_block:
+        base += "\n\n" + peer_block
 
     if ctx:
         try:

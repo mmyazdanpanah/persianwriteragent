@@ -20,8 +20,9 @@ import logging
 import re as re_mod
 from typing import Any, Literal, overload
 
-from plugin.doc.text_helpers import get_string_without_tracked_deletions, normalize_linebreaks
+from plugin.doc.text_helpers import clone_text_range, get_string_without_tracked_deletions, normalize_linebreaks
 from plugin.framework.tool import ToolBase, ToolBaseDummy
+from plugin.framework.uno_context import uno_same
 
 
 log = logging.getLogger("writeragent.writer")
@@ -433,10 +434,12 @@ def _header_footer_label(text_obj, doc=None, label_cache=None):
                     pass
                 for attr, region in (
                     ("HeaderText", "header"), ("HeaderTextLeft", "header"), ("HeaderTextRight", "header"),
+                    ("HeaderTextFirst", "first-page header"),
                     ("FooterText", "footer"), ("FooterTextLeft", "footer"), ("FooterTextRight", "footer"),
+                    ("FooterTextFirst", "first-page footer"),
                 ):
                     try:
-                        if getattr(st, attr, None) == text_obj:
+                        if uno_same(getattr(st, attr, None), text_obj):
                             name = _safe_name(st)
                             result = "%s (page style '%s')" % (region, name) if name else region
                             break
@@ -901,7 +904,7 @@ def _build_page_map(doc):
         vc = controller.getViewCursor()
         saved = None
         try:
-            saved = doc.getText().createTextCursorByRange(vc.getStart())
+            saved = clone_text_range(vc)
         except Exception:
             pass
 

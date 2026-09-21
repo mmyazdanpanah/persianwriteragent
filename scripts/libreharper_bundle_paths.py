@@ -19,6 +19,25 @@ LIBREHARPER_CLIENT_INIT = '''\
 """Empty client package for LibreHarper (no LLM / embeddings package imports)."""
 '''
 
+# WriterAgent owns the chat sidebar. LibreHarper must never ship or register
+# ChatPanelFactory / WriterAgentDeck / ChatPanelDialog (headed Impress QA:
+# LO resolved XDL into LibreHarper.oxt which has no ChatPanelDialog.xdl).
+LIBREHARPER_FORBIDDEN_CHAT_UI_MARKERS: tuple[str, ...] = (
+    "ChatPanelFactory",
+    "WriterAgentDeck",
+    "ChatPanelDialog",
+    "plugin/chatbot/panel_factory.py",
+    "registry/org/openoffice/Office/UI/Factories.xcu",
+    "registry/org/openoffice/Office/UI/Sidebar.xcu",
+)
+
+
+def is_libreharper_forbidden_chat_ui(path: str) -> bool:
+    """True if *path* would register or ship WriterAgent ChatPanel UI."""
+    norm = _norm(path)
+    return any(marker in norm for marker in LIBREHARPER_FORBIDDEN_CHAT_UI_MARKERS)
+
+
 # Explicit files for the Harper-only Linguistic2 proofreader OXT.
 LIBREHARPER_PLUGIN_FILES: tuple[str, ...] = (
     "plugin/__init__.py",
@@ -36,6 +55,12 @@ LIBREHARPER_PLUGIN_FILES: tuple[str, ...] = (
     "plugin/framework/service.py",
     "plugin/framework/url_utils.py",
     "plugin/framework/thread_guard.py",
+    # chatbot/__init__.py (WriterAgent, dual-install via plugin.extend_path) imports
+    # ModuleBase. make deploy-harper leaves WriterAgent installed, and
+    # plugin.framework is a regular package — LibreHarper's copy wins if it is
+    # first on plugin.__path__. Omitting this file is the
+    # "No module named 'plugin.framework.module_base'" update-check miss.
+    "plugin/framework/module_base.py",
     "plugin/framework/uno_bootstrap.py",
     "plugin/framework/logging.py",
     "plugin/framework/uno_context.py",

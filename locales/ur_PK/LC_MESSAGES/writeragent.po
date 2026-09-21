@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: PACKAGE VERSION\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-09-04 14:15-0400\n"
+"POT-Creation-Date: 2026-09-14 16:20-0400\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: Urdu <LL@li.org>\n"
@@ -72,9 +72,28 @@ msgstr "اس کنٹرول کے لیے نوٹ بک سیل نہیں مل سکا۔"
 msgid "Open a Writer document first."
 msgstr "پہلے ایک Writer دستاویز کھولیں۔"
 
-#: plugin/notebook/writer_importer.py
+#: plugin/notebook/notebook_controls.py
 msgid "Run code cell"
 msgstr "کوڈ سیل چلائیں"
+
+#: plugin/embeddings/search_ui.py
+msgid "just now"
+msgstr "ابھی"
+
+#: plugin/embeddings/search_ui.py
+#, python-brace-format
+msgid "{0}m ago"
+msgstr "{0} منٹ پہلے"
+
+#: plugin/embeddings/search_ui.py
+#, python-brace-format
+msgid "{0}h ago"
+msgstr "{0} گھنٹے پہلے"
+
+#: plugin/embeddings/search_ui.py
+#, python-brace-format
+msgid "{0}d ago"
+msgstr "{0} دن پہلے"
 
 #: plugin/embeddings/search_ui.py
 msgid "Cache Status: No active document"
@@ -95,20 +114,6 @@ msgstr "کیش کی حیثیت: تعمیر نہیں ہوا (lancedb)"
 #: plugin/embeddings/search_ui.py
 msgid "Cache Status: Not built"
 msgstr "کیش کی حیثیت: تعمیر نہیں ہوا"
-
-#: plugin/embeddings/search_ui.py
-msgid "just now"
-msgstr "ابھی"
-
-#: plugin/embeddings/search_ui.py
-#, python-brace-format
-msgid "{0}m ago"
-msgstr "{0} منٹ پہلے"
-
-#: plugin/embeddings/search_ui.py
-#, python-brace-format
-msgid "{0}h ago"
-msgstr "{0} گھنٹے پہلے"
 
 #: plugin/embeddings/search_ui.py
 #, python-brace-format
@@ -418,7 +423,8 @@ msgid "Status:"
 msgstr "حیثیت:"
 
 #: plugin/calc/python/cell_editor_ui.py plugin/chatbot/panel_wiring.py
-#: plugin/scripting/editor_ui_strings.py plugin/xdl_strings.py
+#: plugin/chatbot/panel.py plugin/scripting/editor_ui_strings.py
+#: plugin/xdl_strings.py
 msgid "Ready"
 msgstr "تیار"
 
@@ -560,13 +566,13 @@ msgstr "تصاویر شامل کی گئیں"
 #: plugin/calc/python/geometric_recalc.py
 #, python-format
 msgid ""
-"Geometric Recalc Order skipped sheet '%s': found %s or more Python cells "
-"(discovery cap). The sheet was left unchained so a partial list is not "
-"treated as complete."
+"Geometric Recalc Order skipped sheet '%(sheet)s': found %(cap)s or more "
+"Python cells (discovery cap). The sheet was left unchained so a partial list "
+"is not treated as complete."
 msgstr ""
-"جیومیٹرک ری کیلک آرڈر نے شیٹ '%s' کو چھوڑ دیا: %s یا اس سے زیادہ پائتھن سیلز "
-"ملیں (ڈسکوری کیپ)۔ شیٹ کو غیر تبدیل شدہ چھوڑ دیا گیا تاکہ نامکمل فہرست کو "
-"مکمل نہ سمجھا جائے۔"
+"جیومیٹرک ری کیلک آرڈر نے شیٹ '%(sheet)s' کو چھوڑ دیا: %(cap)s یا اس سے زیادہ "
+"پائتھون سیلز ملیں (ڈسکوری کیپ)۔ شیٹ کو غیر تبدیل شدہ چھوڑ دیا گیا تاکہ "
+"نامکمل فہرست کو مکمل نہ سمجھا جائے۔"
 
 #: plugin/calc/excel_py_convert/auto_open.py
 #, python-brace-format
@@ -1329,6 +1335,10 @@ msgid ""
 msgstr ""
 "[ماڈل {0} مقامی آڈیو کو سپورٹ نہیں کرتا ہے۔ براہ کرم ترتیبات میں STT ماڈل "
 "منتخب کریں۔]"
+
+#: plugin/chatbot/panel.py
+msgid "[Peer send requires Chat mode on this sidebar.]"
+msgstr "[پیئر سینڈ کے لیے اس سائڈبار پر چیٹ موڈ درکار ہے۔]"
 
 #: plugin/chatbot/web_research_chat.py
 #, python-format
@@ -3153,6 +3163,20 @@ msgstr "Calc سپریڈ شیٹ ٹولز"
 
 msgid "Max Rows Display"
 msgstr "زیادہ سے زیادہ قطاریں دکھائیں"
+
+msgid "Cache Excel siblings as ODS"
+msgstr "ایکسل کے ساتھیوں (siblings) کو ODS کے طور پر کیش کریں"
+
+msgid ""
+"Convert sibling .xlsx/.xls to writeragent_ods_cache/ beside the folder so "
+"repeated DuckDB SQL reuses the ODS. Native .ods and the live workbook are "
+"never cached. Set calc.ods_cache_enabled false in writeragent.json to "
+"disable."
+msgstr ""
+"فولڈر کے ساتھ موجود .xlsx/.xls ساتھیوں کو writeragent_ods_cache/ میں تبدیل "
+"کریں تاکہ بار بار DuckDB SQL، ODS کو دوبارہ استعمال کر سکے۔ مقامی .ods اور "
+"لائیو ورک بک کبھی کیش نہیں ہوتے۔ اسے غیر فعال کرنے کے لیے writeragent.json "
+"میں calc.ods_cache_enabled کو false پر سیٹ کریں۔"
 
 msgid "Sidebar"
 msgstr "سائیڈ بار"

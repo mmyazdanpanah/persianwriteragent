@@ -35,6 +35,7 @@ from plugin.framework.client.errors import (
 from plugin.framework.config import (
     get_api_config,
     get_config,
+    get_config_bool_safe,
     get_config_int,
     get_current_endpoint,
     validate_api_config,
@@ -62,6 +63,15 @@ from plugin.chatbot.tool_loop_state import (
     ToolLoopEvent,
     EventKind,
     next_state,
+)
+from plugin.chatbot.compaction import (
+    MAX_OVERFLOW_COMPACTION_ATTEMPTS,
+    compact_session,
+    is_context_overflow_error,
+    is_process_death_error,
+    messages_for_llm,
+    resolve_context_window,
+    should_retry_overflow,
 )
 
 log = logging.getLogger(__name__)
@@ -122,7 +132,7 @@ class ToolLoopHost(Protocol):
 
     # Mixin methods called on self
     def _start_tool_calling_async(self, client: "LlmClient", model: Any, max_tokens: int, tools: list[dict[str, Any]], execute_tool_fn: Callable[..., Any], max_tool_rounds: int | None = None, query_text: str | None = None) -> None: ...
-    def _spawn_llm_worker(self, q: "queue.Queue[Any] | BatchingStreamQueue", client: "LlmClient", max_tokens: int, tools: list[dict[str, Any]], round_num: int, query_text: str | None = None) -> None: ...
+    def _spawn_llm_worker(self, q: "queue.Queue[Any] | BatchingStreamQueue", client: "LlmClient", max_tokens: int, tools: list[dict[str, Any]], round_num: int, query_text: str | None = None, force_compact: bool = False) -> None: ...
     def _spawn_final_stream(self, q: "queue.Queue[Any] | BatchingStreamQueue", client: "LlmClient", max_tokens: int) -> None: ...
     def _create_event_from_stream_item(self, item: Any) -> ToolLoopEvent | None: ...
     def _handle_stream_completion(self, item: Any) -> bool: ...
@@ -137,6 +147,10 @@ class ToolLoopHost(Protocol):
 
     # Producer batcher for the current send (set in _start_tool_calling_async when batching is active)
     _active_batched_q: "BatchingStreamQueue | None"
+    _overflow_compact_attempts: int
+    _last_compact_reason: str | None
+    _last_compact_tokens_before: int | None
+    _last_compact_tokens_after: int | None
 
 
 class ToolCallingMixin:
@@ -163,6 +177,11 @@ class ToolCallingMixin:
     _active_execute_tool_fn: Callable[..., Any] | None = None
     _active_query_text: str | None = None
     _active_supports_status: bool = False
+    # Overflow compact-and-retry (PR2). Reset per send in _start_tool_calling_async.
+    _overflow_compact_attempts: int = 0
+    _last_compact_reason: str | None = None
+    _last_compact_tokens_before: int | None = None
+    _last_compact_tokens_after: int | None = None
 
     @property
     def _sm_state(self: ToolLoopHost) -> ToolLoopState:
@@ -180,7 +199,7 @@ class ToolCallingMixin:
     def rerender_rich_text_session(self: ToolLoopHost) -> None:
         """Re-render session with HTML formatting. Overridden in SendButtonListener."""
 
-    def _do_send_chat_with_tools(self: ToolLoopHost, query_text: str, model: Any, doc_type_str: str) -> None:
+    def _do_send_chat_with_tools(self: ToolLoopHost, query_text: str, model: Any, doc_type_str: str, skip_append_user: bool = False) -> None:
         try:
             log.debug("_do_send: importing core modules...")
             from plugin.main import get_tools
@@ -215,7 +234,11 @@ class ToolCallingMixin:
                 uno_services_supported=getattr(self, "cached_uno_services", None),
                 active_domain=active_domain,
                 ctx=self.ctx,
+                doc=model,
             )
+            from plugin.doc.peer_message import log_peer_tool_on_wire
+
+            log_peer_tool_on_wire(active_tools)
             execute_fn = build_tool_execute_fn(self, doc_type_str, active_domain, python_tool_domain, set_active_domain)
 
         except Exception as e:
@@ -313,22 +336,29 @@ class ToolCallingMixin:
             self._set_status("Error")
             return
 
-        # Check for vision capability and selected image base64
-        # Note: `model` here is the UNO document object, not the model ID string.
-        # The text model ID is in api_config["text_model"].
-        b64_image = None
-        from plugin.framework.client.model_fetcher import has_native_vision
-        text_model_id = api_config.get("text_model", "")
-        if has_native_vision(text_model_id, client._endpoint()):
-            doc = self._get_document_model() if hasattr(self, "_get_document_model") else None
-            if doc:
-                try:
-                    from plugin.writer.images.image_tools import get_selected_image_base64
-                    b64_image = get_selected_image_base64(doc, self.ctx)
-                except Exception as e:
-                    log.debug("Failed to get selected image base64: %s", e)
+        # Peer extracted send already appended the envelope + body once.
+        # Calling add_user_message again would double-post that turn.
+        if skip_append_user:
+            b64_image = None
+        else:
+            # Check for vision capability and selected image base64
+            # Note: `model` here is the UNO document object, not the model ID string.
+            # The text model ID is in api_config["text_model"].
+            b64_image = None
+            from plugin.framework.client.model_fetcher import has_native_vision
+            text_model_id = api_config.get("text_model", "")
+            if has_native_vision(text_model_id, client._endpoint()):
+                doc = self._get_document_model() if hasattr(self, "_get_document_model") else None
+                if doc:
+                    try:
+                        from plugin.writer.images.image_tools import get_selected_image_base64
+                        b64_image = get_selected_image_base64(doc, self.ctx)
+                    except Exception as e:
+                        log.debug("Failed to get selected image base64: %s", e)
 
-        if b64_image or self.audio_wav_path:
+        if skip_append_user:
+            pass
+        elif b64_image or self.audio_wav_path:
             content_list: list[dict[str, Any]] = []
             if query_text:
                 content_list.append({"type": "text", "text": query_text})
@@ -394,24 +424,33 @@ class ToolCallingMixin:
             from plugin.main import get_tools
 
             active_domain = getattr(self.session, "active_specialized_domain", None) if hasattr(self, "session") and self.session else None
+            refresh_doc = self._get_document_model() if hasattr(self, "_get_document_model") else None
             self._active_tools = get_tools().get_schemas(
                 "openai",
                 doc_type=getattr(self, "cached_doc_type", None),
                 uno_services_supported=getattr(self, "cached_uno_services", None),
                 active_domain=active_domain,
                 ctx=getattr(self, "ctx", None),
+                doc=refresh_doc,
             )
+            from plugin.doc.peer_message import log_peer_tool_on_wire
+
+            log_peer_tool_on_wire(self._active_tools)
         except Exception as e:
             log.warning("Failed to refresh active tools: %s", e)
 
-    def _spawn_llm_worker(self: ToolLoopHost, q: "queue.Queue[Any] | BatchingStreamQueue", client: "LlmClient", max_tokens: int, tools: list[dict[str, Any]], round_num: int, query_text: str | None = None) -> None:
+    def _spawn_llm_worker(self: ToolLoopHost, q: "queue.Queue[Any] | BatchingStreamQueue", client: "LlmClient", max_tokens: int, tools: list[dict[str, Any]], round_num: int, query_text: str | None = None, force_compact: bool = False) -> None:
         """Spawn a background thread that streams the LLM response into q (or the batcher's raw queue)."""
         batched = q if isinstance(q, BatchingStreamQueue) else None
         real_q = batched.raw if batched is not None else q
 
         update_activity_state("tool_loop", round_num=round_num)
         log.debug("Tool loop round %d: sending %d messages to API..." % (round_num, len(self.session.messages)))
-        self._set_status("Thinking..." if round_num == 0 else "Thinking (round %d)..." % (round_num + 1))
+        # Overflow retry already set "Compacting conversation..." on the drain
+        # thread. Host Thinking here would flash over that ack before the
+        # worker's status_callback can post Compacting again.
+        if not force_compact:
+            self._set_status("Thinking..." if round_num == 0 else "Thinking (round %d)..." % (round_num + 1))
 
         self._record_assistant_start = True
 
@@ -424,13 +463,39 @@ class ToolCallingMixin:
                         batched.flush()
                     real_q.put((StreamQueueKind.STOPPED,))
                     return
+                # Status via queue only — never self._set_status from this worker (UNO).
+                def status_cb(t):
+                    real_q.put((StreamQueueKind.STATUS, t))
                 with llm_request_lane():
+                    # Compact + stream share one lane hold. compaction.py must
+                    # not take the non-reentrant lock itself.
+                    if get_config_bool_safe("chat_compaction_enabled"):
+                        result = compact_session(
+                            self.session,
+                            client,
+                            window=resolve_context_window(client),
+                            tools=tools,
+                            max_tokens=max_tokens,
+                            stop_checker=stop_checker,
+                            force=force_compact,
+                            status_callback=status_cb,
+                            enabled=True,
+                        )
+                        self._last_compact_reason = result.reason
+                        self._last_compact_tokens_before = result.tokens_before
+                        self._last_compact_tokens_after = result.tokens_after
+                        if result.reason == "aborted":
+                            if batched:
+                                batched.flush()
+                            real_q.put((StreamQueueKind.STOPPED,))
+                            return
+                    payload = messages_for_llm(self.session)
                     response = client.stream_request_with_tools(
-                        self.session.messages, max_tokens, tools=tools,
+                        payload, max_tokens, tools=tools,
                         append_callback=(batched.content_cb() if batched else lambda t: real_q.put((StreamQueueKind.CHUNK, t))),
                         append_thinking_callback=(batched.thinking_cb() if batched else lambda t: real_q.put((StreamQueueKind.THINKING, t))),
                         stop_checker=stop_checker,
-                        status_callback=lambda t: real_q.put((StreamQueueKind.STATUS, t)),
+                        status_callback=status_cb,
                     )
                 # Stop during pre-send host-gap wait returns finish_reason "stop"
                 # without raising; also honor client._stopped so that is not STREAM_DONE.
@@ -477,11 +542,36 @@ class ToolCallingMixin:
                         batched.flush()
                     real_q.put((StreamQueueKind.STOPPED,))
                     return
+                def status_cb(t):
+                    real_q.put((StreamQueueKind.STATUS, t))
                 with llm_request_lane():
+                    # Same compact-then-view path as _spawn_llm_worker. Final
+                    # stream has no tools; still compact when the transcript
+                    # is over the tiered threshold.
+                    if get_config_bool_safe("chat_compaction_enabled"):
+                        result = compact_session(
+                            self.session,
+                            client,
+                            window=resolve_context_window(client),
+                            tools=None,
+                            max_tokens=max_tokens,
+                            stop_checker=stop_checker,
+                            force=False,
+                            status_callback=status_cb,
+                            enabled=True,
+                        )
+                        self._last_compact_reason = result.reason
+                        self._last_compact_tokens_before = result.tokens_before
+                        self._last_compact_tokens_after = result.tokens_after
+                        if result.reason == "aborted":
+                            if batched:
+                                batched.flush()
+                            real_q.put((StreamQueueKind.STOPPED,))
+                            return
                     client.stream_chat_response(
-                        self.session.messages, max_tokens, append_c, append_t,
+                        messages_for_llm(self.session), max_tokens, append_c, append_t,
                         stop_checker=stop_checker,
-                        status_callback=lambda t: real_q.put((StreamQueueKind.STATUS, t)),
+                        status_callback=status_cb,
                     )
                 if self.stop_requested or getattr(client, "_stopped", False):
                     if batched: batched.flush()
@@ -632,6 +722,40 @@ class ToolCallingMixin:
         else:
             err_msg = str(e)
             crash_blob = err_msg
+        # Prompt-too-large: respawn the worker with force_compact. Never call
+        # compact_session on this drain / UI thread (UNO + lane). Process death
+        # is not overflow — compact-and-retry on a dead llama-server is worse
+        # than today's sentence. Kill switch offs this path too.
+        if get_config_bool_safe("chat_compaction_enabled"):
+            stop_checker = self.resolve_stop_checker()
+            stopped = bool(self.stop_requested or stop_checker())
+            retry_q = self._active_batched_q or self._active_q
+            if (
+                not stopped
+                and retry_q is not None
+                and self._active_client is not None
+                and not is_process_death_error(crash_blob)
+                and is_context_overflow_error(crash_blob)
+                and self._overflow_compact_attempts < MAX_OVERFLOW_COMPACTION_ATTEMPTS
+                and should_retry_overflow(
+                    self._overflow_compact_attempts,
+                    self._last_compact_reason,
+                    self._last_compact_tokens_before,
+                    self._last_compact_tokens_after,
+                )
+            ):
+                self._overflow_compact_attempts += 1
+                self._set_status("Compacting conversation...")
+                self._spawn_llm_worker(
+                    retry_q,
+                    self._active_client,
+                    self._active_max_tokens,
+                    self._active_tools or [],
+                    self._sm_state.round_num,
+                    query_text=self._active_query_text,
+                    force_compact=True,
+                )
+                return True
         # Issue #570: llama-server died / prompt overflow. Plain sentence only —
         # never dump the format_error_payload dict into the sidebar.
         if is_local_model_server_crash(crash_blob):
@@ -675,6 +799,8 @@ class ToolCallingMixin:
         if max_tool_rounds is None:
             max_tool_rounds = get_config_int("chatbot.max_tool_rounds")
         log.info("=== Tool-calling loop START (max %d rounds) ===" % max_tool_rounds)
+        # Worker is recreated per send; do not carry overflow retries across turns.
+        self._overflow_compact_attempts = 0
         self._append_response("\nAI: ")
         self._record_assistant_start = True
 

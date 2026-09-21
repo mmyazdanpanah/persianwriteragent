@@ -10,6 +10,7 @@ from unittest.mock import MagicMock, patch
 sys.path.insert(0, os.path.dirname(get_plugin_dir()))
 
 from plugin.writer.images.image_utils import ImageService, EndpointImageProvider
+from plugin.framework.client.base_provider_shim import canonical_aspect_ratio, canonical_resolution
 from plugin.framework.client.llm_client import LlmClient
 from plugin.tests.testing_utils import MockContext, create_mock_client
 
@@ -39,7 +40,12 @@ class TestEndpointImageProvider(unittest.TestCase):
         self.assertEqual(len(paths), 1)
         self.assertEqual(err, "")
         self.assertTrue(paths[0].endswith(".webp"))
-        mock_sync.assert_called_once_with("http://example.com/image.png", parse_json=False)
+        from plugin.framework.config import get_config_int
+        mock_sync.assert_called_once_with(
+            "http://example.com/image.png",
+            parse_json=False,
+            timeout=get_config_int("request_timeout"),
+        )
 
     def test_generate_openrouter_b64(self):
         self.mock_client.config.get.side_effect = lambda k, d=None: True if k == "is_openrouter" else d
@@ -92,7 +98,12 @@ class TestEndpointImageProvider(unittest.TestCase):
         
         self.assertEqual(len(paths), 1)
         self.assertEqual(err, "")
-        mock_sync.assert_called_with("http://fallback.com/image.png", parse_json=False)
+        from plugin.framework.config import get_config_int
+        mock_sync.assert_called_with(
+            "http://fallback.com/image.png",
+            parse_json=False,
+            timeout=get_config_int("request_timeout"),
+        )
         os.unlink(paths[0])
 
     def test_fallback_logic_b64(self):
@@ -239,13 +250,122 @@ class TestEndpointImageProvider(unittest.TestCase):
 
     @patch('plugin.framework.client.llm_client.init_logging')
     def test_make_image_request_body_includes_image_url_when_source_image(self, mock_init):
-        """LlmClient.make_image_request adds image_url (data URL) to body when source_image is provided."""
+        """Non-OpenRouter image requests keep OpenAI-style image_url for source_image."""
         config = {"endpoint": "https://api.example.com", "model": "test-model"}
         client = LlmClient(config, MockContext())
         method, path, body, headers = client.make_image_request("a cat", source_image="b64data")
         data = json.loads(body.decode("utf-8"))
         self.assertIn("image_url", data)
         self.assertEqual(data["image_url"], "data:image/png;base64,b64data")
+
+    @patch('plugin.framework.client.llm_client.init_logging')
+    def test_openrouter_image_request_uses_input_references_for_edit(self, mock_init):
+        """OpenRouter /images img2img must send input_references, not top-level image_url.
+
+        OpenRouter ignores image_url on POST /api/v1/images (HTTP 200, no input image
+        tokens), so a selected graphic would not be edited.
+        """
+        config = {"endpoint": "https://openrouter.ai/api", "model": "black-forest-labs/flux.2-klein-4b", "is_openrouter": True}
+        client = LlmClient(config, MockContext())
+        with patch.object(client, "_resolve_auth", return_value={"provider": "openrouter"}):
+            method, path, body, headers = client.make_image_request("make him a wizard", source_image="b64data")
+        data = json.loads(body.decode("utf-8"))
+        self.assertNotIn("image_url", data)
+        self.assertEqual(
+            data["input_references"],
+            [{"type": "image_url", "image_url": {"url": "data:image/png;base64,b64data"}}],
+        )
+
+    @patch('plugin.framework.client.llm_client.init_logging')
+    def test_openai_image_request_uses_images_edits_for_edit(self, mock_init):
+        """Official OpenAI img2img is POST /images/edits JSON images[].image_url, not generations image_url."""
+        config = {"endpoint": "https://api.openai.com", "model": "gpt-image-2", "api_key": "sk-test"}
+        client = LlmClient(config, MockContext())
+        with patch.object(client, "_resolve_auth", return_value={"provider": "openai"}):
+            method, path, body, headers = client.make_image_request("a cat", model="gpt-image-2")
+            data = json.loads(body.decode("utf-8"))
+            self.assertTrue(path.endswith("/images/generations"))
+            self.assertFalse(path.endswith("/images/edits"))
+            self.assertNotIn("image_url", data)
+            self.assertNotIn("images", data)
+            self.assertNotIn("steps", data)
+            self.assertEqual(data["response_format"], "b64_json")
+
+            method, path, body, headers = client.make_image_request(
+                "make him a wizard", model="gpt-image-2", source_image="b64data"
+            )
+        data = json.loads(body.decode("utf-8"))
+        self.assertTrue(path.endswith("/images/edits"))
+        self.assertNotIn("image_url", data)
+        self.assertEqual(data["images"], [{"image_url": "data:image/png;base64,b64data"}])
+        self.assertEqual(data["response_format"], "b64_json")
+        self.assertEqual(data["model"], "gpt-image-2")
+
+    @patch('plugin.framework.client.llm_client.init_logging')
+    def test_openai_dalle3_rejects_edit(self, mock_init):
+        """dall-e-3 is generations-only; refuse rather than replace the selected graphic."""
+        config = {"endpoint": "https://api.openai.com", "model": "dall-e-3", "api_key": "sk-test"}
+        client = LlmClient(config, MockContext())
+        with patch.object(client, "_resolve_auth", return_value={"provider": "openai"}):
+            with self.assertRaises(ValueError) as raised:
+                client.make_image_request("make it dusk", model="dall-e-3", source_image="b64data")
+        self.assertIn("dall-e-3", str(raised.exception).lower())
+        self.assertIn("cannot edit", str(raised.exception).lower())
+
+    @patch('plugin.framework.client.llm_client.init_logging')
+    def test_together_image_request_uses_reference_images_for_edit(self, mock_init):
+        """Together default image models (Flash Image / FLUX.2) want reference_images, not image_url."""
+        config = {"endpoint": "https://api.together.xyz", "model": "google/flash-image-2.5"}
+        client = LlmClient(config, MockContext())
+        with patch.object(client, "_resolve_auth", return_value={"provider": "together"}):
+            method, path, body, headers = client.make_image_request("a cat", model="google/flash-image-2.5")
+            data = json.loads(body.decode("utf-8"))
+            self.assertNotIn("image_url", data)
+            self.assertNotIn("reference_images", data)
+            self.assertNotIn("size", data)
+            self.assertEqual(data["width"], 1024)
+            self.assertEqual(data["height"], 1024)
+
+            method, path, body, headers = client.make_image_request(
+                "wide", model="google/flash-image-2.5", width=896, height=512
+            )
+            data = json.loads(body.decode("utf-8"))
+            self.assertEqual(data["width"], 896)
+            self.assertEqual(data["height"], 512)
+            self.assertNotIn("size", data)
+
+            method, path, body, headers = client.make_image_request(
+                "make him a wizard", model="google/flash-image-2.5", source_image="b64data"
+            )
+        data = json.loads(body.decode("utf-8"))
+        self.assertNotIn("image_url", data)
+        self.assertEqual(data["reference_images"], ["data:image/png;base64,b64data"])
+
+    @patch('plugin.framework.client.llm_client.init_logging')
+    def test_together_kontext_image_request_uses_image_url_for_edit(self, mock_init):
+        """FLUX.1 Kontext on Together documents a single image_url string."""
+        config = {"endpoint": "https://api.together.xyz", "model": "black-forest-labs/FLUX.1-kontext-pro"}
+        client = LlmClient(config, MockContext())
+        with patch.object(client, "_resolve_auth", return_value={"provider": "together"}):
+            method, path, body, headers = client.make_image_request(
+                "a lake", model="black-forest-labs/FLUX.1-kontext-pro", width=896, height=512
+            )
+            create = json.loads(body.decode("utf-8"))
+            self.assertEqual(create["aspect_ratio"], "16:9")
+            self.assertNotIn("size", create)
+            self.assertNotIn("width", create)
+            self.assertNotIn("height", create)
+
+            method, path, body, headers = client.make_image_request(
+                "watercolor", model="black-forest-labs/FLUX.1-kontext-pro", source_image="b64data"
+            )
+        data = json.loads(body.decode("utf-8"))
+        self.assertEqual(data["image_url"], "data:image/png;base64,b64data")
+        self.assertNotIn("reference_images", data)
+        self.assertNotIn("size", data)
+        self.assertNotIn("width", data)
+        self.assertNotIn("height", data)
+        self.assertEqual(data["aspect_ratio"], "1:1")
 
 class TestImageService(unittest.TestCase):
     def test_endpoint_provider_with_none_config(self):
@@ -331,6 +451,115 @@ class TestImageService(unittest.TestCase):
         self.assertEqual(captured.get("model"), "black-forest-labs/flux.2-klein-4b")
         self.assertEqual(captured.get("width"), 1024)
         self.assertEqual(captured.get("height"), 1024)
+
+    def test_openrouter_chat_path_sends_image_config_aspect(self):
+        """Gemini multimodal create must hint aspect_ratio / 0.5K via image_config."""
+        mock_ctx = MagicMock()
+        api = {
+            "endpoint": "https://openrouter.ai/api/v1",
+            "api_key": "k",
+            "is_openrouter": True,
+            "model": "google/gemini-3.1-flash-lite-image",
+        }
+        provider = EndpointImageProvider(api, mock_ctx)
+        captured: dict[str, object] = {}
+
+        def fake_make_chat_request(messages, max_tokens=512, tools=None, stream=False, model=None, **kw):
+            return "POST", "/v1/chat/completions", '{"model":"m","messages":[]}', {}
+
+        def fake_request_with_tools(messages, body_override=None, model=None, **kw):
+            captured["body"] = json.loads(body_override)
+            return {"content": "", "images": []}
+
+        with (
+            patch("plugin.framework.client.model_fetcher.is_image_only_model", return_value=False),
+            patch.object(provider.client, "make_chat_request", side_effect=fake_make_chat_request),
+            patch.object(provider.client, "request_with_tools", side_effect=fake_request_with_tools),
+        ):
+            provider.generate(
+                "a tabby cat",
+                width=512,
+                height=512,
+                aspect_ratio="square",
+                image_model="google/gemini-3.1-flash-lite-image",
+            )
+
+        body = captured["body"]
+        assert isinstance(body, dict)
+        self.assertEqual(body["modalities"], ["image"])
+        self.assertEqual(body["image_config"], {"aspect_ratio": "1:1", "image_size": "0.5K"})
+        self.assertNotIn("size", body)
+
+    def test_openrouter_chat_edit_omits_image_config(self):
+        """Img2img must not send sidebar size/aspect; source image defines geometry."""
+        mock_ctx = MagicMock()
+        api = {
+            "endpoint": "https://openrouter.ai/api/v1",
+            "api_key": "k",
+            "is_openrouter": True,
+            "model": "google/gemini-3.1-flash-lite-image",
+        }
+        provider = EndpointImageProvider(api, mock_ctx)
+        captured: dict[str, object] = {}
+
+        def fake_make_chat_request(messages, max_tokens=512, tools=None, stream=False, model=None, **kw):
+            return "POST", "/v1/chat/completions", '{"model":"m","messages":[]}', {}
+
+        def fake_request_with_tools(messages, body_override=None, model=None, **kw):
+            captured["body"] = json.loads(body_override)
+            return {"content": "", "images": []}
+
+        tiny_png_b64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+        with (
+            patch("plugin.framework.client.model_fetcher.is_image_only_model", return_value=False),
+            patch.object(provider.client, "make_chat_request", side_effect=fake_make_chat_request),
+            patch.object(provider.client, "request_with_tools", side_effect=fake_request_with_tools),
+        ):
+            provider.generate(
+                "make it fancier",
+                width=512,
+                height=512,
+                aspect_ratio="square",
+                source_image=tiny_png_b64,
+                image_model="google/gemini-3.1-flash-lite-image",
+            )
+
+        body = captured["body"]
+        assert isinstance(body, dict)
+        self.assertEqual(body["modalities"], ["image"])
+        self.assertNotIn("image_config", body)
+
+
+class TestCanonicalAspectRatio(unittest.TestCase):
+    def test_canonical_aspect_ratio_named_and_pixels(self):
+        self.assertEqual(canonical_aspect_ratio(named="square"), "1:1")
+        self.assertEqual(canonical_aspect_ratio(named="Square"), "1:1")
+        self.assertEqual(canonical_aspect_ratio(named="Landscape (16:9)"), "16:9")
+        self.assertEqual(canonical_aspect_ratio(named="landscape_3_2"), "3:2")
+        self.assertEqual(canonical_aspect_ratio(1024, 1024), "1:1")
+        self.assertEqual(canonical_aspect_ratio(1024, 576), "16:9")
+        self.assertEqual(canonical_aspect_ratio(896, 512), "16:9")
+        self.assertEqual(canonical_aspect_ratio(1024, 768), "4:3")
+        self.assertEqual(canonical_aspect_ratio(768, 1024), "3:4")
+
+    def test_canonical_resolution_tiers_and_clamps(self):
+        self.assertEqual(canonical_resolution(512, 512), "512")
+        self.assertEqual(canonical_resolution(1024, 1024), "1K")
+        self.assertEqual(canonical_resolution(2048, 2048), "2K")
+        self.assertEqual(canonical_resolution(4096, 4096), "4K")
+        self.assertEqual(canonical_resolution(512, 512, family="openrouter_chat"), "0.5K")
+        self.assertEqual(canonical_resolution(1024, 1024, family="openrouter_chat"), "1K")
+        self.assertEqual(canonical_resolution(2048, 2048, family="openrouter_chat"), "2K")
+        self.assertEqual(canonical_resolution(4096, 4096, family="openrouter_chat"), "4K")
+        self.assertEqual(canonical_resolution(512, 512, family="grok"), "1k")
+        self.assertEqual(canonical_resolution(1024, 1024, family="grok"), "1k")
+        self.assertEqual(canonical_resolution(2048, 2048, family="grok"), "2k")
+        self.assertEqual(canonical_resolution(4096, 4096, family="grok"), "2k")
+        self.assertEqual(canonical_resolution(512, 512, family="imagen"), "1K")
+        self.assertEqual(canonical_resolution(1024, 768, family="imagen"), "1K")
+        self.assertEqual(canonical_resolution(2048, 2048, family="imagen"), "2K")
+        self.assertEqual(canonical_resolution(4096, 4096, family="imagen"), "2K")
+        self.assertIsNone(canonical_resolution(0, 512))
 
 
 if __name__ == '__main__':

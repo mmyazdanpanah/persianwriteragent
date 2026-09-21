@@ -12,21 +12,31 @@ from urllib.request import Request, urlopen
 import pytest
 
 from scripts.mock_llm_server import (
+    COMPACTION_SUMMARY,
     DEFAULT_TRANSCRIPT,
+    HISTORY_FLOOD_MARK,
+    MOCK_CONTEXT_WINDOW,
     MOCK_MODEL_ID,
     MOCK_STT_MODEL_ID,
     RAMBLE_PARTS,
     Completion,
+    CompletionRule,
     MockLLMConfig,
     _TurnState,
+    apply_scripted_rules,
     completion_tool_calls,
     current_query_text,
     decide_completion,
     detect_scenario,
+    is_compaction_summarizer,
     iter_sse_payloads,
     make_handler_class,
+    match_completion_rule,
     models_list_body,
+    parse_peer_catalog,
+    parse_peer_envelope,
     response_delay_s,
+    summarize_chat_payload,
     sync_response_body,
 )
 
@@ -42,6 +52,7 @@ def test_models_list_includes_mock_id():
     assert MOCK_STT_MODEL_ID in ids
     chat = next(row for row in body["data"] if row["id"] == MOCK_MODEL_ID)
     assert "audio" in chat["architecture"]["input_modalities"]
+    assert chat["context_length"] == MOCK_CONTEXT_WINDOW
 
 
 def test_response_delay_s_sync_override():
@@ -335,6 +346,71 @@ def test_http_models_and_health(mock_http):
     with urlopen(mock_http + "/v1/models", timeout=5) as resp:
         data = json.loads(resp.read().decode("utf-8"))
     assert data["data"][0]["id"] == MOCK_MODEL_ID
+    assert data["data"][0]["context_length"] == MOCK_CONTEXT_WINDOW
+
+
+def test_http_overflow_once_then_ok_and_summarizer():
+    config = MockLLMConfig(delay_ms=0, offline=True)
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), make_handler_class(config))
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
+    host, port = httpd.server_address[:2]
+    base = f"http://{host}:{port}"
+    try:
+        payload = {
+            "model": MOCK_MODEL_ID,
+            "stream": True,
+            "messages": [{"role": "user", "content": "overflow once"}],
+            "tools": _tools("web_research"),
+        }
+        req = Request(
+            base + "/v1/chat/completions",
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with pytest.raises(HTTPError) as exc_info:
+            urlopen(req, timeout=5)
+        assert exc_info.value.code == 400
+        err_body = exc_info.value.read().decode("utf-8")
+        assert "prompt is too long" in err_body
+        raw, unused_ctype = _post_json(base + "/v1/chat/completions", payload)
+        assert unused_ctype is not None
+        assert "[DONE]" in raw
+        assert "<p>" in raw
+        summary_raw, _ctype = _post_json(
+            base + "/v1/chat/completions",
+            {
+                "model": MOCK_MODEL_ID,
+                "stream": False,
+                "messages": [
+                    {"role": "system", "content": "You are a conversation compaction assistant."},
+                    {"role": "user", "content": "<conversation>\nUSER: overflow once\n</conversation>"},
+                ],
+            },
+        )
+        body = json.loads(summary_raw)
+        assert body["choices"][0]["message"]["content"] == COMPACTION_SUMMARY
+        death_req = Request(
+            base + "/v1/chat/completions",
+            data=json.dumps(
+                {
+                    "model": MOCK_MODEL_ID,
+                    "stream": True,
+                    "messages": [{"role": "user", "content": "llama process died"}],
+                    "tools": _tools("web_research"),
+                }
+            ).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with pytest.raises(HTTPError) as death_exc:
+            urlopen(death_req, timeout=5)
+        assert death_exc.value.code == 400
+        assert "llama-server process has terminated" in death_exc.value.read().decode("utf-8")
+    finally:
+        httpd.shutdown()
+        thread.join(timeout=2)
 
 
 def test_http_stream_chit_chat(mock_http):
@@ -511,6 +587,92 @@ def test_detect_scenario_phrases_and_force():
     assert detect_scenario("show a table") == "table"
     assert detect_scenario("send a table please") == "table"
     assert detect_scenario("hello") == ""
+    assert detect_scenario("please flood history") == "history_flood"
+    assert detect_scenario("pad the context now") == "history_flood"
+    assert detect_scenario("overflow once then continue") == "overflow_once"
+    assert detect_scenario("prompt too large once") == "overflow_once"
+    assert detect_scenario("llama process died") == "process_death"
+
+
+def test_history_flood_and_compaction_summarizer():
+    cfg = MockLLMConfig(delay_ms=0)
+    flood = decide_completion(
+        {"messages": [{"role": "user", "content": "flood history"}], "tools": _tools("web_research")},
+        cfg,
+    )
+    assert flood.content and HISTORY_FLOOD_MARK in flood.content
+    assert flood.http_error is None
+    summarizer_payload = {
+        "stream": False,
+        "tools": None,
+        "messages": [
+            {"role": "system", "content": "You are a conversation compaction assistant for LibreOffice."},
+            {
+                "role": "user",
+                "content": (
+                    "<conversation>\nUSER: overflow once\nASSISTANT: pad\n"
+                    "USER: llama process died\n</conversation>\n\n"
+                    "Summarize the conversation inside <conversation>."
+                ),
+            },
+        ],
+    }
+    assert is_compaction_summarizer(summarizer_payload)
+    summary = decide_completion(summarizer_payload, cfg)
+    assert summary.content == COMPACTION_SUMMARY
+    assert summary.http_error is None
+    rec = summarize_chat_payload(summarizer_payload, summary, cfg)
+    assert rec["is_summarizer"] is True
+    view_payload = {
+        "stream": True,
+        "tools": _tools("web_research"),
+        "messages": [
+            {"role": "system", "content": "base"},
+            {"role": "user", "content": "[CONVERSATION SUMMARY]\n" + COMPACTION_SUMMARY + "\n[END SUMMARY]"},
+            {"role": "assistant", "content": "Acknowledged. I will continue from the summary above."},
+            {"role": "user", "content": "hello"},
+        ],
+    }
+    rec_view = summarize_chat_payload(view_payload, Completion(content="hi"), cfg)
+    assert rec_view["has_conversation_summary"] is True
+    assert rec_view["is_summarizer"] is False
+
+
+def test_overflow_once_then_ok_and_process_death():
+    cfg = MockLLMConfig(delay_ms=0)
+    tools = _tools("web_research", "add_comment")
+    first = decide_completion(
+        {"stream": True, "messages": [{"role": "user", "content": "overflow once"}], "tools": tools},
+        cfg,
+    )
+    assert first.http_error == 400
+    assert first.http_error_message == "prompt is too long"
+    second = decide_completion(
+        {"stream": True, "messages": [{"role": "user", "content": "overflow once"}], "tools": tools},
+        cfg,
+    )
+    assert second.http_error is None
+    assert second.content
+    death = decide_completion(
+        {"stream": True, "messages": [{"role": "user", "content": "llama process died"}], "tools": tools},
+        cfg,
+    )
+    assert death.http_error == 400
+    assert death.http_error_message and "llama-server process has terminated" in death.http_error_message
+    # Dumped history must not overflow the summarizer.
+    dumped = decide_completion(
+        {
+            "stream": False,
+            "tools": None,
+            "messages": [
+                {"role": "system", "content": "You are a conversation compaction assistant."},
+                {"role": "user", "content": "<conversation>\nUSER: overflow once\n</conversation>"},
+            ],
+        },
+        cfg,
+    )
+    assert dumped.content == COMPACTION_SUMMARY
+    assert dumped.http_error is None
 
 
 def test_ramble_and_empty_and_flood():
@@ -735,6 +897,47 @@ def test_nested_never_finish_keeps_discovery():
     )
     assert second.tool_name == "list_nearby_files"
     assert second.tool_name != "specialized_workflow_finished"
+
+
+def test_nested_never_finish_wins_over_advertised_peer_tool():
+    """E22 after E12/P: leftover Calc advertises peer send tools on the inner wire.
+
+    The old ``if peer tool in tool_names`` gate finished immediately
+    (Packet P) instead of looping until nested max_steps.
+    """
+    tools = _tools("send_peer_work", "send_peer_result", "list_nearby_files", "specialized_workflow_finished")
+    cfg = MockLLMConfig(delay_ms=0, nested_never_finish=True)
+    first = decide_completion(
+        {"messages": [{"role": "user", "content": "endless nested outline"}], "tools": tools},
+        cfg,
+    )
+    assert first.tool_name == "list_nearby_files"
+    assert first.tool_name not in {"send_peer_work", "send_peer_result"}
+    assert first.tool_name != "specialized_workflow_finished"
+    second = decide_completion(
+        {
+            "messages": [
+                {"role": "user", "content": "endless nested outline"},
+                {
+                    "role": "user",
+                    "content": 'Action:\n{"name": "list_nearby_files", "arguments": {}}\nObservation:\n[]',
+                },
+            ],
+            "tools": tools,
+        },
+        cfg,
+    )
+    assert second.tool_name == "list_nearby_files"
+    assert second.tool_name != "specialized_workflow_finished"
+    phrase_only = decide_completion(
+        {
+            "messages": [{"role": "user", "content": "endless nested outline"}],
+            "tools": tools,
+        },
+        MockLLMConfig(delay_ms=0),
+    )
+    assert phrase_only.tool_name == "list_nearby_files"
+    assert phrase_only.tool_name != "specialized_workflow_finished"
 
 
 def test_empty_transcript_stt_returns_empty_text():
@@ -997,6 +1200,14 @@ def test_mutate_and_calc_draw_thin_tools():
         cfg,
     )
     assert sheets.tool_name == "list_sheets"
+    sheets_core = decide_completion(
+        {
+            "messages": [{"role": "user", "content": "list sheets"}],
+            "tools": _tools("get_sheet_summary"),
+        },
+        cfg,
+    )
+    assert sheets_core.tool_name == "get_sheet_summary"
     pages = decide_completion(
         {"messages": [{"role": "user", "content": "list pages"}], "tools": _tools("list_pages")},
         cfg,
@@ -1188,6 +1399,10 @@ def test_summarize_chat_payload_doc_len_and_current_query():
     assert rec["has_current_query_mark"] is True
     assert rec["current_query"] == "look up latest Python"
     assert rec["doc_content_len"] == len("Welcome to WriterAgent.")
+    assert rec["n_messages"] == 2
+    assert rec["payload_chars"] == sum(
+        len(m["content"]) for m in payload["messages"] if isinstance(m.get("content"), str)
+    )
     assert rec["decided_tools"] == ["web_research"]
     assert rec["last_assistant_tool_calls"] == []
     assert "add_comment" in rec["advertised_tools"]
@@ -1520,4 +1735,270 @@ def test_http_models_lists_stt_id(mock_http):
         data = json.loads(resp.read().decode("utf-8"))
     ids = [row["id"] for row in data["data"]]
     assert MOCK_STT_MODEL_ID in ids
+
+
+_WRITER_OUTER = (
+    "web_research",
+    "apply_document_content",
+    "delegate_to_specialized_writer_toolset",
+    "get_document_tree",
+)
+_CALC_OUTER = (
+    "list_sheets",
+    "write_formula_range",
+    "delegate_to_specialized_calc_toolset",
+)
+_INNER_PEER = (
+    "send_peer_work",
+    "send_peer_result",
+    "specialized_workflow_finished",
+    "list_nearby_files",
+    "delegate_read_document",
+)
+_PEER_SYS = "Open peers: BudgetPeer.ods (uid=calc-uid, url=file:///tmp/BudgetPeer.ods, type=calc)."
+_WRITER_SYS = "Open peers: Memo.odt (uid=writer-uid, url=file:///tmp/Memo.odt, type=writer)."
+
+
+def _payload(user: str, tools: tuple[str, ...], *, system: str = "", prior: list[Any] | None = None) -> dict[str, Any]:
+    messages: list[Any] = []
+    if system:
+        messages.append({"role": "system", "content": system})
+    messages.append({"role": "user", "content": user})
+    messages.extend(prior or [])
+    return {"messages": messages, "tools": _tools(*tools)}
+
+
+def _tool_follow(name: str, content: str = '{"status":"ok","accepted":true,"envelope_kind":"work"}') -> list[dict[str, Any]]:
+    return [
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [{"id": "c1", "type": "function", "function": {"name": name, "arguments": "{}"}}],
+        },
+        {"role": "tool", "tool_call_id": "c1", "content": content},
+    ]
+
+
+def test_parse_peer_envelope_and_catalog():
+    wrapped = (
+        "[Peer work from: Memo.odt | uid=writer-uid | url=file:///tmp/Memo.odt]\n\n"
+        "Add a Total row."
+    )
+    env = parse_peer_envelope(wrapped)
+    assert env is not None
+    assert env["uid"] == "writer-uid"
+    assert env.get("kind") == "work"
+    peers = parse_peer_catalog(_PEER_SYS)
+    assert peers and peers[0]["uid"] == "calc-uid"
+    assert peers[0]["type"] == "calc"
+    noisy = "Earlier uid=not-a-peer, url=file:///tmp/x.ods, type=calc.\n" + _PEER_SYS
+    only_open = parse_peer_catalog(noisy)
+    assert only_open and only_open[0]["uid"] == "calc-uid"
+    assert all(p["uid"] != "not-a-peer" for p in only_open)
+
+
+def test_detect_peer_total_and_wait_phrases():
+    assert detect_scenario("Ask the budget workbook to add a Total row") == "peer_total"
+    assert detect_scenario("wait after accepted then hang") == "peer_wait"
+
+
+def test_peer_total_writer_outer_delegates_not_send_peer():
+    """Outer main never calls peer send tools (#673 specialized-inner)."""
+    out = decide_completion(
+        _payload("Ask the budget workbook to add a Total row", _WRITER_OUTER, system=_PEER_SYS),
+        MockLLMConfig(delay_ms=0),
+    )
+    assert out.tool_name == "delegate_to_specialized_writer_toolset"
+    assert (out.tool_args or {}).get("domain") == "document_research"
+    names = [n for n, _a in completion_tool_calls(out)]
+    assert "send_peer_work" not in names
+    assert "send_peer_result" not in names
+
+
+def test_peer_total_writer_inner_sends_then_finishes_immediately():
+    cfg = MockLLMConfig(delay_ms=0)
+    first = decide_completion(
+        _payload("Ask the budget workbook to add a Total row", _INNER_PEER, system=_PEER_SYS),
+        cfg,
+    )
+    assert first.tool_name == "send_peer_work"
+    args = first.tool_args or {}
+    assert args.get("document_url") == "calc-uid"
+    assert "Total" in (args.get("message") or "")
+    second = decide_completion(
+        _payload(
+            "Ask the budget workbook to add a Total row",
+            _INNER_PEER,
+            system=_PEER_SYS,
+            prior=_tool_follow(
+                "send_peer_work",
+                '{"status":"ok","accepted":true,"envelope_kind":"work",'
+                '"message":"Queued. You MUST call specialized_workflow_finished immediately."}',
+            ),
+        ),
+        cfg,
+    )
+    assert second.tool_name == "specialized_workflow_finished"
+    assert "immediately" in ((second.tool_args or {}).get("answer") or "").lower()
+
+
+def test_peer_wait_after_accepted_never_finishes():
+    """Locks the Scrolly hang: specialized stays in the loop after accepted."""
+    cfg = MockLLMConfig(delay_ms=0, scenario="peer_wait")
+    first = decide_completion(
+        _payload("wait after accepted then hang", _INNER_PEER, system=_PEER_SYS),
+        cfg,
+    )
+    assert first.tool_name == "send_peer_work"
+    stuck = decide_completion(
+        _payload(
+            "wait after accepted then hang",
+            _INNER_PEER,
+            system=_PEER_SYS,
+            prior=_tool_follow("send_peer_work"),
+        ),
+        cfg,
+    )
+    assert stuck.tool_name != "specialized_workflow_finished"
+    assert stuck.tool_name != "final_answer"
+
+
+def test_peer_wait_flag_same_as_scenario():
+    cfg = MockLLMConfig(delay_ms=0, peer_wait_after_accepted=True)
+    first = decide_completion(_payload("peer total", _INNER_PEER, system=_PEER_SYS), cfg)
+    assert first.tool_name == "send_peer_work"
+    stuck = decide_completion(
+        _payload("peer total", _INNER_PEER, system=_PEER_SYS, prior=_tool_follow("send_peer_work")),
+        cfg,
+    )
+    assert stuck.tool_name != "specialized_workflow_finished"
+
+
+def test_calc_envelope_writes_formula_then_delegates_reply():
+    envelope = (
+        "[Peer work from: Memo.odt | uid=writer-uid | url=file:///tmp/Memo.odt]\n\n"
+        "Add a Total row under the numbers."
+    )
+    write = decide_completion(_payload(envelope, _CALC_OUTER, system=_WRITER_SYS), MockLLMConfig(delay_ms=0))
+    assert write.tool_name == "write_formula_range"
+    assert "A4" in str((write.tool_args or {}).get("range"))
+    delegate = decide_completion(
+        _payload(envelope, _CALC_OUTER, system=_WRITER_SYS, prior=_tool_follow("write_formula_range", '{"status":"ok"}')),
+        MockLLMConfig(delay_ms=0),
+    )
+    assert delegate.tool_name == "delegate_to_specialized_calc_toolset"
+    assert (delegate.tool_args or {}).get("domain") == "document_research"
+    assert "send_peer_result" in ((delegate.tool_args or {}).get("task") or "")
+    assert "send_peer_work" not in [n for n, _a in completion_tool_calls(delegate)]
+
+
+def test_calc_inner_reply_uses_send_peer_result_then_finishes():
+    envelope = (
+        "[Peer work from: Memo.odt | uid=writer-uid | url=file:///tmp/Memo.odt]\n\n"
+        "Add a Total row."
+    )
+    send = decide_completion(_payload(envelope, _INNER_PEER, system=_WRITER_SYS), MockLLMConfig(delay_ms=0))
+    assert send.tool_name == "send_peer_result"
+    assert "peer_ask_id" not in (send.tool_args or {})
+    assert (send.tool_args or {}).get("document_url") == "writer-uid"
+    finish = decide_completion(
+        _payload(envelope, _INNER_PEER, system=_WRITER_SYS, prior=_tool_follow("send_peer_result", '{"status":"ok","accepted":true,"envelope_kind":"result"}')),
+        MockLLMConfig(delay_ms=0),
+    )
+    assert finish.tool_name == "specialized_workflow_finished"
+
+
+def test_calc_inner_reply_task_without_envelope_sends_peer():
+    """Live P3: specialized user text is the scripted Reply task, not the envelope.
+
+    After write_formula_range the outer delegates with send_peer_result in the task.
+    Phrase-only 'add a total row' does not appear there. Treating that as
+    leftover-Calc discovery (list_nearby_files) finishes without a reply.
+    """
+    task = (
+        "Reply to the peer envelope with send_peer_result: document_url=writer-uid "
+        "message=<one HTML/result string> then finish immediately."
+    )
+    send = decide_completion(_payload(task, _INNER_PEER, system=_WRITER_SYS), MockLLMConfig(delay_ms=0))
+    assert send.tool_name == "send_peer_result"
+    assert send.tool_name != "list_nearby_files"
+    assert "peer_ask_id" not in (send.tool_args or {})
+    assert (send.tool_args or {}).get("document_url") == "writer-uid"
+    finish = decide_completion(
+        _payload(task, _INNER_PEER, system=_WRITER_SYS, prior=_tool_follow("send_peer_result", '{"status":"ok","accepted":true,"envelope_kind":"result"}')),
+        MockLLMConfig(delay_ms=0),
+    )
+    assert finish.tool_name == "specialized_workflow_finished"
+
+
+def test_writer_followup_applies_peer_reply():
+    envelope = (
+        "[Peer result from: BudgetPeer.ods | uid=calc-uid | url=file:///tmp/BudgetPeer.ods]\n\n"
+        "Total row written at A4:B4."
+    )
+    out = decide_completion(_payload(envelope, _WRITER_OUTER), MockLLMConfig(delay_ms=0))
+    assert out.tool_name == "apply_document_content"
+    assert "send_peer_work" not in [n for n, _a in completion_tool_calls(out)]
+
+
+def test_p3_scripted_writer_ramble_does_not_steal_calc_reply():
+    """Same mock: Writer 'keep talking' rambles; Calc envelope still writes + replies."""
+    cfg = MockLLMConfig(delay_ms=0)
+    ramble = decide_completion(_payload("keep talking", _WRITER_OUTER), cfg)
+    assert ramble.ramble_parts or (ramble.content and ramble.tool_name is None)
+    assert "send_peer_work" not in [n for n, _a in completion_tool_calls(ramble)]
+    envelope = (
+        "[Peer work from: Memo.odt | uid=writer-uid | url=file:///tmp/Memo.odt]\n\n"
+        "Add a Total row under the numbers."
+    )
+    write = decide_completion(_payload(envelope, _CALC_OUTER, system=_WRITER_SYS), cfg)
+    assert write.tool_name == "write_formula_range"
+    reply = decide_completion(
+        _payload(envelope, _CALC_OUTER, system=_WRITER_SYS, prior=_tool_follow("write_formula_range", '{"status":"ok"}')),
+        cfg,
+    )
+    assert reply.tool_name == "delegate_to_specialized_calc_toolset"
+    assert "send_peer_work" not in [n for n, _a in completion_tool_calls(reply)]
+
+
+def test_scripted_rules_branch_writer_vs_calc():
+    cfg = MockLLMConfig(
+        delay_ms=0,
+        rules=[
+            CompletionRule(tools_any=("write_formula_range",), tool_name="list_sheets", tool_args={}),
+            CompletionRule(tools_any=("apply_document_content",), content="<p>writer branch</p>"),
+        ],
+    )
+    calc = decide_completion(_payload("hello", _CALC_OUTER), cfg)
+    writer = decide_completion(_payload("hello", _WRITER_OUTER), cfg)
+    assert calc.tool_name == "list_sheets"
+    assert writer.content and "writer branch" in writer.content
+
+
+def test_decide_hook_wins_over_rules():
+    def _hook(payload: dict[str, Any], config: MockLLMConfig) -> Completion:
+        return Completion(content="<p>hooked</p>", finish_reason="stop")
+
+    cfg = MockLLMConfig(
+        delay_ms=0,
+        decide_hook=_hook,
+        rules=[CompletionRule(content="<p>rule</p>")],
+    )
+    out = decide_completion(_payload("hello", _WRITER_OUTER), cfg)
+    assert out.content and "hooked" in out.content
+
+
+def test_match_completion_rule_envelope_and_specialized():
+    env_payload = _payload(
+        "[Peer work from: A | uid=u | url=]\n\nHi",
+        _INNER_PEER,
+    )
+    rule = CompletionRule(
+        envelope=True, specialized=True, tool_name="send_peer_result", tool_args={"document_url": "u"}
+    )
+    hit = match_completion_rule(rule, env_payload)
+    assert hit is not None and hit.tool_name == "send_peer_result"
+    miss = match_completion_rule(CompletionRule(envelope=False, content="x"), env_payload)
+    assert miss is None
+    assert apply_scripted_rules(env_payload, MockLLMConfig(rules=[rule])) is not None
 

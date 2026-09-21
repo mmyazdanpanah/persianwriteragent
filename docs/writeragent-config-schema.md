@@ -26,9 +26,10 @@ Top-level keys from the config dataclass (Settings dialog, chat, images).
 | `temperature` | `float` | `-1.0` |  |  |
 | `additional_instructions` | `string` | `""` |  |  |
 | `chat_max_tokens` | `int` | `16384` |  |  |
+| `chat_compaction_enabled` | `boolean` | `true` |  |  |
 | `request_timeout` | `int` | `120` |  |  |
 | `stt_model` | `string` | `""` |  |  |
-| `image_base_size` | `int` | `512` |  |  |
+| `image_base_size` | `int` | `1024` |  |  |
 | `image_default_aspect` | `string` | `"Square"` |  |  |
 | `image_steps` | `int` | `-1` |  |  |
 | `image_auto_gallery` | `boolean` | `true` |  |  |
@@ -87,7 +88,7 @@ Top-level keys from the config dataclass (Settings dialog, chat, images).
 
 | Key | Type | Default | Range | Description |
 | --- | --- | --- | --- | --- |
-| `max_tool_rounds` | `int` | `15` | `1`–`50` | Max Tool Rounds |
+| `max_tool_rounds` | `int` | `15` | `1`–`200` | Max Tool Rounds |
 | `context_strategy` | `string` | `"auto"` |  | How much document content to include in LLM context Options: auto (Auto (by document size)), full (Full document text), page (Pages around cursor), tree (Outline + excerpt), stats (Stats + outline only) |
 | `extend_selection_max_tokens` | `int` | `1000` | `10`–`4096` | Internal. Extend max tokens |
 | `edit_selection_max_new_tokens` | `int` | `1000` | `0`–`4096` | Internal. Extra tokens beyond original text length. 0 = same length as original. |

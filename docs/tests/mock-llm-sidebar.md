@@ -1,6 +1,6 @@
 # Mock LLM Sidebar Test Plan & Reference
 
-This document is the comprehensive reference for **automated** Rich Text Control Sidebar tests against the local mock LLM server (`make test-mock-sidebar`): server configuration, trigger phrases, harness hooks, and CI packets B–G.
+This document is the comprehensive reference for **automated** Rich Text Control Sidebar tests against the local mock LLM server (`make test-mock-sidebar`): server configuration, trigger phrases, harness hooks, and CI packets B–G, P, and K.
 
 Visual rendering, scroll pin, theme, resize, and “watch the sidebar” cases are **not** part of this harness. Use the product with `make mock-llm` if you care about those.
 
@@ -8,18 +8,20 @@ Visual rendering, scroll pin, theme, resize, and “watch the sidebar” cases a
 
 ## 1. Executive Status Dashboard
 
-Packets **B through G** run via `testing_runner`. There is no Packet A or H.
+Packets **B through G** plus **P** (dual-sidebar peer) and **K** (compaction) run via `testing_runner`. There is no Packet A or H.
 
-This plan is **finished** except one optional follow-up: **Calc deck URP hang** (E12 / G17). Mouse Stop, HITL Change dialog, live DuckDuckGo, and F11/F18 wait mismatches are dropped — not a backlog.
+This plan is **finished**. Mouse Stop, HITL Change dialog, live DuckDuckGo, and F11/F18 wait mismatches are dropped — not a backlog. Packet P (dual Writer+Calc peer) uses the same `open_calc_document` helper as E12/G17.
 
 | Packet | Focus Area | Mode | Status |
 |:------:|------------|:----:|--------|
 | **[Packet B](#packet-b--stop-drain-loop-sendrecord-fsm)** | Stop button, drain loop, Send/Record FSM | Automated (CI) | **Done.** 16 Landed (incl. B13). |
 | **[Packet C](#packet-c--empty--truncated-model)** | Empty / truncated model responses & banners | Automated (CI) | **Done.** 4 Landed. |
 | **[Packet D](#packet-d--reasoning-vs-content)** | Reasoning deltas (`[Thinking]`) vs HTML content | Automated (CI) | **Done.** 4 Landed. |
-| **[Packet E](#packet-e--tools-delegate-hitl-context-refresh)** | Tool loop, nested delegate, HITL, context refresh | Automated (CI) | **Done.** 17 Landed. Optional: E12 Calc hang. |
+| **[Packet E](#packet-e--tools-delegate-hitl-context-refresh)** | Tool loop, nested delegate, HITL, context refresh | Automated (CI) | **Done.** 18 Landed (incl. E12 Calc). |
 | **[Packet F](#packet-f--http--sse-errors-and-hangs)** | HTTP 4xx/5xx errors, socket hangs, SSE quirks | Automated (CI) | **Done.** 15 Landed. |
-| **[Packet G](#packet-g--mocked-audio-and-stt)** | Mocked Record / Stop Rec, `input_audio`, STT | Automated (CI) | **Done.** 20 Landed. Optional: G17 same Calc hang as E12. |
+| **[Packet G](#packet-g--mocked-audio-and-stt)** | Mocked Record / Stop Rec, `input_audio`, STT | Automated (CI) | **Done.** 21 Landed (incl. G17 Calc deck). |
+| **[Packet P](#packet-p--dual-sidebar-peer-673)** | Writer+Calc mock peer round-trip (specialized-inner #673) | Automated (`FILTER=P`) | **Landed** (unit scripts always; live dual deck uses `open_calc_document`). |
+| **[Packet K](#packet-k--sidebar-compaction-712--713)** | Proactive compact, overflow retry, kill switch, death ≠ overflow | Automated (`FILTER=K`) | **Landed.** Chat mode only (Web Research / Librarian share the worker). |
 
 
 
@@ -41,7 +43,7 @@ make mock-llm
 ```
 
 - **Default Endpoint:** `http://127.0.0.1:18766` (MCP uses ports `8765` / `18765`).
-- **Settings Configuration:** In LibreOffice Settings, configure endpoint `http://127.0.0.1:18766`, text model `writeragent-mock`, and enable **Rich Text Control Sidebar**.
+- **Settings Configuration:** In LibreOffice Settings, configure endpoint `http://127.0.0.1:18766`, text model `writeragent-mock`, and enable **Rich Text Control Sidebar**. Compaction resolves that id to a **32768**-token window (`DEFAULT_MODELS` `ids.mock`; also advertised on `GET /v1/models` as `context_length`).
 - **Audio / STT:** The server advertises `input_audio` support on chat completions and lists `writeragent-mock-whisper` for STT. The endpoint `POST /v1/audio/transcriptions` returns canned text (default: `"Hello from the mock microphone."`, configurable via `--transcript`).
 - **Librarian / Smolagents Support:** Phrase matching inspects the `### CURRENT QUERY:` suffix so recovery turns (e.g. `hello` after `crash the stream`) do not match prior conversation history.
 
@@ -62,6 +64,9 @@ The mock server matches incoming user queries (case-insensitive, first match win
 | `think tags` | Emits XML `<think>` markers inside `content`. |
 | `reasoning details` | Emits `reasoning_content` + `reasoning_details`, followed by HTML content. |
 | `fill the sidebar` / `very long` | Emits 40 paragraphs + HTML table + nested lists. |
+| `flood history` / `pad the context` | Packet K: large ASCII pad (hand-test / mock unit). Live Packet K grows `ChatSession` via debug `INFLATE_HISTORY` so the 24k HTML stream does not have to land on `session.messages`. |
+| `overflow once` / `prompt too large once` | Packet K: first **stream** POST returns HTTP 400 `prompt is too long`, then OK. Non-stream summarizer is never this fault. |
+| `llama process died` | Packet K: HTTP 400 `llama-server process has terminated` (process death, not overflow retry). |
 | `outline this` / `use the writer toolset` | Calls `delegate_to_specialized_writer_toolset` (`document_research`). |
 | `empty nested answer` | Specialized delegate emits inner `final_answer` with an empty `answer`. |
 | `endless nested outline` | Specialized delegate loops without finishing until `max_tool_rounds`. |
@@ -69,6 +74,8 @@ The mock server matches incoming user queries (case-insensitive, first match win
 | `two tools` / `in parallel` | Calls `search_in_document` + `get_document_tree` in a single round. |
 | `insert filler` / `append a paragraph` | Calls `apply_document_content` to mutate the document end. |
 | `list sheets` / `list pages` | Calls Calc/Draw list tools (`list_sheets` / `list_pages`) when advertised. |
+| `ask the budget workbook` / `add a Total row` / `peer total` | Packet P: outer delegates `document_research`; inner `send_peer_work / send_peer_result` then `specialized_workflow_finished` immediately. Calc envelope → `write_formula_range` then reply via specialized. |
+| `wait after accepted` / `do not finish peer` | Packet P hang lock: inner sends then never finishes (peer does not start). |
 | `crash the stream` / `error 500` | Returns HTTP 500 JSON error payload. |
 | `rate limit` / `error 429` | Returns HTTP 429 Rate Limit error. |
 | `error 401` / `unauthorized` | Returns HTTP 401 Unauthorized error. |
@@ -87,16 +94,23 @@ The mock server matches incoming user queries (case-insensitive, first match win
 Run scripted tests using `make test-mock-sidebar`. Tests run out-of-process against a live LibreOffice instance via URP.
 
 ```bash
-make test-mock-sidebar                 # Run all automated packets (F, B, C, D, E, G)
+make test-mock-sidebar                 # Run all automated packets (F, B, C, D, E, G, P, K)
 make test-mock-sidebar FILTER=B        # Run Packet B (Stop & Send/Record FSM)
 make test-mock-sidebar FILTER=C        # Run Packet C (Empty/truncated responses)
 make test-mock-sidebar FILTER=D        # Run Packet D (Reasoning vs content)
 make test-mock-sidebar FILTER=E        # Run Packet E (Tools & HITL)
 make test-mock-sidebar FILTER=F        # Run Packet F (HTTP/SSE errors)
 make test-mock-sidebar FILTER=G        # Run Packet G (Mocked audio & STT)
+make test-mock-sidebar FILTER=P        # Packet P only (dual Writer+Calc peer, not the whole soak)
+make test-mock-sidebar FILTER=K        # Packet K only (sidebar compaction smoke)
+make test-mock-sidebar FILTER=p1       # Single peer case
 make test-mock-sidebar FILTER=b13      # Run a single case by ID
+make test-mock-sidebar FILTER=e12      # Calc list_sheets (opens Calc after Writer deck)
+make test-mock-sidebar FILTER=g17      # Calc deck native audio (same open helper as E12)
 make test-mock-sidebar FILTER="B E"    # Run multiple packets
 ```
+
+`FILTER=P` loads only `tests/chatbot/test_mock_llm_peer_sidebar_uno.py` (`test_p1_*` / `test_p2_*`). It does not run Packets B–G.
 
 #### GitHub Actions (PR CI option)
 
@@ -118,8 +132,9 @@ Linux starts a virtual framebuffer (`xvfb-run` + `dbus-run-session`) because `te
 - **Bootstrap (headless `make test-uno`):** Same argv-`Popen` pattern with `--headless`, throwaway `-env:UserInstallation=…`, and `--accept=pipe,…`. Do **not** pass a quoted command string to `officehelper.bootstrap(soffice=…)` — current LibreOffice treats `soffice=` as a single executable path (list `Popen`, no shell); LO 25.2's `shell=True` hid that on Ubuntu CI. Bootstrap failure is a hard fail (exit 1), not a silent SKIP.
 - **Crash Recovery:** `--norestore` suppresses document recovery dialogs that would block the URP pipe.
 - **Sidebar Deck Activation:** Tests dispatch `.uno:SidebarDeck.WriterAgentDeck` to show the deck. When already visible, `showDecks` / `XDeck.activate` is used to prevent accidental toggling.
-- **Thread Guard:** Dev builds set `WRITERAGENT_UNO_THREAD_GUARD=0` in the child process so URP deck dispatch can initialize `ChatPanel`.
+- **Thread Guard:** Dev builds set `WRITERAGENT_UNO_THREAD_GUARD=0` in the child process. Product ChatPanel hops `get_extension_url` onto VCL; `WRITERAGENT_TESTING=1` still inlines that hop, so URP deck dispatch would abort Dummy-N create without this opt-out.
 - **Out-of-Process URP:** Live `SendButtonListener` runs inside `soffice`. Tests drive actions via `uno_click`, query text manipulation, and polling `Enabled` properties. Do not call `processEventsToIdle()` directly on the URP bridge.
+- **Opening Calc after a Writer deck:** Do **not** call `desktop.loadComponentFromURL("private:factory/scalc", …)` from the URP test process. After setup shows the Writer deck, that call never returns (120s watchdog; last mock log is often `GET /v1/models`). File→New Spreadsheet by hand is a different path — it starts on VCL. Use `open_calc_document(ctx)` in [`sidebar_test_hooks.py`](../../plugin/chatbot/sidebar_test_hooks.py): it dispatches `chatbot.debug_sidebar.OPEN_CALC`, which posts `factory/scalc` + `_blank` onto soffice `QueueExecutor` (force-marshal; same Dummy-thread rule as Packet G). The URP client polls `XDesktop.getComponents()` until a Calc model appears. Then `adopt_chat_sidebar(ctx, calc)` shows WriterAgentDeck on that frame. Dual-peer tests must keep Writer open (`_blank`, never `_default`) and close Calc in `finally` if later cases expect the Writer session. Isolated: `make test-mock-sidebar FILTER=e12` (or `FILTER=g17`).
 
 ### 2.4. Test Harness & Hooks Reference
 
@@ -127,7 +142,7 @@ Debug test hooks live in [`plugin/chatbot/sidebar_test_hooks.py`](../../plugin/c
 
 | Hook | Description | Target Use Case |
 |------|-------------|-----------------|
-| `sidebar_panel()` / `send_listener()` | Retrieves active `SendButtonListener` after deck initialization | Base listener access |
+| `sidebar_panel()` / `send_listener()` | Retrieves active `SendButtonListener` after deck initialization. `send_listener(frame)` / `send_listener_for_doc(doc)` pick a dual-deck listener | Base listener access; Packet P |
 | `set_query_text(s)` | Sets query text (`Text = s`) and fires `TEXT_UPDATED` | Initiating sends |
 | `press_send()` | Dispatches `SEND_CLICKED` / Send button action | Starting chat stream |
 | `press_stop()` | Dispatches `STOP_CLICKED` (ActionEvent path) | Cancelling stream (Windows/standard) |
@@ -144,6 +159,8 @@ Debug test hooks live in [`plugin/chatbot/sidebar_test_hooks.py`](../../plugin/c
 | `stub_recorder_child()` | Fakes IPC: `{"status":"ready"}` without opening hardware device. `hang_ready=True` never emits ready (G21 timeout) | Audio init vs recording state |
 | `set_audio_supported(bool)` | Overrides `SendButtonState.audio_supported` | Audio support gating (G8, STT) |
 | `audio_status()` | Returns `AudioRecorderState.status` and `has_audio` | Audio state assertions |
+| `open_calc_document(ctx)` | Posts `factory/scalc` onto soffice VCL (`OPEN_CALC`); polls until a Calc model exists | E12 / G17 / dual-peer Writer+Calc |
+| `adopt_chat_sidebar(ctx, doc)` | Show WriterAgentDeck on *doc*; return `(controls, send_listener)` | Bind Calc (or Writer) deck after open |
 | `press_accept()` | Fires Send action when label is `Accept` | HITL approval |
 | `press_change()` / `press_reject()` | Fires Stop listener `Change` / `Reject` branch | HITL change / rejection |
 | `approval_active()` | Checks if `_approval_event is not None` | HITL state verification |
@@ -245,8 +262,7 @@ Every test must satisfy:
 - **Focus:** Executing UNO mutations on the UI thread during drain, nested agent delegation, Human-in-the-Loop (HITL) approval, document context refresh.
 - **Mode:** Automated (`make test-mock-sidebar FILTER=E`).
 - **Status Summary:**
-  - **Landed:** E1, E3, E4, E5, E6, E7, E8a, E9, E9a, E9b, E9e, E10, E11, E13, E14, E15, E17, E21, E22.
-  - **Optional later:** E12 (Calc URP hang — same as G17).
+  - **Landed:** E1, E3, E4, E5, E6, E7, E8a, E9, E9a, E9b, E9e, E10, E11, E12, E13, E14, E15, E17, E21, E22.
   - **Dropped:** E2 (live net), E8b/E9d (mouse), E9c (Change dialog), E16, E18, E19, E20, E23, E24.
 
 | ID | Mode | Mock / Trigger | Steps / Actions | Expected Pass Behavior | Status / Notes |
@@ -268,13 +284,13 @@ Every test must satisfy:
 | **E9e** | CI | E9 state | Call `press_stop()` ActionEvent | Dispatches Change/Reject branch, NOT `StopSendEffect` | **OK / Landed** |
 | **E10** | CI | Tool follow-up returning 500 | Send tool query | Tool error displayed in transcript; returns to idle; `next_hello_ok()` | **OK / Landed** |
 | **E11** | CI | `insert filler` then `add a comment` | Send as two sequential turns | Both mutations applied; context refreshed between turns; `next_hello_ok()` | **OK / Landed** |
-| **E12** | CI | Calc doc, `list sheets` | Send in Calc sidebar | `list_sheets` executes; HTML wrap-up | **Optional** (URP hang on `factory/scalc` even isolated `FILTER=e12`; GUI two-window Calc chat does not repro) |
+| **E12** | CI | Calc doc, `list sheets` | `open_calc_document` + Calc deck send | Calc tools advertised; `get_sheet_summary` (or `list_sheets` if specialized is on the wire); HTML wrap-up; Writer session restored | **OK / Landed** |
 | **E13** | CI | `add_comment` with mock tool delay | Call `press_stop()` during tool execution | Partial/no mutation; not stuck busy; no UI freeze; `next_hello_ok()` | **OK / Landed** |
 | **E14** | CI | `outline this` | Run delegate twice in succession | Nested agent functions repeatedly without stale session leaks; `next_hello_ok()` | **OK / Landed** |
 | **E15** | CI | `insert filler` | Stop after tool result queued, before HTML | Mutation applied; UI returns to idle; no double drain; `next_hello_ok()` | **OK / Landed** |
 | **E17** | CI | `empty nested answer` | Specialized delegate returns empty answer | Main wrap-up displays clean empty banner; no stale HTML paste-over; `next_hello_ok()` | **OK / Landed** |
 | **E21** | CI | `mixed tools` / `one tool fails` | Send query | `apply_document_content` succeeds while `add_comment` fails; mutation kept, error surfaced; `next_hello_ok()` | **OK / Landed** |
-| **E22** | CI | `endless nested outline` | Specialized delegate never finishes | Triggers max tool budget error; main UI returns to idle; `next_hello_ok()` | **OK / Landed** |
+| **E22** | CI | `endless nested outline` | Specialized delegate never finishes | Triggers max tool budget error; main UI returns to idle; inner `decided_tools` must not include `final_answer` / `specialized_workflow_finished`; `next_hello_ok()` | **OK / Landed** (leftover Calc after E12/P advertises `send_peer_work / send_peer_result`; mock must not take the Packet P finish-immediately path — never-finish / phrase wins so smol hits `chatbot.max_tool_rounds`) |
 
 #### Dropped Cases (Packet E)
 - **E2 (Live DuckDuckGo):** CI must stay offline; E1 covers the research loop.
@@ -328,11 +344,10 @@ Every test must satisfy:
 
 ### Packet G — Mocked Audio and STT
 
-- **Focus:** Dual state machines (`SendButtonState` vs `AudioRecorderState`), mock audio child process via IPC stub (`/tmp/writeragent_stub_recorder.json`), native `input_audio` chat completions, fallback to `/v1/audio/transcriptions` STT.
+- **Focus:** Dual state machines (`SendButtonState` vs `AudioRecorderState`), mock audio child process via IPC stub (`/tmp/writeragent_stub_recorder.json`), native `input_audio` chat completions, fallback to `/v1/audio/transcriptions` STT. Empty STT (G27) finishes via `SEND_COMPLETED`; STT HTTP error (G28) and chat 500 (G13) finish via `ERROR_OCCURRED`. Both events must clear `has_audio` — the WAV is already deleted, and leaving the flag True leaves a dead Send button.
 - **Mode:** Automated (`make test-mock-sidebar FILTER=G`).
 - **Status Summary:**
-  - **Landed:** G1–G16, G21, G27, G28, G29.
-  - **Optional later:** G17 (same Calc URP hang as E12).
+  - **Landed:** G1–G17, G21, G27, G28, G29.
   - **Dropped:** G18 (HITL Record), G19–G26, G30.
 
 | ID | Mode | Mock / Trigger | Steps / Actions | Expected Pass Behavior | Status / Notes |
@@ -353,7 +368,7 @@ Every test must satisfy:
 | **G14** | CI | Missing / 0-byte WAV | Record → Stop Rec with missing WAV | Send aborted or error surfaced; returns to idle; `next_hello_ok()` | **OK / Landed** |
 | **G15** | CI | Active recording | Call `press_send()` while recording | FSM ignores Send; recording continues; Stop Rec then send succeeds | **OK / Landed** |
 | **G16** | CI | Rapid retake | Record → Stop Rec → immediately Record again | Second recording replaces previous audio; single in-flight capture | **OK / Landed** |
-| **G17** | CI | Calc deck | G1 flow in Calc sidebar | Native audio path functions on Calc deck | **Optional** (same Calc URP hang as E12) |
+| **G17** | CI | Calc deck | G1 flow after `open_calc_document` | Native audio path functions on Calc deck; Writer session restored | **OK / Landed** |
 | **G18** | CI | HITL active | Call `press_record()` during HITL approval | Record ignored (approval owns button states); E9 flow remains valid | **Dropped** (HITL; E9 covers approval buttons) |
 | **G21** | CI | Stub hang (`hang_ready`) | Record with child that never reports `ready` | Init timeout fires; `audio_status` error; returns to idle Send; `next_hello_ok()` | **OK / Landed** |
 | **G27** | CI | STT empty text | STT returns empty string from valid WAV | Query stays empty; no chat send; returns to idle; `next_hello_ok()` | **OK / Landed** |
@@ -368,6 +383,42 @@ Every test must satisfy:
 - **G23–G24 (Corrupt / 0-byte WAV):** Folded into G14.
 - **G25–G26 (Late WAV timing races):** Flaky over URP; covered by unit tests.
 - **G30 (Stale WAV cleanup):** Covered by G16.
+
+---
+
+### Packet P — Dual-sidebar peer (#673)
+
+- **Focus:** Writer + Calc sidebars sharing one process-global mock OpenAI server. Scripts branch on advertised tools, `[Peer from:]` envelopes, and the specialized-inner wire.
+- **Mode:** Automated (`make test-mock-sidebar FILTER=P`). Unit scripts always run in `make pytest` (`tests/scripts/test_mock_llm_server.py`).
+- **Protocol locked:** outer main delegates `document_research` (never advertises `send_peer_work / send_peer_result`); inner `send_peer_work / send_peer_result` then `specialized_workflow_finished` immediately; Calc does `write_formula_range` then delegates to reply with `envelope kind (work/result)`.
+- **Calc open:** same `open_calc_document` / `adopt_chat_sidebar` helper as E12/G17 (VCL-posted `factory/scalc` + `_blank`; keep Writer open). Never `loadComponentFromURL("private:factory/scalc")` from the URP client after a Writer deck. After Writer Ready, P1 dispatches `KICK_PEERS` so soffice starts the queued extracted send. If dual decks cannot be wired, P1–P3 SkipTest — unit scripts still lock finish-after-accepted, reply-via-specialized, and busy-then-queue.
+
+| ID | Mode | Mock / Trigger | Steps / Actions | Expected Pass Behavior | Status / Notes |
+|:--:|:----:|----------------|-----------------|------------------------|:--------------:|
+| **P1** | mock-sidebar | `Ask the budget workbook to add a Total row` | Dual decks; Writer send | Both Ready; Calc wrote Total; Writer saw reply; finish immediately after accepted; no outer `send_peer_work / send_peer_result` | **Landed** (SkipTest if Calc deck cannot open) |
+| **P2** | mock-sidebar | `wait after accepted then hang` | Writer send; assert before max_steps | Specialized stays in discovery after accepted; Calc does not `write_formula_range` (inject-now envelope is OK) | **Landed** (same skip) |
+| **P3** | mock-sidebar + unit | Writer Ready, then `keep talking` (slow SSE); `KICK_PEERS` after Stop enabled | Writer busy when Calc `send_peer_work / send_peer_result`s | Reply queues (no inject); after Stop/Ready + kick, extracted send starts | **Landed** (live may SkipTest if dual-deck Send misses ramble; units `test_p3_*` always lock; E12 follow-up if Calc deck missing). Calc reply specialized task is the scripted `Reply to the peer envelope … envelope kind (work/result)=` string — mock peer-inner must match that, not only inbound "add a total row", or leftover-Calc discovery (`list_nearby_files`) finishes without a reply. |
+
+See [peer-messaging.md](../chat/peer-messaging.md#dual-mock-peer-tests).
+
+---
+
+### Packet K — Sidebar compaction (#712 + #713)
+
+- **Focus:** Proactive compact at the tiered threshold, overflow compact-and-retry (≤3), kill switch, process death ≠ overflow. Chat mode only.
+- **Mode:** Automated (`make test-mock-sidebar FILTER=K`). Unit scripts in `make pytest` (`tests/scripts/test_mock_llm_server.py`, `tests/chatbot/test_compaction.py`).
+- **Window:** `writeragent-mock` is in `DEFAULT_MODELS` (`ids.mock`, `context_length` 32768) so `resolve_context_window` has a denominator. 8192 left `keep=None` against the live Writer system prompt plus 14 tool schemas. Not Hermes 256k. `chat_max_tokens` is not subtracted.
+- **History grow:** URP Packet K calls debug `INFLATE_HISTORY` (`sidebar_test_hooks.inflate_sidebar_history`) to pad `ChatSession.messages` in soffice. Streaming `flood history` through the rich control was not a reliable way to land those bytes on the model-facing list. The URP client puts the dispatch document's `RuntimeUID` on the debug URL (`INFLATE_HISTORY&uid=`). Soffice inflate/snapshot look up that panel via the production live-panel map — not soffice `getCurrentComponent()` (leftover Calc after Packet P / E12 is often still current there) and not WeakSet[0]. Returning `panels[0]` padded the wrong `ChatSession` while URP Send clicked Writer (CI: `n_messages=2`, no summarizer, no overflow respawn). Packet K re-adopts Writer and pins `writeragent-mock` on those same controls so slash-LRU ids cannot `no_window` the send path.
+- **Summarizer:** non-stream `request_with_tools` with the compaction system prompt returns a canned summary. Phrase matching does **not** run on dumped `<conversation>` history.
+
+| ID | Mode | Mock / Trigger | Steps / Actions | Expected Pass Behavior | Status / Notes |
+|:--:|:----:|----------------|-----------------|------------------------|:--------------:|
+| **K1** | CI | `INFLATE_HISTORY` then `hello` | Grow ChatSession past 32768×75%; send | Mock saw a non-stream summarizer; hello stream has `[CONVERSATION SUMMARY]` (not raw full history); `next_hello_ok()` | **OK / Landed** |
+| **K2** | CI | `INFLATE_HISTORY` then `overflow once` | First stream HTTP 400 `prompt is too long` | Worker respawns with force compact; succeeds on retry (2–3 stream POSTs); `next_hello_ok()` | **OK / Landed** |
+| **K3** | CI | `chat_compaction_enabled: false`, `overflow once` | Send overflow phrase | No summarizer; no respawn; today's `[API error: … prompt is too long]` path; restore flag; `next_hello_ok()` | **OK / Landed** |
+| **K4** | CI | `llama process died` | Send death phrase | No compact retry; error surfaced; `next_hello_ok()` | **OK / Landed** |
+
+Smol ReAct web-research subagent compaction is out of scope.
 
 ---
 

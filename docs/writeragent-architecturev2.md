@@ -89,7 +89,7 @@ The context discipline is equally strict: use the extension's `self.ctx` / `get_
 
 #### Parsing Layer: JSON Repair and Robust Tool Recovery
 
-Model output is messy, so `safe_json_loads` (`plugin/framework/json_utils.py`) tries, in order: standard `json.loads`, `strict=False`, `ast.literal_eval` (Python reprs like `True`/`None`), then vendored `json_repair` (truncated JSON, trailing commas, unquoted keys). A pre-step repairs LaTeX sequences (`\times` → `\\times`) that collide with JSON escapes. Streamed SSE is normalized by `iterate_sse`; leaked chat-template control tokens (`<|...|>`) are stripped; and a Hermes-inspired client-side tool-call parser registry (`plugin/contrib/tool_call_parsers/`) recovers `<tool_call>` fragments for Hermes/Qwen/DeepSeek/Mistral/Llama/Kimi/GLM models without any VLLM dependency.
+Model output is messy, so `safe_json_loads` (`plugin/framework/json_utils.py`) tries, in order: standard `json.loads`, `strict=False`, `ast.literal_eval` (Python reprs like `True`/`None`), then vendored `json_repair` (truncated JSON, trailing commas, unquoted keys). A pre-step repairs LaTeX sequences (`\times` → `\\times`) that collide with JSON escapes. Streamed SSE is normalized by `iterate_sse`; leaked chat-template control tokens (`<|...|>`) are stripped; and a Hermes-style client-side tool-call parser (`plugin/contrib/tool_call_parsers/`) recovers tool markup (`<tool_call>...`) from finished assistant text without any VLLM dependency. Parsers run after the HTTP response or stream ends when native `tool_calls` are missing.
 
 #### Transport Layer: Two Runtimes, One HTTP Client
 
@@ -190,7 +190,7 @@ Internationalization in WriterAgent extends far beyond translating user-interfac
 
 #### The "Lab": Internal Evaluation
 
-An in-LibreOffice **LLM Evaluation Suite** benchmarks models on real Writer/Calc/Draw tasks, scoring structural tasks against **result oracles** (exported HTML/Draw-tree/Calc grid) and creative tasks with an **LLM judge**. Models are ranked by **Value (C²/$)** — average correctness² ÷ average dollars per run using live OpenRouter pricing. A **DSPy MIPROv2** loop (`scripts/prompt_optimization/run_optimize.py`) searches instruction variants of the system prompt to maximize judge quality, feeding the results back into the shipped prompts.
+An in-LibreOffice **LLM Evaluation Suite** benchmarks models on real Writer/Calc/Draw tasks, scoring structural tasks against **result oracles** (exported HTML/Draw-tree/Calc grid) and creative tasks with an **LLM judge**. Models are ranked by **Value (C²/$)** — average correctness² ÷ average dollars per run using live OpenRouter pricing. A **DSPy MIPROv2** loop (`scripts/prompt_optimization/run_optimize.py`) is an **offline** optimizer: default student is the live `llm_chat_eval` tool loop, rewriting a named prompt/tool slice (not ReAct on the sidebar). Winning text is copied by hand after a ranking re-run.
 
 #### Cross-Document Intelligence
 

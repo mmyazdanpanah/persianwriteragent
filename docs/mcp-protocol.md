@@ -106,9 +106,13 @@ Browser MCP clients send an `Origin` header (e.g. `https://localai.local`). The 
 
 Homelab / LocalAI setups typically need **no** entries in `mcp.cors_allowed_origins`. Implementation: [`plugin/mcp/cors.py`](../plugin/mcp/cors.py).
 
+**Origin ACL (shipped):** If `Origin` is present and **not** `is_safe_origin()`, every method and path (`/mcp`, `/health`, `/debug`, …) returns **HTTP 403**, empty body, **no** `Access-Control-*` headers. Requests with **no** `Origin` (Claude Code, curl, most MCP clients) are unchanged. Loopback and private/LAN defaults stay as above — this is not Nelson’s empty allow list. Implementation: `origin_is_forbidden` / `reject_forbidden_origin` in [`plugin/mcp/cors.py`](../plugin/mcp/cors.py). Tests: [`tests/mcp/test_cors.py`](../tests/mcp/test_cors.py).
+
+**Session (shipped):** One `Mcp-Session-Id` for the whole soffice process, minted on first successful `initialize` and never rotated. `DELETE /mcp` returns **405** (`Allow: GET, POST, OPTIONS`) and does **not** terminate that id — every client shares it. A later POST/GET whose `Mcp-Session-Id` does not match (LibreOffice restarted, or a second `initialize` used to rotate the id) returns **HTTP 404** JSON-RPC `INVALID_REQUEST` (“Session expired… Call initialize again.”). Spec clients recover on 404, not 409. Missing session header is still allowed (CLI / curl / first contact). `initialize` with a stale or missing id is always allowed.
+
 **Troubleshooting — OPTIONS succeeds but MCP never connects**
 
-1. In the browser Network tab, confirm a **`POST /mcp`** appears **after** OPTIONS. If POST is missing, the browser rejected preflight (wrong `Allow-Headers`, missing `Allow-Origin`, or non-loopback `Origin`).
+1. In the browser Network tab, confirm OPTIONS is **204** (not **403**) and a **`POST /mcp`** appears after it. **403** means `Origin` is present and not on the allow list. If OPTIONS is 204 but POST is missing, the browser rejected preflight (wrong `Allow-Headers` or missing `Allow-Origin`).
 2. On POST, check response headers include **`Mcp-Session-Id`** (after `initialize`) and **`Mcp-Protocol-Version`**, and that **`Access-Control-Expose-Headers`** lists both (otherwise JS cannot read them).
 3. Ensure the client URL includes the **`/mcp`** path and MCP is enabled in Settings.
 
@@ -116,7 +120,7 @@ Homelab / LocalAI setups typically need **no** entries in `mcp.cors_allowed_orig
 
 | Log line | Meaning |
 |----------|---------|
-| `[MCP-CORS] OPTIONS /mcp … safe=False` or `allow_origin=omit` | Origin not allowed — enable `mcp.cors_allow_private_origins` or add host to `mcp.cors_allowed_origins` in `writeragent.json`. |
+| `[MCP-CORS] … Origin … forbidden — HTTP 403` | Origin present and not allowed — enable `mcp.cors_allow_private_origins` or add host to `mcp.cors_allowed_origins` in `writeragent.json`. |
 | `[MCP-CORS] OPTIONS /mcp` only, **no** `[MCP-HTTP] POST /mcp` | Preflight reached server; **POST never arrived** (CORS or client config). |
 | `[MCP-HTTP] POST /mcp` but **no** `[MCP] <<< initialize` | POST hit HTTP layer then failed parsing, routing, or protocol version (see `rejected unsupported Mcp-Protocol-Version`). |
 | `[MCP-HTTP] POST /mcp` + `[MCP] <<< initialize` + `[MCP] >>> initialize -> 200` | Server side OK; failure is likely in the host app reading session headers or later JSON-RPC calls. |
@@ -425,7 +429,7 @@ The MCP server is **implemented and opt-in** (default off). Live summary (paths 
   - **Preferred:** `document_url` in `tools/call` arguments (popped before tool dispatch). Best for multi-document clients (Cursor, Hermes, custom agents).
   - **Fallback:** `X-Document-URL` HTTP header.
   - **RuntimeUID:** `document_url` may be a file URL **or** session `RuntimeUID` (untitled docs). Discover via `list_open_documents` (`url` + `uid`).
-  - **Per-result echo / mutation gates:** resolved target echoed as `document: {name, uid}` when the tool does not supply its own; concurrent mutating calls serialize per `uid:` / `url:` key. See `_resolve_mcp_doc_key` / `_mcp_tools_call` in `mcp_protocol.py`.
+  - **Per-result echo / mutation gates:** resolved target echoed as `document: {name, uid}` when the tool does not supply its own; concurrent mutating calls serialize per `uid:` / `url:` key. See `_resolve_mcp_doc_key` / `_mcp_tools_call` in `mcp_protocol.py`. Writer heading-tree / proximity / FTS caches share that `uid:` / `url:` identity (`DocumentService.doc_key`); document edits and unload emit `document:cache_invalidated`.
   - Companion guidance: https://github.com/KeithCu/cursor-libreoffice , https://github.com/KeithCu/libreoffice-skill
 - **Config:** `mcp.mcp_enabled` (default false), `mcp.mcp_port` (default **18765**) in [`plugin/framework/config.py`](../plugin/framework/config.py) / `writeragent.json`.
 - **UI:** Settings Page 1 (enable + port); menu Toggle / Status under WriterAgent; auto-start when Settings saves with MCP enabled.
@@ -499,7 +503,7 @@ Use **`POST /mcp`** with JSON-RPC 2.0:
 
 - **`initialize`** — protocol handshake; `result.instructions` starts with the host machine's local date/time (zero tool calls), then lean tool-choice guidance (multi-doc targeting, document-type filter on `tools/list`), a mode hint, and a pointer to `get_guidance(topic)`, the on-demand behavioral manual (not the full sidebar system prompt). Sidebar chat date injection is unchanged and separate.
 - **`tools/list`** — core-tier tools for the target document (`X-Document-URL` header or active document). Each tool has `name`, `description`, and `inputSchema`. Specialized domains are documented on **`delegate_to_specialized_{writer|calc|draw}_toolset`** (see [Where delegation guidance lives](#where-delegation-guidance-lives-mcp-vs-sidebar-chat)).
-- **`tools/call`** — request → execute → JSON-RPC result. Document targeting (`document_url` / active doc) happens inside the executor on the LibreOffice main thread; long-running tool bodies then run on the HTTP worker.
+- **`tools/call`** — request → execute → JSON-RPC result. Document targeting (`document_url` / active doc) happens inside the executor on the LibreOffice main thread; long-running tool bodies then run on the HTTP worker. A failed tool is an MCP **tool result** (`isError`, `TOOL_EXECUTION_ERROR` or the tool's own code), HTTP 200 — not JSON-RPC `INTERNAL_ERROR` / HTTP 500. Clients treat HTTP 500 as transient and retry (Hermes retried `apply_style` ~150× in 0.5s). `BusyError` stays HTTP 429; timeouts stay 504.
 
 Supporting HTTP routes: **`GET /health`**, **`GET /`** (server info and `mcp_endpoint` when enabled—not agent instructions).
 
@@ -659,7 +663,9 @@ to its own embedded AI:
 **Writer**: `get_document_content` (`scope`, `max_chars`, `start`/`end`, `include_images` — default strips inline `data:image` base64), `apply_document_content`, `find_text`,
 `style_list`, `style_get_info`, `comment_list`, `add_comment`, `comment_delete`,
 `track_changes_start` / `stop` / `list` / `show`, `manage_tracked_changes`,
-`table_list`, `table_get_cells`, `table_set_cell`, `manage_table_structure`,
+`table_list`, `table_get_cells`, `table_set_cell`,
+`manage_table_structure`,
+`table_insert`, `table_delete`,
 `image_generate` (create or edit with `source_image='selection'`).
 
 **Calc / Draw**: Core-tier tools registered from `plugin/calc/` and `plugin/draw/` (same registry MCP `tools/list` uses).
@@ -687,11 +693,12 @@ The mutating edit tools return **structured, machine-readable fields** alongside
 
 **`apply_document_content`** (search path)
 - `replaced_count` — how many occurrences were actually replaced. **`replaced_count: 0` returns `status: "error"`** (a search that matched nothing is no longer a silent "ok"); `> 0` returns `status: "ok"`.
+- `occurrence` — optional 0-based selector for one replaceable Writer text match when `target="search"`; it cannot be combined with `all_matches=true`. Successful edits (replace and `position=before/after`) echo `occurrence`. Out of range uses `code: OCCURRENCE_OUT_OF_RANGE` and `use 0..N-1`. Empty replaceable ranges fall through to the existing miss / drawing-shape path (same as omitting `occurrence`).
 - If a replacement raises mid-`all_matches`, the existing abort behavior stands (no partial-replace handling — the call surfaces the error).
 
 **`apply_style`** — `applied` (bool), `target`, and `matched` (only when `target="search"`; a search miss returns `status:"error"`, `applied:false`, `matched:false`).
 
-**`add_comment`** — `matched` (anchor found) and `comment_added`; an anchor miss returns `status:"error"`. `anchor_text` is echoed on success.
+**`add_comment`** — `matched` (anchor found) and `comment_added`; an anchor miss returns `status:"error"`. `anchor_text` is echoed on success. Success also returns `name` (LibreOffice annotation Name) so a later call can reply. Optional `parent_name` (the `name` from `comment_list`) creates a threaded reply at that **immediate** parent — not coerced to the thread root — and skips `search` / `occurrence`. The parent stays unresolved; `comment_resolve` is the reply-and-resolve path. A reply success payload includes `parent_name`.
 
 These fields are intended for clients to avoid parsing message strings; branch on `replaced_count` / `applied` / `comment_added`. Search no-ops now return `status:"error"` so clients do not treat missed edits as successful mutations.
 
@@ -939,7 +946,10 @@ Parameters: `pattern` (required), `regex` (default **false**), `case_sensitive` 
 no shapes/comments). Invalid regex with zero hits returns `code: INVALID_REGEX`.
 
 `apply_document_content` `dry_run=true` previews edit-reachable matches plus shape/comment counts
-(see `edit_reach_note` in the result). Regex on the edit path uses the same INVALID_REGEX check.
+(see `edit_reach_note` in the result). Replaceable body/table/frame rows include `occurrence` (0-based,
+the index to pass back); shape/comment rows do not. `replaceable_count` is the edit-path index space.
+An out-of-range `occurrence` returns `OCCURRENCE_OUT_OF_RANGE` with those `matches` in `details` so the
+caller can recover. Regex on the edit path uses the same INVALID_REGEX check.
 
 #### 4b. (historical) Collabora `context_paragraphs` comparison
 

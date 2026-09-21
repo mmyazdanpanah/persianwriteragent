@@ -85,10 +85,318 @@ def _resolve_cell_name(table: Any, raw: str) -> str | None:
     return None
 
 
+def _service_named(obj: Any, name: str) -> bool:
+    """True if *obj* supports *name*. Prefer supportsService; fall back to names."""
+    try:
+        ss = getattr(obj, "supportsService", None)
+        if callable(ss):
+            return bool(ss(name))
+    except Exception:
+        pass
+    try:
+        return name in (obj.getSupportedServiceNames() or ())
+    except Exception:
+        return False
+
+
+def _is_text_table(obj: Any) -> bool:
+    """True for a Writer TextTable."""
+    return _service_named(obj, "com.sun.star.text.TextTable")
+
+
+def _container_xtext(obj: Any) -> Any | None:
+    """Inner XText of a TextFrame or TextSection, else None.
+
+    A table inside one of these still lives in the host cell — setString on
+    the cell would destroy it — so discovery walks through the container.
+    """
+    if not (
+        _service_named(obj, "com.sun.star.text.TextFrame")
+        or _service_named(obj, "com.sun.star.text.TextSection")
+    ):
+        return None
+    try:
+        inner = obj.getText() if hasattr(obj, "getText") else obj
+    except Exception:
+        inner = obj
+    return inner
+
+
+def _iter_direct_children(xtext: Any):
+    """Yield each element of *xtext*'s XEnumeration (one level, no recurse)."""
+    try:
+        enum = xtext.createEnumeration()
+    except Exception:
+        return
+    while True:
+        try:
+            if not enum.hasMoreElements():
+                break
+            yield enum.nextElement()
+        except Exception:
+            return
+
+
+def _iter_text_frames_in_para(para: Any):
+    """As-character TextFrames in *para* (portion property ``TextFrame``).
+
+    Probed: a frame in a cell is not an XEnumeration sibling — the cell enum
+    is only Paragraph; the frame hangs off a portion.
+    """
+    try:
+        enum = para.createEnumeration()
+    except Exception:
+        return
+    while True:
+        try:
+            if not enum.hasMoreElements():
+                break
+            portion = enum.nextElement()
+        except Exception:
+            return
+        try:
+            frame = portion.getPropertyValue("TextFrame")
+        except Exception:
+            continue
+        if frame is not None:
+            yield frame
+
+
+def _walk_xtext_siblings(xtext: Any, *, into_containers: bool = True):
+    """Yield ``('table', obj)`` or ``('para', obj)`` from *xtext*.
+
+    When *into_containers* is true (cell / body), follow TextFrame /
+    TextSection siblings and as-character ``TextFrame`` portions. Once
+    inside a container, leave it false so the frame's own portions do not
+    re-enter the same frame (UNO hands back a new proxy each time).
+    """
+    for element in _iter_direct_children(xtext):
+        if _is_text_table(element):
+            yield ("table", element)
+            continue
+        if into_containers:
+            inner = _container_xtext(element)
+            if inner is not None:
+                yield from _walk_xtext_siblings(inner, into_containers=False)
+                continue
+            for frame in _iter_text_frames_in_para(element):
+                nested = _container_xtext(frame)
+                if nested is not None:
+                    yield from _walk_xtext_siblings(nested, into_containers=False)
+        yield ("para", element)
+
+
+def _cell_hosted_table_names(cell: Any) -> list[str]:
+    """Names of TextTables hosted in *cell* (direct or via frame/section).
+
+    Writer nests a TextTable as a sibling of the cell's paragraphs — not via
+    anchors or geometry. Empty if the cell cannot be enumerated (plain fakes,
+    covered/merged cells). Used by set/delete guards so they scan one cell,
+    not the whole document.
+    """
+    names: list[str] = []
+    for kind, obj in _walk_xtext_siblings(cell):
+        if kind != "table":
+            continue
+        try:
+            nested_name = str(obj.getName() or "")
+        except Exception:
+            nested_name = ""
+        if nested_name:
+            names.append(nested_name)
+    return names
+
+
+def _cell_plain_siblings(cell: Any) -> str:
+    """Host-cell paragraph text only — skips nested tables' getString() dump."""
+    parts: list[str] = []
+    for kind, obj in _walk_xtext_siblings(cell):
+        if kind != "para":
+            continue
+        try:
+            part = obj.getString()
+        except Exception:
+            part = ""
+        if part:
+            parts.append(str(part))
+    return "\n".join(parts)
+
+
+def _cell_matrix_text(cell: Any) -> str:
+    """Cell text for table_get_cells: host cells omit concatenated inner-table text."""
+    if _cell_hosted_table_names(cell):
+        return _cell_plain_siblings(cell)
+    try:
+        return cell.getString()
+    except Exception:
+        return ""
+
+
+def _set_host_paragraphs(cell: Any, text: str) -> None:
+    """Rewrite the cell's own paragraph siblings; leave tables and frames.
+
+    Direct children only — do not rewrite text inside a frame/section (that
+    would be a different XText). No paragraphs: insert at getStart() so a
+    caption lands before a table that table_insert placed at getEnd().
+    """
+    paras: list[Any] = []
+    for element in _iter_direct_children(cell):
+        if _is_text_table(element) or _container_xtext(element) is not None:
+            continue
+        paras.append(element)
+    if not paras:
+        cell.insertString(cell.getStart(), text, False)
+        return
+    paras[0].setString(text)
+    for extra in paras[1:]:
+        extra.setString("")
+
+
+def range_hosted_nested_tables(text_range: Any) -> list[str]:
+    """Nested table names that setString on *text_range* would destroy.
+
+    Only when the range lives inside a table cell (cursor ``TextTable`` is
+    set). Body XText tables are top-level — a body search-replace must not
+    be treated as a host-cell wipe.
+    """
+    try:
+        text_obj = text_range.getText()
+        cur = text_obj.createTextCursorByRange(text_range.getStart())
+        if cur.getPropertyValue("TextTable") is None:
+            return []
+    except Exception:
+        return []
+    return _cell_hosted_table_names(text_obj)
+
+
+def raise_if_range_hosts_nested_table(text_range: Any) -> None:
+    """Refuse a rewrite that would setString a host cell (wipes nested tables)."""
+    hosted = range_hosted_nested_tables(text_range)
+    if not hosted:
+        return
+    from plugin.framework.errors import ToolExecutionError
+
+    raise ToolExecutionError(
+        "This range is in a table cell that contains nested table(s) %s. "
+        "Use table_set_cell for the host cell's own paragraphs, or "
+        "edit those tables by name — apply_document_content would delete them."
+        % ", ".join(hosted)
+    )
+
+
+def _not_nested() -> dict[str, Any]:
+    return {"is_nested": False, "parent_table": None, "parent_cell": None}
+
+
+def _writer_nesting(doc: Any) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, list[str]]]]:
+    """One pass: child name -> nesting dict, parent name -> {cell: [child names]}.
+
+    Direct parent only — a grandchild reports the mid table, not the outer.
+    """
+    tables = _tables(doc)
+    names = list(tables.getElementNames())
+    child_nesting: dict[str, dict[str, Any]] = {}
+    hosted: dict[str, dict[str, list[str]]] = {}
+
+    for parent_name in names:
+        try:
+            parent = tables.getByName(parent_name)
+            cell_names = parent.getCellNames()
+        except Exception:
+            continue
+        for cell_name in cell_names:
+            try:
+                cell = parent.getCellByName(cell_name)
+            except Exception:
+                continue
+            children = _cell_hosted_table_names(cell)
+            if not children:
+                continue
+            hosted.setdefault(parent_name, {})[cell_name] = children
+            for child_name in children:
+                if child_name == parent_name:
+                    continue
+                child_nesting[child_name] = {
+                    "is_nested": True,
+                    "parent_table": parent_name,
+                    "parent_cell": cell_name,
+                }
+
+    for name in names:
+        child_nesting.setdefault(name, _not_nested())
+    return child_nesting, hosted
+
+
+def _nesting_for(doc: Any, name: str) -> dict[str, Any]:
+    """Direct-parent nesting dict for one table name (missing -> not nested)."""
+    nesting_by_name = _writer_nesting(doc)[0]
+    return nesting_by_name.get(name, _not_nested())
+
+
+def _is_wrong_start_node(exc: BaseException) -> bool:
+    """True for the body-XText + cursor-in-cell insert failure.
+
+    ``doc.getText().insertTextContent(viewCursor, table)`` raises when the
+    cursor already sits in a nested XText (table cell, frame). The usual
+    wording is ``End of content node doesn't have the proper start node``.
+    """
+    msg = str(exc).lower()
+    return "start node" in msg or "content node" in msg
+
+
+def _remove_writer_table(doc: Any, table: Any, name: str, nesting: dict[str, Any]) -> None:
+    """Remove a TextTable from the XText that contains it (body or host cell).
+
+    Prefer ``getAnchor()`` (same pattern as bookmarks). If that is unusable,
+    fall back to nesting: host cell for nested tables, ``doc.getText()`` for
+    top-level. Deleting a host table also destroys nested children — that is
+    intentional (``table_delete``), unlike the row/column refuse-guards.
+    """
+    try:
+        table.getAnchor().getText().removeTextContent(table)
+        return
+    except Exception:
+        log.debug("table.getAnchor() remove failed for '%s'; using nesting fallback", name, exc_info=True)
+    if nesting.get("is_nested"):
+        parent = _get_table(doc, str(nesting.get("parent_table") or ""))
+        host = parent.getCellByName(str(nesting.get("parent_cell") or ""))
+        host.removeTextContent(table)
+        return
+    doc.getText().removeTextContent(table)
+
+
+def _hosted_in_band(table: Any, axis_arg: str, idx: int) -> list[str]:
+    """Nested table names hosted in the row/column about to be deleted.
+
+    Local to that band (getCellByPosition, then the computed A1 name).
+    """
+    rows, cols = _dims(table)
+    hosted: list[str] = []
+    coords = ((c, idx) for c in range(cols)) if axis_arg == "row" else ((idx, r) for r in range(rows))
+    for c, r in coords:
+        cell = None
+        try:
+            cell = table.getCellByPosition(c, r)
+        except Exception:
+            try:
+                cell = table.getCellByName(_cell_name(c, r))
+            except Exception:
+                continue
+        hosted.extend(_cell_hosted_table_names(cell))
+    # Preserve first-seen order (a band can host more than one nested table).
+    seen: list[str] = []
+    for name in hosted:
+        if name not in seen:
+            seen.append(name)
+    return seen
+
+
 class TableList(ToolWriterTableBase):
     name = "table_list"
     description = (
-        "List tables with name and dimensions (rows x columns). Writer: text-table names. "
+        "List tables with name and dimensions (rows x columns). Writer: text-table names; each "
+        "row includes nesting (direct parent table/cell) and nested_in_cells (host cells that "
+        "contain nested tables — table_set_cell keeps those tables; do not delete the host row/column). "
         "Draw/Impress: also page and shape index."
     )
     is_mutation = False
@@ -102,10 +410,17 @@ class TableList(ToolWriterTableBase):
                 out = list_draw_tables(ctx.doc)
                 return {"status": "ok", "count": len(out), "tables": out}
             tables = _tables(ctx.doc)
+            nesting_by_name, hosted = _writer_nesting(ctx.doc)
             out = []
             for name in tables.getElementNames():
                 rows, cols = _dims(tables.getByName(name))
-                out.append({"name": name, "rows": rows, "cols": cols})
+                out.append({
+                    "name": name,
+                    "rows": rows,
+                    "cols": cols,
+                    "nesting": nesting_by_name.get(name, _not_nested()),
+                    "nested_in_cells": hosted.get(name, {}),
+                })
             return {"status": "ok", "count": len(out), "tables": out}
         except Exception as e:
             log.exception("Could not list tables")
@@ -116,8 +431,11 @@ class TableGetCells(ToolWriterTableBase):
     name = "table_get_cells"
     description = (
         "Return a table's cell text as a row-major matrix (matrix[row][col]) by position — not by "
-        "cell name. Use matrix indices to read values; for table_set_cell use Writer cell names from "
-        "table_set_cell error hints (columns A..Z then a..z past column 26, not spreadsheet AA)."
+        "cell name. Writer host cells that contain nested tables return only the host cell's own "
+        "paragraphs (not concatenated inner-table text); nested_in_cells names those cells. "
+        "Use matrix indices to read values; for table_set_cell use Writer cell names from "
+        "table_set_cell error hints (columns A..Z then a..z past column 26, not spreadsheet AA). "
+        "table_set_cell on a host cell updates that host text and leaves nested tables."
     )
     is_mutation = False
     parameters = {
@@ -160,15 +478,24 @@ class TableGetCells(ToolWriterTableBase):
                     # (merged/covered cells have no addressable cell).
                     val = ""
                     try:
-                        val = table.getCellByPosition(c, r).getString()
+                        val = _cell_matrix_text(table.getCellByPosition(c, r))
                     except Exception:
                         try:
-                            val = table.getCellByName(_cell_name(c, r)).getString()
+                            val = _cell_matrix_text(table.getCellByName(_cell_name(c, r)))
                         except Exception:
                             val = ""
                     row.append(val)
                 matrix.append(row)
-            return {"status": "ok", "table_name": name, "rows": rows, "cols": cols, "matrix": matrix}
+            nesting_by_name, hosted = _writer_nesting(ctx.doc)
+            return {
+                "status": "ok",
+                "table_name": name,
+                "rows": rows,
+                "cols": cols,
+                "matrix": matrix,
+                "nesting": nesting_by_name.get(name, _not_nested()),
+                "nested_in_cells": hosted.get(name, {}),
+            }
         except ValueError as ve:
             return self._tool_error(str(ve))
         except Exception as e:
@@ -179,8 +506,11 @@ class TableGetCells(ToolWriterTableBase):
 class TableSetCell(ToolWriterTableBase):
     name = "table_set_cell"
     description = (
-        "Set the plain-text content of ONE table cell, addressed A1-style (e.g. 'B2'). Replaces the "
-        "cell's text and any in-cell formatting (setString). Not a tracked change even when review mode is on."
+        "Set the plain-text content of ONE table cell, addressed A1-style (e.g. 'B2'). "
+        "A normal cell is replaced with setString (clears in-cell formatting). "
+        "A cell that hosts a nested table keeps that table and rewrites only the host "
+        "paragraphs. Edit the nested table by its own name. "
+        "Not a tracked change even when review mode is on."
     )
     is_mutation = True
     parameters = {
@@ -227,6 +557,19 @@ class TableSetCell(ToolWriterTableBase):
                 return self._tool_error(
                     "Cell '%s' not in table '%s'. Its cells are: %s." % (cell_raw, name, sample))
             cell = table.getCellByName(cell_name)
+            # setString wipes nested TextTables. Rewrite host paragraphs instead.
+            nested = _cell_hosted_table_names(cell)
+            if nested:
+                old = _cell_plain_siblings(cell)
+                _set_host_paragraphs(cell, str(text))
+                return {
+                    "status": "ok",
+                    "table_name": name,
+                    "cell": cell_name,
+                    "old_text": old,
+                    "new_text": str(text),
+                    "nested_tables": nested,
+                }
             old = cell.getString()
             cell.setString(str(text))
             return {"status": "ok", "table_name": name, "cell": cell_name, "old_text": old, "new_text": str(text)}
@@ -244,7 +587,8 @@ class ManageTableStructure(ToolWriterTableBase):
     description = (
         "Insert or delete one table row or column. "
         "index is 0-based (for insert, equal to the current count appends at the end). "
-        "Cannot delete the last remaining row or column."
+        "Cannot delete the last remaining row or column. "
+        "Writer: refuses delete if the row/column hosts a nested table (that would destroy it)."
     )
     is_mutation = True
     parameters = {
@@ -334,6 +678,14 @@ class ManageTableStructure(ToolWriterTableBase):
                     )
                 if count <= 1:
                     return self._tool_error("Cannot remove the last %s of a table." % axis[:-1])
+                # removeByIndex destroys nested tables anchored in the deleted band.
+                nested = _hosted_in_band(table, axis_arg, idx)
+                if nested:
+                    return self._tool_error(
+                        "Cannot delete this %s: it contains nested table(s) %s. "
+                        "Edit those tables by name first."
+                        % (axis_arg, ", ".join(nested))
+                    )
                 band.removeByIndex(idx, 1)
             rows, cols = _dims(table)
             return {"status": "ok", "table_name": name, "rows": rows, "cols": cols}
@@ -348,8 +700,10 @@ class TableInsert(ToolWriterTableBase):
     name = "table_insert"
     intent = "edit"
     description = (
-        "Insert a table. Writer: text table at the view cursor (or document end). "
-        "Draw/Impress: TableShape; position/size in 1/100 mm. Optional data is a 2D array of cell strings."
+        "Insert a table. Writer: text table at the view cursor (or document end); "
+        "pass parent + cell to nest inside an existing table cell (inserts at the cell end). "
+        "Draw/Impress: TableShape; position/size in 1/100 mm. parent/cell are Writer-only. "
+        "Optional data is a 2D array of cell strings."
     )
     parameters = {
         "type": "object",
@@ -360,6 +714,14 @@ class TableInsert(ToolWriterTableBase):
                 "type": "array",
                 "items": {"type": "array", "items": {"type": "string"}},
                 "description": "2D cell strings",
+            },
+            "parent": {
+                "type": "string",
+                "description": "Writer: host table name from table_list (requires cell).",
+            },
+            "cell": {
+                "type": "string",
+                "description": "Writer: A1-style host cell (requires parent).",
             },
             "page": {"type": "integer", "description": "Draw/Impress: 0-based page index (active if omitted)"},
             "x": {"type": "integer", "description": "Draw/Impress: X in 1/100 mm (default: 3000)"},
@@ -372,15 +734,23 @@ class TableInsert(ToolWriterTableBase):
     is_mutation = True
 
     def execute(self, ctx: Any, **kwargs: Any) -> dict[str, Any]:
+        parent = str(kwargs.get("parent") or "").strip()
+        cell_raw = str(kwargs.get("cell") or "").strip()
         if _is_draw_doc(ctx.doc):
             from plugin.draw.tables import insert_draw_table
             from plugin.framework.errors import make_tool_error
 
+            if parent or cell_raw:
+                return self._tool_error("parent and cell are Writer-only (Draw has no nested text tables).")
             result = insert_draw_table(ctx, **kwargs)
             if result.get("status") != "ok":
                 return make_tool_error(str(result.get("message") or "Insert failed"), code=str(result.get("code") or "TOOL_EXECUTION_ERROR"))
             return result
 
+        if parent and not cell_raw:
+            return self._tool_error("cell is required when parent is set.")
+        if cell_raw and not parent:
+            return self._tool_error("parent is required when cell is set.")
         rows = kwargs.get("rows")
         columns = kwargs.get("columns")
         if rows is None or columns is None:
@@ -393,15 +763,38 @@ class TableInsert(ToolWriterTableBase):
             doc = ctx.doc
             table = doc.createInstance("com.sun.star.text.TextTable")
             table.initialize(rows, columns)
-            text = doc.getText()
-            cursor = None
-            try:
-                cursor = doc.getCurrentController().getViewCursor()
-            except Exception:
+            host_cell_name = ""
+            if parent:
+                parent_table = _get_table(doc, parent)
+                host_cell_name = _resolve_cell_name(parent_table, cell_raw) or ""
+                if not host_cell_name:
+                    names = list(parent_table.getCellNames())
+                    sample = ", ".join(names[:8]) + ((", …, %s" % names[-1]) if len(names) > 8 else "")
+                    return self._tool_error(
+                        "Cell '%s' not in table '%s'. Its cells are: %s." % (cell_raw, parent, sample)
+                    )
+                host = parent_table.getCellByName(host_cell_name)
+                # After existing cell text so setString-refuse still applies to the host.
+                host.insertTextContent(host.getEnd(), table, False)
+            else:
+                text = doc.getText()
                 cursor = None
-            if cursor is None:
-                cursor = text.getEnd()
-            text.insertTextContent(cursor, table, False)
+                try:
+                    cursor = doc.getCurrentController().getViewCursor()
+                except Exception:
+                    cursor = None
+                if cursor is None:
+                    cursor = text.getEnd()
+                try:
+                    text.insertTextContent(cursor, table, False)
+                except Exception as exc:
+                    # Body XText + cursor already in a cell: do not guess a nest target.
+                    if _is_wrong_start_node(exc):
+                        return self._tool_error(
+                            "Cannot insert a table at the view cursor (it is probably inside a cell). "
+                            "Pass parent and cell to nest, or move the cursor out of the table."
+                        )
+                    raise
             written = 0
             data = kwargs.get("data")
             if data:
@@ -413,6 +806,13 @@ class TableInsert(ToolWriterTableBase):
                 name = str(table.getName() if hasattr(table, "getName") else getattr(table, "Name", "") or "")
             except Exception:
                 pass
+            # Prefer the parent/cell we just used — getTextTables() can lag a nameless insert.
+            if parent and host_cell_name:
+                nesting = {"is_nested": True, "parent_table": parent, "parent_cell": host_cell_name}
+            elif name:
+                nesting = _nesting_for(doc, name)
+            else:
+                nesting = _not_nested()
             return {
                 "status": "ok",
                 "message": "Table inserted",
@@ -420,7 +820,64 @@ class TableInsert(ToolWriterTableBase):
                 "rows": rows,
                 "columns": columns,
                 "cells_written": written,
+                "nesting": nesting,
             }
+        except ValueError as ve:
+            return self._tool_error(str(ve))
         except Exception as e:
             log.exception("Could not insert Writer table")
             return self._tool_error("Could not insert table: %s" % e)
+
+
+class TableDelete(ToolWriterTableBase):
+    name = "table_delete"
+    intent = "edit"
+    description = (
+        "Delete a table by name. Writer: removes a top-level or nested TextTable from its "
+        "containing XText. Nested children of the deleted table are removed with it — this is "
+        "the intentional remove (do not use table_set_cell, which refuses host cells). "
+        "Draw/Impress: removes the TableShape from the page."
+    )
+    parameters = {
+        "type": "object",
+        "properties": {
+            "name": {"type": "string", "description": "Table name from table_list."},
+            "page": {"type": "integer", "description": "Draw/Impress: 0-based page index."},
+            "index": {"type": "integer", "description": "Draw/Impress: shape index on the page."},
+        },
+        "required": [],
+    }
+    is_mutation = True
+
+    def execute(self, ctx: Any, **kwargs: Any) -> dict[str, Any]:
+        name = str(kwargs.get("name") or "").strip()
+        try:
+            if _is_draw_doc(ctx.doc):
+                from plugin.draw.tables import delete_draw_table
+                from plugin.framework.errors import make_tool_error
+
+                result = delete_draw_table(
+                    ctx.doc, name=name, page=kwargs.get("page"), index=kwargs.get("index")
+                )
+                if result.get("status") != "ok":
+                    return make_tool_error(
+                        str(result.get("message") or "Delete failed"),
+                        code=str(result.get("code") or "TOOL_EXECUTION_ERROR"),
+                    )
+                return result
+            if not name:
+                return self._tool_error("name is required.")
+            table = _get_table(ctx.doc, name)
+            nesting = _nesting_for(ctx.doc, name)
+            _remove_writer_table(ctx.doc, table, name, nesting)
+            return {
+                "status": "ok",
+                "message": "Table deleted",
+                "table_name": name,
+                "nesting": nesting,
+            }
+        except ValueError as ve:
+            return self._tool_error(str(ve))
+        except Exception as e:
+            log.exception("Could not delete table '%s'", name)
+            return self._tool_error("Could not delete table '%s': %s" % (name, e))

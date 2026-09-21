@@ -10,7 +10,8 @@ default tool lists).
 - `=PYTHON()` / LibrePy: `python/addin.py`, `python/addin_librepy.py`, `python/function.py`
 - Do **not** drop `analyzer.py` from the LibrePy bundle (reserved).
 
-Topic docs: [docs/calc/specialized-toolsets.md](../../docs/calc/specialized-toolsets.md),
+Topic docs: [docs/calc/prompt-function.md](../../docs/calc/prompt-function.md),
+[docs/calc/specialized-toolsets.md](../../docs/calc/specialized-toolsets.md),
 [docs/calc/conditional-formatting.md](../../docs/calc/conditional-formatting.md),
 [docs/calc/sheet-filter.md](../../docs/calc/sheet-filter.md),
 [docs/calc/date-time-handling.md](../../docs/calc/date-time-handling.md),
@@ -27,3 +28,4 @@ Topic docs: [docs/calc/specialized-toolsets.md](../../docs/calc/specialized-tool
 - `plugin/scripting/venv/calc_functions_*.py` alphabet splits are intentional; do not merge them.
 - `float(...)` inside `=PYTHON("...")` formula strings → Calc lexer `#NAME?`. Use code-in-cell or bare `np.sum` (see enabling-numpy doc).
 - In tests, resolve tools with `plugin.main.get_tools().get("tool_name")`.
+- Sheet names starting with `_` (xlsx→ods `__Anonymous_Sheet_DB__*`, etc.) stay in the workbook. Omit them from agent-facing lists (`list_sheets`, `get_sheet_summary`, chat context). Do **not** delete them at trial/document open (parked).

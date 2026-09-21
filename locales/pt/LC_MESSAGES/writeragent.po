@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: PACKAGE VERSION\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-09-04 14:15-0400\n"
+"POT-Creation-Date: 2026-09-14 16:20-0400\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: Portuguese <LL@li.org>\n"
@@ -73,9 +73,28 @@ msgstr "Não foi possível encontrar a célula do notebook para este controle."
 msgid "Open a Writer document first."
 msgstr "Abra primeiro um documento do Writer."
 
-#: plugin/notebook/writer_importer.py
+#: plugin/notebook/notebook_controls.py
 msgid "Run code cell"
 msgstr "Executar célula de código"
+
+#: plugin/embeddings/search_ui.py
+msgid "just now"
+msgstr "agora mesmo"
+
+#: plugin/embeddings/search_ui.py
+#, python-brace-format
+msgid "{0}m ago"
+msgstr "há {0}m"
+
+#: plugin/embeddings/search_ui.py
+#, python-brace-format
+msgid "{0}h ago"
+msgstr "há {0}h"
+
+#: plugin/embeddings/search_ui.py
+#, python-brace-format
+msgid "{0}d ago"
+msgstr "há {0}d"
 
 #: plugin/embeddings/search_ui.py
 msgid "Cache Status: No active document"
@@ -96,20 +115,6 @@ msgstr "Estado do cache: Não compilado (lancedb)"
 #: plugin/embeddings/search_ui.py
 msgid "Cache Status: Not built"
 msgstr "Estado do cache: Não compilado"
-
-#: plugin/embeddings/search_ui.py
-msgid "just now"
-msgstr "agora mesmo"
-
-#: plugin/embeddings/search_ui.py
-#, python-brace-format
-msgid "{0}m ago"
-msgstr "há {0}m"
-
-#: plugin/embeddings/search_ui.py
-#, python-brace-format
-msgid "{0}h ago"
-msgstr "há {0}h"
 
 #: plugin/embeddings/search_ui.py
 #, python-brace-format
@@ -424,7 +429,8 @@ msgid "Status:"
 msgstr "Estado:"
 
 #: plugin/calc/python/cell_editor_ui.py plugin/chatbot/panel_wiring.py
-#: plugin/scripting/editor_ui_strings.py plugin/xdl_strings.py
+#: plugin/chatbot/panel.py plugin/scripting/editor_ui_strings.py
+#: plugin/xdl_strings.py
 msgid "Ready"
 msgstr "Pronto"
 
@@ -571,13 +577,14 @@ msgstr "Imagens inseridas"
 #: plugin/calc/python/geometric_recalc.py
 #, python-format
 msgid ""
-"Geometric Recalc Order skipped sheet '%s': found %s or more Python cells "
-"(discovery cap). The sheet was left unchained so a partial list is not "
-"treated as complete."
+"Geometric Recalc Order skipped sheet '%(sheet)s': found %(cap)s or more "
+"Python cells (discovery cap). The sheet was left unchained so a partial list "
+"is not treated as complete."
 msgstr ""
-"A Ordem de Recálculo Geométrico ignorou a planilha '%s': foram encontradas "
-"%s ou mais células Python (limite de descoberta). A planilha foi deixada sem "
-"encadeamento para que uma lista parcial não seja tratada como completa."
+"Ordem de Recálculo Geométrico ignorou a planilha '%(sheet)s': foram "
+"encontradas %(cap)s ou mais células Python (limite de descoberta). A "
+"planilha foi deixada sem encadeamento para que uma lista parcial não seja "
+"tratada como completa."
 
 #: plugin/calc/excel_py_convert/auto_open.py
 #, python-brace-format
@@ -1344,6 +1351,10 @@ msgid ""
 msgstr ""
 "[O modelo {0} não suporta áudio nativo. Por favor, selecione um modelo STT "
 "nas Definições.]"
+
+#: plugin/chatbot/panel.py
+msgid "[Peer send requires Chat mode on this sidebar.]"
+msgstr "[O envio entre pares requer o modo Chat nesta barra lateral.]"
 
 #: plugin/chatbot/web_research_chat.py
 #, python-format
@@ -3181,6 +3192,20 @@ msgstr "Ferramentas de planilha do Calc"
 
 msgid "Max Rows Display"
 msgstr "Máximo de linhas exibidas"
+
+msgid "Cache Excel siblings as ODS"
+msgstr "Armazenar irmãos do Excel em cache como ODS"
+
+msgid ""
+"Convert sibling .xlsx/.xls to writeragent_ods_cache/ beside the folder so "
+"repeated DuckDB SQL reuses the ODS. Native .ods and the live workbook are "
+"never cached. Set calc.ods_cache_enabled false in writeragent.json to "
+"disable."
+msgstr ""
+"Converter irmãos .xlsx/.xls para writeragent_ods_cache/ ao lado da pasta "
+"para que o SQL DuckDB repetido reutilize o ODS. Arquivos .ods nativos e a "
+"pasta de trabalho ativa nunca são armazenados em cache. Defina "
+"calc.ods_cache_enabled como false em writeragent.json para desativar."
 
 msgid "Sidebar"
 msgstr "Barra lateral"

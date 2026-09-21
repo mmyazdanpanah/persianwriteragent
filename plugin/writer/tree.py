@@ -24,10 +24,28 @@ import logging
 from plugin.framework.errors import ToolExecutionError
 from plugin.framework.service import ServiceBase
 from typing import Any
-from plugin.doc.text_helpers import get_string_without_tracked_deletions
+from plugin.doc.document_helpers import is_cacheable_doc_key
+from plugin.doc.text_helpers import clone_text_range, get_string_without_tracked_deletions
 
 
 log = logging.getLogger("writeragent.writer.nav.tree")
+
+
+def _heading_tree_fingerprint(doc) -> int | None:
+    """Cheap stale-cache check when XModifyListener misses a programmatic edit.
+
+    Windows leftover Writer reuse (GHA 35466498641) can leave a live
+    RuntimeUID listener that does not fire on ``insertString``;
+    ``CharacterCount`` still moves. ``None`` means no signal — keep
+    listener-only caching (WriterDocStub / missing property).
+    """
+    try:
+        count = getattr(doc, "CharacterCount", None)
+        if count is not None:
+            return int(count)
+    except Exception:
+        pass
+    return None
 
 
 class TreeService(ServiceBase):
@@ -40,14 +58,27 @@ class TreeService(ServiceBase):
         self._bm_svc = services.writer_bookmarks
         events = services.events
         self._tree_cache = {}  # doc_key -> root node
+        self._tree_fp = {}  # doc_key -> CharacterCount at cache time
         events.subscribe("document:cache_invalidated", self._on_cache_invalidated)
 
-    def _on_cache_invalidated(self, doc=None, **_kw):
-        if doc is None:
+    def _drop_tree_cache(self, key=None):
+        if key is None:
             self._tree_cache.clear()
+            self._tree_fp.clear()
+            return
+        self._tree_cache.pop(key, None)
+        self._tree_fp.pop(key, None)
+
+    def _on_cache_invalidated(self, doc=None, key=None, **_kw):
+        # Prefer the stored key so close/unload can pop without calling
+        # doc_key() on a disposed model. key= must be checked before
+        # doc is None (emit(key=...) leaves doc defaulted to None).
+        if key is not None:
+            self._drop_tree_cache(key)
+        elif doc is None:
+            self._drop_tree_cache()
         else:
-            key = self._doc_svc.doc_key(doc)
-            self._tree_cache.pop(key, None)
+            self._drop_tree_cache(self._doc_svc.doc_key(doc))
 
     # ── Tree building ──────────────────────────────────────────────
 
@@ -59,8 +90,13 @@ class TreeService(ServiceBase):
              "children": [...], "body_paragraphs": N}
         """
         key = self._doc_svc.doc_key(doc)
-        if key in self._tree_cache:
-            return self._tree_cache[key]
+        fingerprint = _heading_tree_fingerprint(doc)
+        if is_cacheable_doc_key(key) and key in self._tree_cache:
+            cached_fp = self._tree_fp.get(key)
+            # No fingerprint (stubs) → listener-only. Same count → still valid.
+            # A moved CharacterCount means the modify listener missed the edit.
+            if fingerprint is None or fingerprint == cached_fp:
+                return self._tree_cache[key]
 
         text = doc.getText()
         enum = text.createEnumeration()
@@ -93,7 +129,9 @@ class TreeService(ServiceBase):
             para_index += 1
             self._doc_svc.yield_to_gui()
 
-        self._tree_cache[key] = root
+        if is_cacheable_doc_key(key):
+            self._tree_cache[key] = root
+            self._tree_fp[key] = fingerprint
         return root
 
     def _count_all_children(self, node):
@@ -300,7 +338,7 @@ class TreeService(ServiceBase):
                 vc = controller.getViewCursor()
                 saved = None
                 try:
-                    saved = doc.getText().createTextCursorByRange(vc.getStart())
+                    saved = clone_text_range(vc)
                 except Exception:
                     pass
 

@@ -4,7 +4,7 @@ This mixin is used by SendButtonListener in panel.py and contains
 alternate send flows that would otherwise bloat that class:
 
 - Audio transcription fallback
-- Direct image generation (sidebar Image mode)
+- Direct image generation / img2img (sidebar Image mode)
 - External agent backends (Aider, Hermes)
 - Web research sub-agent
 """
@@ -28,10 +28,10 @@ from plugin.framework.errors import (
     suppress_disposed,
 )
 from plugin.framework.config import get_api_config, get_config, get_config_int_safe
-from plugin.framework.config_schema import as_bool
+from plugin.framework.config_schema import DEFAULT_IMAGE_BASE_SIZE, as_bool
 from plugin.framework.client.llm_client import LlmClient
-from plugin.framework.prompts import get_core_directives
-from plugin.chatbot.agent_manual import full_manual_for_model
+from plugin.framework.prompts import get_core_directives_for_type
+from plugin.chatbot.agent_manual import full_manual
 from plugin.framework.queue_executor import llm_request_lane
 from plugin.agent_backend import get_backend
 from plugin.agent_backend.registry import normalize_backend_id
@@ -39,8 +39,25 @@ from plugin.chatbot.state_machine import SendHandlerState, StartEvent, StreamChu
 from plugin.chatbot.dialogs import get_control_text, show_approval_dialog
 from plugin.chatbot.config_ui_helpers import update_lru_history
 from plugin.framework.tool import ToolContext
+from plugin.doc.visual_helpers import selected_graphic_object
 
 log = logging.getLogger(__name__)
+
+
+def _direct_image_source_arg(model: Any) -> str | None:
+    """Return ``'selection'`` when a document graphic is selected, else ``None``.
+
+    Sidebar Image mode calls ``image_generate`` with no LLM. The tool only
+    runs img2img and replaces in place when ``source_image='selection'``.
+    The old worker always omitted that arg, so an edit prompt with a
+    selected image still text-to-image inserted a new graphic.
+    """
+    try:
+        if selected_graphic_object(model) is not None:
+            return "selection"
+    except Exception:
+        log.debug("Direct image: selection probe failed", exc_info=True)
+    return None
 
 if TYPE_CHECKING:
     from plugin.chatbot.panel import ChatSession
@@ -234,6 +251,9 @@ class SendHandlersMixin:
 
 
         q: queue.Queue[Any] = queue.Queue()
+        # Probe on the UI thread. The tool re-reads the selection when it
+        # executes; this flag only decides whether to request img2img.
+        source_image = _direct_image_source_arg(model)
 
         def run_direct_image():
             try:
@@ -248,7 +268,7 @@ class SendHandlersMixin:
                 if self.image_model_selector and hasattr(self.image_model_selector, "getText"):
                     image_model_text = self.image_model_selector.getText()
 
-                base_size_val = 512
+                base_size_val = DEFAULT_IMAGE_BASE_SIZE
                 if self.base_size_input:
                     if hasattr(self.base_size_input, "getText"):
                         base_size_val = self.base_size_input.getText()
@@ -257,7 +277,7 @@ class SendHandlersMixin:
                 try:
                     base_size_val = int(base_size_val)
                 except (ValueError, TypeError):
-                    base_size_val = 512
+                    base_size_val = DEFAULT_IMAGE_BASE_SIZE
 
                 from plugin.main import get_tools
 
@@ -266,10 +286,11 @@ class SendHandlersMixin:
                 with suppress_disposed("LRU update", logger=log, exc_info=True):
                     update_lru_history(base_size_val, "image_base_size_lru", "")
 
-
-
                 # generate_image is async; UNO is marshalled inside the tool (worker runs HTTP).
-                res = get_tools().execute("image_generate", tctx, bypass_thread_guard=False, **{"prompt": query_text, "aspect_ratio": mapped_aspect, "base_size": base_size_val, "image_model": image_model_text})
+                image_args: dict[str, Any] = {"prompt": query_text, "aspect_ratio": mapped_aspect, "base_size": base_size_val, "image_model": image_model_text}
+                if source_image:
+                    image_args["source_image"] = source_image
+                res = get_tools().execute("image_generate", tctx, bypass_thread_guard=False, **image_args)
                 if isinstance(res, dict) and res.get("status") == "error":
                     log.error("generate_image (direct) failed: %s details=%s", res.get("message"), res.get("details"))
                 result = json.dumps(res) if isinstance(res, dict) else str(res)
@@ -354,6 +375,10 @@ class SendHandlersMixin:
         if cancel_scope is not None and hasattr(adapter, "stop"):
             cancel_scope.register_on_cancel(adapter.stop)
 
+        # String-only: classifying the live model hits get_document_type (UNO).
+        # run_agent is chatbot-send-handler; do not classify the document here.
+        core_dirs = get_core_directives_for_type(doc_type_str or "writer")
+
         def run_agent():
             try:
 
@@ -368,12 +393,12 @@ class SendHandlersMixin:
                         f"\n\n[MCP SERVER AVAILABLE]\nA Model Context Protocol (MCP) server is running at: {mcp_url}\nYou can discover and use all LibreOffice tools (Writer, Calc, Draw) via this server.\nTarget the current document by passing the 'X-Document-URL' header: {document_url}\n"
                     )
 
-                core_dirs = get_core_directives(model)
                 # Inject the FULL shared manual: the same prompt pieces (constants) that feed the
                 # sidebar's hybrid prompt and get_guidance's topics, concatenated by agent_manual
                 # WITH the MCP extras (this backend talks to the HTTP server, so e.g. the 429
                 # concurrency contract applies here, unlike the in-process sidebar).
-                lean_system_prompt = f"{core_dirs}\n\n{full_manual_for_model(model)}\n\nYou are currently interacting with a LibreOffice document.\n{mcp_instructions}\nPlease proceed with the user's request."
+                # full_manual(doc_type_str) is string-only — do not classify the document here.
+                lean_system_prompt = f"{core_dirs}\n\n{full_manual(doc_type_str or 'writer')}\n\nYou are currently interacting with a LibreOffice document.\n{mcp_instructions}\nPlease proceed with the user's request."
 
                 # Add optional instructions from settings
                 extra = str(get_config("additional_instructions") or "").strip()

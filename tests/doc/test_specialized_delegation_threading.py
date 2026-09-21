@@ -14,8 +14,12 @@ from plugin.calc.sheets import ListSheets
 from plugin.calc.specialized import DelegateToSpecializedCalc
 from plugin.chatbot.smol_agent import SmolToolAdapter
 from plugin.contrib.smolagents.memory import FinalAnswerStep
+from plugin.doc.document_research import get_document_research_workflow_hint
+from plugin.doc.peer_message import SendPeerResult, SendPeerWork
 from plugin.framework import thread_guard as tg
+from plugin.framework.prompts import get_peer_inner_choice_block
 from plugin.framework.tool import ToolBase, ToolContext, ToolRegistry
+from plugin.framework.uno_context import get_runtime_uid
 from plugin.framework.worker_pool import run_in_background
 from plugin.tests.testing_utils import setup_uno_mocks
 from plugin.writer.specialized.footnotes import FootnotesList
@@ -334,10 +338,161 @@ def test_writer_delegate_marshals_document_research_scaffolding(
 
     assert result["status"] == "ok"
     mock_enqueue_index.assert_called_once_with(ctx.ctx, ctx.services, mock_doc)
-    mock_get_open_docs.assert_called_once_with(ctx.ctx, mock_doc)
+    # Open-docs context plus list_v1_peers (peer catalog / inner ASK vs REPLY hint),
+    # both gathered on the main thread with get_tools.
+    assert mock_get_open_docs.call_count >= 1
+    mock_get_open_docs.assert_called_with(ctx.ctx, mock_doc)
     instructions = mock_agent_class.call_args.kwargs["instructions"]
     assert "[OPEN DOCUMENTS CONTEXT]" in instructions
     assert "/tmp/a.odt" in instructions
+
+
+_PEER_HINT_PEERS = [{"name": "Budget.ods", "uid": "u2", "url": "", "type": "calc"}]
+
+
+def _list_v1_peers_touching_runtime_uid(uno_ctx, self_doc):
+    """Stand-in for list_v1_peers that reproduces the #673 UNO touch."""
+    get_runtime_uid(self_doc)
+    return list(_PEER_HINT_PEERS)
+
+
+def test_document_research_hint_off_main_does_not_touch_runtime_uid():
+    """Regression: get_peer_inner_choice_block called getRuntimeUID on the specialize worker."""
+    session = start_uno_thread_safety_session()
+    was_guard = tg.GUARD_ON
+    tg.GUARD_ON = True
+    err: BaseException | None = None
+    hint: str | None = None
+    inner: str | None = None
+    try:
+        raw_doc = MagicMock()
+        raw_doc.getRuntimeUID.return_value = "uid-self"
+        doc = session.make_mock(raw_doc, name="writer-doc")
+        uno_ctx = MagicMock()
+
+        def worker():
+            nonlocal err, hint, inner
+            try:
+                with patch(
+                    "plugin.doc.peer_message.list_v1_peers",
+                    side_effect=_list_v1_peers_touching_runtime_uid,
+                ):
+                    hint = get_document_research_workflow_hint(uno_ctx, doc)
+                    inner = get_peer_inner_choice_block(uno_ctx, doc)
+            except BaseException as e:
+                err = e
+
+        t = run_in_background(
+            worker, name="tool-async-delegate_to_specialized_writer_toolset", daemon=False
+        )
+        t.join(timeout=5.0)
+    finally:
+        tg.GUARD_ON = was_guard
+        session.close()
+
+    assert err is None, f"UNO touch from worker: {err}"
+    assert hint and "Budget.ods" in hint
+    assert "send_peer_work" in hint
+    assert "send_peer_result" in hint
+    assert "ASK vs REPLY" in hint
+    assert inner and "Budget.ods" in inner
+    assert "uid=u2" in inner
+
+
+@patch("plugin.doc.specialized_base.USE_SUB_AGENT", True)
+@patch(
+    "plugin.chatbot.smol_agent.get_config_int",
+    side_effect=lambda key: 25 if key == "chatbot.max_tool_rounds" else 1024,
+)
+@patch("plugin.chatbot.smol_agent.get_api_config", create=True, return_value={"model": "test/model"})
+@patch("plugin.chatbot.smol_agent.ToolCallingAgent")
+@patch("plugin.chatbot.smol_agent.WriterAgentSmolModel")
+@patch("plugin.chatbot.smol_agent.LlmClient")
+@patch("plugin.doc.document_research.get_open_documents")
+@patch("plugin.embeddings.embeddings_indexer.enqueue_folder_index")
+def test_document_research_delegate_off_main_does_not_touch_runtime_uid(
+    mock_enqueue_index,
+    mock_get_open_docs,
+    _mock_llm,
+    _mock_smol_model,
+    mock_agent_class,
+    _mock_get_config,
+    _mock_get_config_int,
+):
+    """Regression: specialized execute built the #673 peer catalog on the async worker.
+
+    Writer/Calc/Draw gateways share DelegateToSpecializedBase.execute.
+    """
+    mock_get_open_docs.return_value = []
+    mock_agent_instance = MagicMock()
+    mock_agent_instance.run.return_value = [FinalAnswerStep(output="done")]
+    mock_agent_class.return_value = mock_agent_instance
+
+    registry = ToolRegistry(MagicMock())
+    registry.register(_DummyDocResearchTool())
+    registry.register(SendPeerWork())
+    registry.register(SendPeerResult())
+    registry.register(DelegateToSpecializedWriter())
+
+    session = start_uno_thread_safety_session()
+    was_guard = tg.GUARD_ON
+    tg.GUARD_ON = True
+    err: BaseException | None = None
+    result: dict | None = None
+    try:
+        raw_doc = MagicMock()
+        raw_doc.supportsService.return_value = True
+        raw_doc.getRuntimeUID.return_value = "uid-self"
+        proxied_doc = tg._UnoThreadGuardProxy(raw_doc)
+
+        ctx = MagicMock()
+        ctx.services = {"tools": registry}
+        ctx.doc = proxied_doc
+        ctx.ctx = MagicMock()
+        ctx.doc_type = "writer"
+        ctx.stop_checker = lambda: False
+        ctx.active_domain = None
+
+        gateway = registry.get("delegate_to_specialized_writer_toolset")
+        with patch.object(tg, "_notify_thread_violation"):
+            with patch(
+                "plugin.doc.peer_message.list_v1_peers",
+                side_effect=_list_v1_peers_touching_runtime_uid,
+            ):
+
+                def worker():
+                    nonlocal err, result
+                    try:
+                        result = gateway.execute_safe(
+                            ctx, domain="document_research", task="Get Q4 from the open budget"
+                        )
+                    except BaseException as e:
+                        err = e
+
+                t = run_in_background(
+                    worker,
+                    name="tool-async-delegate_to_specialized_writer_toolset",
+                    daemon=False,
+                )
+                t.join(timeout=5.0)
+    finally:
+        tg.GUARD_ON = was_guard
+        session.close()
+
+    assert err is None, f"UNO touch from worker: {err}"
+    assert result is not None and result.get("status") == "ok"
+    instructions = mock_agent_class.call_args.kwargs["instructions"]
+    assert "Budget.ods" in instructions
+    assert "send_peer_work" in instructions
+    assert "send_peer_result" in instructions
+    assert "ASK vs REPLY" in instructions
+    smol_tools = mock_agent_class.call_args.kwargs.get("tools", [])
+    names = {t.name for t in smol_tools}
+    assert "send_peer_work" in names
+    assert "send_peer_result" in names
+    peer_adapter = next(t for t in smol_tools if t.name == "send_peer_work")
+    assert "Budget.ods" in peer_adapter.description
+    mock_enqueue_index.assert_called_once()
 
 
 def test_writer_smol_adapter_marshals_sync_footnotes_tool():
@@ -448,6 +603,70 @@ def test_calc_specialized_domain_base_requires_core_read_tools():
     """Calc specialized bases declare sheet read helpers for sub-agent discovery."""
     assert "get_sheet_summary" in (ToolCalcSheetBase.required_core_tools or frozenset())
     assert "read_cell_range" in (ToolCalcSheetBase.required_core_tools or frozenset())
+
+
+@patch("plugin.doc.specialized_base.USE_SUB_AGENT", True)
+@patch(
+    "plugin.chatbot.smol_agent.get_config_int",
+    side_effect=lambda key: 25 if key == "chatbot.max_tool_rounds" else 1024,
+)
+@patch("plugin.chatbot.smol_agent.get_api_config", create=True, return_value={"model": "test/model"})
+@patch("plugin.chatbot.smol_agent.ToolCallingAgent")
+@patch("plugin.chatbot.smol_agent.WriterAgentSmolModel")
+@patch("plugin.chatbot.smol_agent.LlmClient")
+@patch("plugin.framework.queue_executor.execute_on_main_thread")
+@patch("plugin.calc.analyzer.get_calc_context_for_chat")
+def test_calc_sheets_delegate_forwards_create_instruction_to_outer(
+    mock_get_calc_context,
+    mock_execute_on_main,
+    _mock_llm,
+    _mock_smol_model,
+    mock_agent_class,
+    _mock_get_config,
+    _mock_get_config_int,
+):
+    """Outer hop payload gets web-research-style `instruction` after create_sheet."""
+    from plugin.calc.sheets import CreateSheet
+    from plugin.contrib.smolagents.memory import ToolCall
+    from plugin.framework.prompts import get_sheets_create_completion_instruction
+
+    mock_get_calc_context.return_value = "Sheets: Sheet1\nActive Sheet: Sheet1"
+    mock_execute_on_main.side_effect = lambda fn, *args, **kwargs: fn(*args, **kwargs)
+    mock_agent_class.return_value = MagicMock()
+
+    registry = ToolRegistry(MagicMock())
+    registry.register(CreateSheet())
+    registry.register(DelegateToSpecializedCalc())
+
+    mock_doc = MagicMock()
+    mock_doc.supportsService.return_value = True
+
+    ctx = MagicMock()
+    ctx.services = {"tools": registry}
+    ctx.doc = mock_doc
+    ctx.ctx = MagicMock()
+    ctx.doc_type = "calc"
+    ctx.stop_checker = lambda: False
+
+    def fake_execute_safe(agent, task, tool_call_handler=None, **kwargs):
+        if tool_call_handler:
+            tool_call_handler(ToolCall(name="create_sheet", arguments={"sheet": "Q1 Actuals"}, id="1"))
+        return {
+            "status": "ok",
+            "finished": True,
+            "answer": "Created Q1 Actuals",
+            "message": "Specialized task complete.",
+        }
+
+    gateway = registry.get("delegate_to_specialized_calc_toolset")
+    with patch("plugin.doc.specialized_base.SmolAgentExecutor") as mock_executor_cls:
+        mock_executor_cls.return_value.execute_safe.side_effect = fake_execute_safe
+        result = gateway.execute_safe(ctx, domain="sheets", task="Create a sheet named Q1 Actuals")
+
+    assert result["status"] == "ok"
+    assert result["instruction"] == get_sheets_create_completion_instruction()
+    assert "write_formula_range" in result["instruction"]
+    assert "not populated" in result["instruction"]
 
 
 def test_calc_shapes_domain_tools():

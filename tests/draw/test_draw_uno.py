@@ -291,6 +291,11 @@ def test_master_slides(ctx, doc):
 @native_test
 @with_native_doc("draw")
 def test_get_draw_tree(ctx, doc):
+    from plugin.testing_runner import _progress
+
+    # GHA 34606276107: this TEST end OK; the next insert_math_draw close
+    # killed soffice. Name the tree call vs teardown.
+    _progress("get_draw_tree: body start")
     # Ensure there is at least one shape to build a tree with
     _exec_tool(doc, ctx, "shape_upsert", {
         "action": "create",
@@ -302,6 +307,7 @@ def test_get_draw_tree(ctx, doc):
 
     result = _exec_tool(doc, ctx, "get_draw_tree", {"page": _active_draw_page_index(doc)})
     data = json.loads(result)
+    _progress("get_draw_tree: execute done status=%s" % data.get("status"))
     assert data.get("status") == "ok", f"get_draw_tree failed: {result}"
     tree = data.get("tree", [])
     assert len(tree) > 0, "Draw tree is empty"
@@ -313,30 +319,80 @@ def test_get_draw_tree(ctx, doc):
             found = True
             break
     assert found, "Created shape not found in draw tree"
+    _progress("get_draw_tree: body done")
 
 
 @native_test
 @with_native_doc("draw")
-def test_insert_math_draw(ctx, doc):
-    # Insert math (formula_type + formula + page + x + y; size from UNO/heuristic)
-    result = _exec_tool(doc, ctx, "insert_math", {
-        "formula_type": "latex",
-        "formula": "E = mc^2",
-        "page": 0,
-        "x": 2000,
-        "y": 2000,
+def test_get_draw_tree_marks_blank_and_label_hint(ctx, doc):
+    page_idx = _active_draw_page_index(doc)
+    _exec_tool(doc, ctx, "shape_upsert", {
+        "action": "create",
+        "shape_type": "text",
+        "x": 500, "y": 2000, "width": 3500, "height": 800,
+        "text": "Product:",
+        "name": "lbl_product",
+        "page": page_idx,
+    })
+    _exec_tool(doc, ctx, "shape_upsert", {
+        "action": "create",
+        "shape_type": "text",
+        "x": 4500, "y": 2000, "width": 5000, "height": 800,
+        "text": "",
+        "name": "fld_product",
+        "page": page_idx,
     })
 
+    result = _exec_tool(doc, ctx, "get_draw_tree", {"page": page_idx})
     data = json.loads(result)
-    assert data.get("status") == "ok", f"insert_math failed: {result}"
+    assert data.get("status") == "ok", f"get_draw_tree failed: {result}"
+    blanks = [n for n in data.get("tree", []) if n.get("fillable")]
+    assert blanks, f"expected a fillable blank in tree: {data.get('tree')}"
+    named = [n for n in blanks if n.get("name") == "fld_product"]
+    assert named, f"blank named fld_product missing: {blanks}"
+    assert named[0].get("label_hint") == "Product:"
+    assert "geometry" in named[0]
 
-    # insert_math used page_index 0 — read shape from that page (current slide may differ after prior tests).
-    target_page = doc.getDrawPages().getByIndex(0)
-    shape = target_page.getByIndex(data.get("index"))
 
-    assert shape.CLSID == "078B7ABA-54FC-457F-8551-6147e776a997"
-    sz = shape.getSize()
-    assert sz.Width >= 400 and sz.Height >= 300, f"expected plausible size, got {sz.Width}x{sz.Height}"
+@native_test
+@with_native_doc("draw")
+def test_shape_upsert_edit_by_name(ctx, doc):
+    page_idx = _active_draw_page_index(doc)
+    create = json.loads(_exec_tool(doc, ctx, "shape_upsert", {
+        "action": "create",
+        "shape_type": "text",
+        "x": 1000, "y": 1000, "width": 4000, "height": 800,
+        "text": "",
+        "name": "fld_stable",
+        "page": page_idx,
+    }))
+    assert create.get("status") == "ok", f"create failed: {create}"
+
+    # A later shape would shift a naive "last index" fill; Name stays stable.
+    _exec_tool(doc, ctx, "shape_upsert", {
+        "action": "create",
+        "shape_type": "rectangle",
+        "x": 100, "y": 100, "width": 500, "height": 500,
+        "page": page_idx,
+    })
+
+    edit = json.loads(_exec_tool(doc, ctx, "shape_upsert", {
+        "action": "edit",
+        "name": "fld_stable",
+        "text": "filled-by-name",
+        "page": page_idx,
+    }))
+    assert edit.get("status") == "ok", f"edit by name failed: {edit}"
+
+    page = doc.getCurrentController().getCurrentPage()
+    found = None
+    for i in range(page.getCount()):
+        shape = page.getByIndex(i)
+        if getattr(shape, "Name", "") == "fld_stable":
+            found = shape
+            break
+    assert found is not None, "named shape missing after edit"
+    assert found.getString() == "filled-by-name"
 
 
 @native_test
@@ -355,13 +411,89 @@ def test_shape_upsert_validation():
     assert not ok
     assert "required when action is 'create'" in err
 
-    # Test validation when action='edit' but missing index
+    # Test validation when action='edit' but missing index and name
     ok, err = shape_upsert_tool.validate(action="edit")
     assert not ok
-    assert "Parameter 'index' is required" in err
+    assert "index" in err and "name" in err
+
+    # Name-only edit is valid (paper-form fill by stable Name)
+    ok, err = shape_upsert_tool.validate(action="edit", name="fld_product")
+    assert ok
+    assert err is None
 
     # Test validation when action='create' and all required parameters are present
     ok, err = shape_upsert_tool.validate(action="create", shape_type="rectangle", x=1000, y=1000, width=5000, height=3000)
     assert ok
     assert err is None
+
+
+@native_test
+@with_native_doc("writer")
+def test_writer_star24_with_text_keeps_explicit_size(ctx, doc):
+    """Writer AT_PAGE custom shapes must not collapse after setString (Arch Universal Sample)."""
+    page = doc.getDrawPages().getByIndex(0)
+    before = page.getCount()
+    result = _exec_tool(doc, ctx, "shape_upsert", {
+        "action": "create",
+        "shape_type": "star24",
+        "x": 2000,
+        "y": 5000,
+        "width": 4000,
+        "height": 4000,
+        "fill_color": "blue",
+        "text": "24-sided Star",
+    })
+    data = json.loads(result)
+    assert data.get("status") == "ok", result
+    assert data.get("geometry_applied") is True, data
+    assert page.getCount() == before + 1
+    shape = page.getByIndex(page.getCount() - 1)
+    size = shape.getSize()
+    # Allow 1 HMM rounding; reject Arch-style collapse to ~2249x489
+    assert abs(size.Width - 4000) <= 2, f"Width collapsed: {size.Width}x{size.Height}"
+    assert abs(size.Height - 4000) <= 2, f"Height collapsed: {size.Width}x{size.Height}"
+    assert shape.String == "24-sided Star" or shape.getString() == "24-sided Star"
+
+
+@native_test
+@with_native_doc("draw")
+def test_insert_math_draw(ctx, doc):
+    # Last Draw close in this file on Windows: close_doc of a Math OLE Draw
+    # killed soffice (GHA 34607010446, exit 0). Run after the other tests
+    # so a skipped leftover is not desktop current for later cases here.
+    # The runner also defers this file until just before the peer suite
+    # so this leftover is not closed (34607010446). Notebook detect hang
+    # on 34619751330 was leftover Hidden _blank, not this Draw.
+    from plugin.testing_runner import _progress
+    from plugin.tests.testing_utils import mark_windows_math_ole_doc
+
+    # GHA 34606276107: load done uid=48 then ~8s later close_doc dispose
+    # and soffice exited 0. Name insert_math vs close_doc teardown.
+    _progress("insert_math_draw: insert_math start")
+    result = _exec_tool(doc, ctx, "insert_math", {
+        "formula_type": "latex",
+        "formula": "E = mc^2",
+        "page": 0,
+        "x": 2000,
+        "y": 2000,
+    })
+
+    data = json.loads(result)
+    _progress("insert_math_draw: insert_math done status=%s" % data.get("status"))
+    assert data.get("status") == "ok", f"insert_math failed: {result}"
+
+    # insert_math used page_index 0 — read shape from that page (current slide may differ after prior tests).
+    target_page = doc.getDrawPages().getByIndex(0)
+    shape = target_page.getByIndex(data.get("index"))
+
+    assert shape.CLSID == "078B7ABA-54FC-457F-8551-6147e776a997"
+    sz = shape.getSize()
+    assert sz.Width >= 400 and sz.Height >= 300, f"expected plausible size, got {sz.Width}x{sz.Height}"
+
+    # Drop Math OLE proxies before teardown. close_doc still GCs; Windows
+    # skips the close after mark (34607010446 dispose killed soffice).
+    mark_windows_math_ole_doc(doc)
+    shape = None
+    target_page = None
+    _progress("insert_math_draw: body done")
 

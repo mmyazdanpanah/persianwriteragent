@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: PACKAGE VERSION\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-09-04 14:15-0400\n"
+"POT-Creation-Date: 2026-09-14 16:20-0400\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: Greek <LL@li.org>\n"
@@ -73,9 +73,28 @@ msgstr ""
 msgid "Open a Writer document first."
 msgstr "Ανοίξτε πρώτα ένα έγγραφο του Writer."
 
-#: plugin/notebook/writer_importer.py
+#: plugin/notebook/notebook_controls.py
 msgid "Run code cell"
 msgstr "Εκτέλεση κελιού κώδικα"
+
+#: plugin/embeddings/search_ui.py
+msgid "just now"
+msgstr "μόλις τώρα"
+
+#: plugin/embeddings/search_ui.py
+#, python-brace-format
+msgid "{0}m ago"
+msgstr "πριν από {0}λ"
+
+#: plugin/embeddings/search_ui.py
+#, python-brace-format
+msgid "{0}h ago"
+msgstr "πριν από {0}ώ"
+
+#: plugin/embeddings/search_ui.py
+#, python-brace-format
+msgid "{0}d ago"
+msgstr "πριν από {0}ημ"
 
 #: plugin/embeddings/search_ui.py
 msgid "Cache Status: No active document"
@@ -96,20 +115,6 @@ msgstr "Κατάσταση προσωρινής μνήμης: Δεν έχει δ
 #: plugin/embeddings/search_ui.py
 msgid "Cache Status: Not built"
 msgstr "Κατάσταση προσωρινής μνήμης: Δεν έχει δημιουργηθεί"
-
-#: plugin/embeddings/search_ui.py
-msgid "just now"
-msgstr "μόλις τώρα"
-
-#: plugin/embeddings/search_ui.py
-#, python-brace-format
-msgid "{0}m ago"
-msgstr "πριν από {0}λ"
-
-#: plugin/embeddings/search_ui.py
-#, python-brace-format
-msgid "{0}h ago"
-msgstr "πριν από {0}ώ"
 
 #: plugin/embeddings/search_ui.py
 #, python-brace-format
@@ -428,7 +433,8 @@ msgid "Status:"
 msgstr "Κατάσταση:"
 
 #: plugin/calc/python/cell_editor_ui.py plugin/chatbot/panel_wiring.py
-#: plugin/scripting/editor_ui_strings.py plugin/xdl_strings.py
+#: plugin/chatbot/panel.py plugin/scripting/editor_ui_strings.py
+#: plugin/xdl_strings.py
 msgid "Ready"
 msgstr "Έτοιμο"
 
@@ -578,13 +584,13 @@ msgstr "Εικόνες που εισήχθησαν"
 #: plugin/calc/python/geometric_recalc.py
 #, python-format
 msgid ""
-"Geometric Recalc Order skipped sheet '%s': found %s or more Python cells "
-"(discovery cap). The sheet was left unchained so a partial list is not "
-"treated as complete."
+"Geometric Recalc Order skipped sheet '%(sheet)s': found %(cap)s or more "
+"Python cells (discovery cap). The sheet was left unchained so a partial list "
+"is not treated as complete."
 msgstr ""
-"Η γεωμετρική σειρά επανυπολογισμού παρέκαμψε το φύλλο '%s': βρέθηκαν %s ή "
-"περισσότερα κελιά Python (όριο ανακάλυψης). Το φύλλο παρέμεινε χωρίς αλυσίδα "
-"ώστε μια μερική λίστα να μην θεωρηθεί πλήρης."
+"Η σειρά Geometric Recalc παρέλειψε το φύλλο '%(sheet)s': βρέθηκαν %(cap)s ή "
+"περισσότερα κελιά Python (όριο ανακάλυψης). Το φύλλο αφέθηκε χωρίς αλυσίδα, "
+"ώστε μια μερική λίστα να μην αντιμετωπίζεται ως πλήρης."
 
 #: plugin/calc/excel_py_convert/auto_open.py
 #, python-brace-format
@@ -1352,6 +1358,12 @@ msgid ""
 msgstr ""
 "[Το μοντέλο {0} δεν υποστηρίζει εγγενή ήχο. Παρακαλούμε επιλέξτε ένα μοντέλο "
 "STT στις Ρυθμίσεις.]"
+
+#: plugin/chatbot/panel.py
+msgid "[Peer send requires Chat mode on this sidebar.]"
+msgstr ""
+"[Η αποστολή σε ομότιμους απαιτεί λειτουργία Chat σε αυτήν την πλευρική "
+"στήλη.]"
 
 #: plugin/chatbot/web_research_chat.py
 #, python-format
@@ -3202,6 +3214,21 @@ msgstr "Εργαλεία υπολογιστικών φύλλων Calc"
 
 msgid "Max Rows Display"
 msgstr "Μέγιστος αριθμός γραμμών"
+
+msgid "Cache Excel siblings as ODS"
+msgstr "Προσωρινή αποθήκευση αδελφών αρχείων Excel ως ODS"
+
+msgid ""
+"Convert sibling .xlsx/.xls to writeragent_ods_cache/ beside the folder so "
+"repeated DuckDB SQL reuses the ODS. Native .ods and the live workbook are "
+"never cached. Set calc.ods_cache_enabled false in writeragent.json to "
+"disable."
+msgstr ""
+"Μετατροπή των αδελφών αρχείων .xlsx/.xls σε writeragent_ods_cache/ δίπλα "
+"στον φάκελο, ώστε το επαναλαμβανόμενο DuckDB SQL να επαναχρησιμοποιεί το "
+"ODS. Τα εγγενή αρχεία .ods και το ενεργό βιβλίο εργασίας δεν αποθηκεύονται "
+"ποτέ προσωρινά. Ορίστε το calc.ods_cache_enabled σε false στο "
+"writeragent.json για απενεργοποίηση."
 
 msgid "Sidebar"
 msgstr "Πλευρική εργαλειοθήκη"

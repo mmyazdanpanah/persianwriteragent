@@ -238,6 +238,2127 @@ def test_clear_writeragent_udprops_skips_set_document_scripts():
     assert written["WriterAgentSessionID"] == ""
 
 
+def test_reraise_native_open_failure_names_previous_test(capsys, monkeypatch):
+    """Factory-open DisposedException must name the previous TEST end in the message."""
+    import plugin.testing_runner as tr
+    from plugin.tests.testing_utils import _reraise_native_open_failure
+
+    monkeypatch.setattr(tr, "_soffice_pids", lambda: "7")
+    tr.reset_lifecycle_breadcrumb()
+    tr.record_test_end("draw.test_draw_uno.test_duplicate_slide_copies_shapes", "OK")
+    tr.record_test_start("draw.test_draw_uno.test_duplicate_rename_move_slide")
+
+    with pytest.raises(RuntimeError, match="previous=draw.test_draw_uno.test_duplicate_slide_copies_shapes") as caught:
+        try:
+            raise RuntimeError("Binary URP bridge disposed during call")
+        except RuntimeError as exc:
+            _reraise_native_open_failure(exc, "private:factory/sdraw")
+    assert "create_native_doc loadComponentFromURL(private:factory/sdraw)" in str(caught.value)
+    assert "pre_open=" in str(caught.value)
+    assert "Binary URP bridge" in str(caught.value)
+    err = capsys.readouterr().err
+    assert "LIFECYCLE native_doc open FAIL" in err
+    assert "previous=draw.test_draw_uno.test_duplicate_slide_copies_shapes" in err
+    tr.reset_lifecycle_breadcrumb()
+
+
+def test_reraise_native_open_failure_passthrough_non_urp():
+    from plugin.tests.testing_utils import _reraise_native_open_failure
+
+    with pytest.raises(ValueError, match="not a bridge"):
+        try:
+            raise ValueError("not a bridge")
+        except ValueError as exc:
+            _reraise_native_open_failure(exc, "private:factory/sdraw")
+
+
+def test_prepare_windows_writer_factory_logs_leftovers_and_does_not_close(monkeypatch):
+    """GHA 34556185752: leftover close(True) hung 30s. Log + reactivate only."""
+    from unittest.mock import MagicMock
+
+    from plugin.tests import testing_utils as tu
+
+    keeper = MagicMock(name="keeper")
+    keeper.RuntimeUID = "1"
+    leftover = MagicMock(name="leftover")
+    leftover.RuntimeUID = "26"
+    leftover.supportsService.side_effect = lambda svc: svc.endswith("TextDocument")
+    keeper.supportsService.side_effect = lambda svc: svc.endswith("TextDocument")
+    frame = MagicMock(name="keeper_frame")
+    keeper.getCurrentController.return_value.getFrame.return_value = frame
+
+    class _Enum:
+        def __init__(self, items):
+            self._items = list(items)
+
+        def hasMoreElements(self):
+            return bool(self._items)
+
+        def nextElement(self):
+            return self._items.pop(0)
+
+    desktop = MagicMock()
+    desktop.getComponents.return_value.createEnumeration.return_value = _Enum(
+        [keeper, leftover]
+    )
+    monkeypatch.setattr("plugin.framework.uno_context.get_desktop", lambda _ctx: desktop)
+    tu.set_harness_keeper_uid("1", keeper)
+    try:
+        assert tu.prepare_windows_writer_factory(object()) == 1
+        leftover.close.assert_not_called()
+        keeper.close.assert_not_called()
+        desktop.setActiveFrame.assert_called_once_with(frame)
+    finally:
+        tu._set_windows_leftover_open(0)
+        tu.set_harness_keeper_uid("")
+
+
+def test_prepare_windows_writer_factory_keeper_only_still_reactivates(monkeypatch):
+    from unittest.mock import MagicMock
+
+    from plugin.tests import testing_utils as tu
+
+    keeper = MagicMock(name="keeper")
+    keeper.RuntimeUID = "1"
+    keeper.supportsService.side_effect = lambda svc: svc.endswith("TextDocument")
+    frame = MagicMock(name="keeper_frame")
+    keeper.getCurrentController.return_value.getFrame.return_value = frame
+
+    class _Enum:
+        def __init__(self, items):
+            self._items = list(items)
+
+        def hasMoreElements(self):
+            return bool(self._items)
+
+        def nextElement(self):
+            return self._items.pop(0)
+
+    desktop = MagicMock()
+    desktop.getComponents.return_value.createEnumeration.return_value = _Enum([keeper])
+    monkeypatch.setattr("plugin.framework.uno_context.get_desktop", lambda _ctx: desktop)
+    tu.set_harness_keeper_uid("1", keeper)
+    try:
+        assert tu.prepare_windows_writer_factory(object()) == 0
+        keeper.close.assert_not_called()
+        desktop.setActiveFrame.assert_called_once_with(frame)
+    finally:
+        tu._set_windows_leftover_open(0)
+        tu.set_harness_keeper_uid("")
+
+
+def test_testing_utils_import_names_are_one_module():
+    """GHA 34595675515: both import names must be one object, not two copies."""
+    import plugin.tests.testing_utils as plugin_tu
+    import tests.testing_utils as tests_tu
+
+    assert tests_tu is plugin_tu
+    import plugin.tests.doc_stubs as plugin_stubs
+    import tests.doc_stubs as tests_stubs
+
+    assert tests_stubs is plugin_stubs
+    assert plugin_tu.CalcDocStub is plugin_stubs.CalcDocStub
+
+
+def test_testing_utils_identity_when_tests_name_imported_first():
+    """Runner loads tests.testing_utils first; suites then import plugin.tests."""
+    import tests.testing_utils as tests_tu
+    import plugin.tests.testing_utils as plugin_tu
+
+    assert tests_tu is plugin_tu
+    assert tests_tu.CalcDocStub is plugin_tu.CalcDocStub
+    keeper_doc = object()
+    try:
+        plugin_tu.set_harness_keeper_uid("1", keeper_doc)
+        assert tests_tu._HARNESS_KEEPER_UID == "1"
+        assert tests_tu._HARNESS_KEEPER_DOC is keeper_doc
+    finally:
+        plugin_tu.set_harness_keeper_uid("")
+
+
+def test_prepare_windows_writer_factory_sees_keeper_set_via_other_import_name(
+    monkeypatch,
+):
+    """Keeper set as tests.testing_utils is visible to plugin.tests.testing_utils."""
+    from unittest.mock import MagicMock
+
+    import plugin.tests.testing_utils as plugin_tu
+    import tests.testing_utils as tests_tu
+
+    keeper = MagicMock(name="keeper")
+    keeper.RuntimeUID = "1"
+    keeper.supportsService.side_effect = lambda svc: svc.endswith("TextDocument")
+    frame = MagicMock(name="keeper_frame")
+    keeper.getCurrentController.return_value.getFrame.return_value = frame
+    leftover = MagicMock(name="leftover")
+    leftover.RuntimeUID = "26"
+    leftover.supportsService.side_effect = lambda svc: svc.endswith("TextDocument")
+
+    class _Enum:
+        def __init__(self, items):
+            self._items = list(items)
+
+        def hasMoreElements(self):
+            return bool(self._items)
+
+        def nextElement(self):
+            return self._items.pop(0)
+
+    desktop = MagicMock()
+    desktop.getComponents.return_value.createEnumeration.return_value = _Enum(
+        [keeper, leftover]
+    )
+    monkeypatch.setattr("plugin.framework.uno_context.get_desktop", lambda _ctx: desktop)
+    tests_tu.set_harness_keeper_uid("1", keeper)
+    try:
+        assert plugin_tu.prepare_windows_writer_factory(object()) == 1
+        leftover.close.assert_not_called()
+        desktop.setActiveFrame.assert_called_once_with(frame)
+        assert plugin_tu._HARNESS_KEEPER_UID == "1"
+    finally:
+        plugin_tu._set_windows_leftover_open(0)
+        plugin_tu.set_harness_keeper_uid("")
+
+
+def test_windows_factory_load_args_named_for_any_leftover_factory():
+    """GHA 34633295036 / 34657826349: leftover Writer/Calc/Draw/Impress names."""
+    import plugin.tests.testing_utils as tu
+
+    assert tu._WINDOWS_FACTORY_TARGETS == {
+        "private:factory/swriter": "_wa_factory",
+        "private:factory/scalc": "_wa_scalc",
+        "private:factory/sdraw": "_wa_sdraw",
+        "private:factory/simpress": "_wa_simpress",
+    }
+    saved = tu._WINDOWS_FACTORY_SEQ
+    tu._WINDOWS_FACTORY_SEQ = 0
+    try:
+        assert tu._windows_factory_load_args("private:factory/swriter", 0) == ("_blank", 0)
+        assert tu._windows_factory_load_args("private:factory/scalc", 0) == ("_blank", 0)
+        assert tu._windows_factory_load_args("private:factory/sdraw", 0) == ("_blank", 0)
+        assert tu._windows_factory_load_args("private:factory/simpress", 0) == ("_blank", 0)
+        assert tu._windows_factory_load_args("private:factory/swriter", 2) == (
+            "_wa_factory",
+            8 | 55,
+        )
+        # Consecutive leftover Hidden swriter must reuse the same CREATE
+        # name (rich_html._wa_calc_html). Unique _wa_factory_5 hung.
+        assert tu._windows_factory_load_args("private:factory/swriter", 2) == (
+            "_wa_factory",
+            8 | 55,
+        )
+        # GHA 34633295036: unique leftover scalc _wa_factory_1 failed,
+        # _wa_factory_2 hung 30s. Stable _wa_scalc.
+        assert tu._windows_factory_load_args("private:factory/scalc", 2) == (
+            "_wa_scalc",
+            8 | 55,
+        )
+        # GHA 34657826349: unique leftover simpress _wa_factory_10 hung
+        # 30s at leftover_open=15. Stable leftover Draw / leftover
+        # Impress names; consecutive leftover loads reuse the same name.
+        assert tu._windows_factory_load_args("private:factory/sdraw", 2) == (
+            "_wa_sdraw",
+            8 | 55,
+        )
+        assert tu._windows_factory_load_args("private:factory/simpress", 2) == (
+            "_wa_simpress",
+            8 | 55,
+        )
+        assert tu._windows_factory_load_args("private:factory/scalc", 2) == (
+            "_wa_scalc",
+            8 | 55,
+        )
+        # Writer / Draw / Impress reuse must not consume the leftover
+        # seq (unknown leftover factory URLs only).
+        assert tu._windows_factory_load_args("private:factory/swriter", 2) == (
+            "_wa_factory",
+            8 | 55,
+        )
+        assert tu._windows_factory_load_args("private:factory/sdraw", 2) == (
+            "_wa_sdraw",
+            8 | 55,
+        )
+        assert tu._windows_factory_load_args("private:factory/simpress", 2) == (
+            "_wa_simpress",
+            8 | 55,
+        )
+        assert tu._windows_factory_load_args("private:factory/smath", 2) == (
+            "_wa_factory_1",
+            8 | 55,
+        )
+        assert tu._windows_factory_load_args("private:factory/sdraw", 2) == (
+            "_wa_sdraw",
+            8 | 55,
+        )
+        assert tu._windows_factory_load_args("private:factory/smath", 2) == (
+            "_wa_factory_2",
+            8 | 55,
+        )
+    finally:
+        tu._WINDOWS_FACTORY_SEQ = saved
+
+
+def test_create_native_doc_windows_prepares_writer_factory_before_load(monkeypatch):
+    """GHA 34602219973: second leftover Hidden swriter hung at target=_wa_factory_5.
+
+    First leftover swriter (_wa_factory_4) + close_doc returned. Unique
+    CREATE stacked an empty named frame; the next unique name hung 30s
+    in loadComponentFromURL. Consecutive leftover Hidden
+    create_native_doc(writer) must reuse one CREATE|GLOBAL name.
+    """
+    from unittest.mock import MagicMock, patch
+
+    from plugin.tests.testing_utils import TestingFactory
+    import plugin.tests.testing_utils as tu
+
+    desktop = MagicMock()
+    desktop.loadComponentFromURL.return_value = MagicMock()
+    calls = []
+    saved_seq = tu._WINDOWS_FACTORY_SEQ
+    tu._WINDOWS_FACTORY_SEQ = 0
+    monkeypatch.setattr(tu.sys, "platform", "win32")
+    monkeypatch.setattr(
+        tu, "prepare_windows_writer_factory", lambda _ctx: calls.append("prepare") or 2
+    )
+    try:
+        with (
+            patch("plugin.framework.uno_context.get_desktop", return_value=desktop),
+            patch("uno.createUnoStruct", return_value=MagicMock()),
+            patch("plugin.testing_runner.probe_uno_bridge", return_value="alive"),
+        ):
+            TestingFactory.create_native_doc(object(), "writer")
+            assert calls == ["prepare"]
+            args = desktop.loadComponentFromURL.call_args.args
+            assert args[0] == "private:factory/swriter"
+            assert args[1] == "_wa_factory"
+            assert args[2] == (8 | 55)
+            TestingFactory.create_native_doc(object(), "writer")
+            assert calls == ["prepare", "prepare"]
+            args = desktop.loadComponentFromURL.call_args.args
+            assert args[0] == "private:factory/swriter"
+            assert args[1] == "_wa_factory"
+            assert args[2] == (8 | 55)
+            # Leftover Calc reuses _wa_scalc (GHA 34633295036).
+            TestingFactory.create_native_doc(object(), "calc")
+            args = desktop.loadComponentFromURL.call_args.args
+            assert args[0] == "private:factory/scalc"
+            assert args[1] == "_wa_scalc"
+            assert args[2] == (8 | 55)
+    finally:
+        tu._WINDOWS_FACTORY_SEQ = saved_seq
+
+
+def test_create_native_doc_windows_calc_prepares_factory(monkeypatch):
+    """GHA 34633295036: leftover scalc reuses _wa_scalc under leftover_open>0.
+
+    Unique _wa_factory_1 failed (~766ms traceback wrap); _wa_factory_2
+    hung 30s. Consecutive leftover Hidden create_native_doc(calc) must
+    reuse one CREATE|GLOBAL name. Writer reuse uses _wa_factory.
+    Leftover Draw reuses _wa_sdraw (GHA 34657826349).
+    """
+    from unittest.mock import MagicMock, patch
+
+    from plugin.tests.testing_utils import TestingFactory
+    import plugin.tests.testing_utils as tu
+
+    desktop = MagicMock()
+    desktop.loadComponentFromURL.return_value = MagicMock()
+    calls = []
+    saved_seq = tu._WINDOWS_FACTORY_SEQ
+    tu._WINDOWS_FACTORY_SEQ = 0
+    monkeypatch.setattr(tu.sys, "platform", "win32")
+    monkeypatch.setattr(
+        tu, "prepare_windows_writer_factory", lambda _ctx: calls.append("prepare") or 2
+    )
+    try:
+        with (
+            patch("plugin.framework.uno_context.get_desktop", return_value=desktop),
+            patch("uno.createUnoStruct", return_value=MagicMock()),
+            patch("plugin.testing_runner.probe_uno_bridge", return_value="alive"),
+        ):
+            TestingFactory.create_native_doc(object(), "calc")
+            assert calls == ["prepare"]
+            args = desktop.loadComponentFromURL.call_args.args
+            assert args[0] == "private:factory/scalc"
+            assert args[1] == "_wa_scalc"
+            assert args[2] == (8 | 55)
+            TestingFactory.create_native_doc(object(), "calc")
+            assert calls == ["prepare", "prepare"]
+            args = desktop.loadComponentFromURL.call_args.args
+            assert args[0] == "private:factory/scalc"
+            assert args[1] == "_wa_scalc"
+            assert args[2] == (8 | 55)
+            TestingFactory.create_native_doc(object(), "writer")
+            args = desktop.loadComponentFromURL.call_args.args
+            assert args[0] == "private:factory/swriter"
+            assert args[1] == "_wa_factory"
+            assert args[2] == (8 | 55)
+            TestingFactory.create_native_doc(object(), "calc")
+            args = desktop.loadComponentFromURL.call_args.args
+            assert args[0] == "private:factory/scalc"
+            assert args[1] == "_wa_scalc"
+            assert args[2] == (8 | 55)
+            TestingFactory.create_native_doc(object(), "draw")
+            args = desktop.loadComponentFromURL.call_args.args
+            assert args[0] == "private:factory/sdraw"
+            assert args[1] == "_wa_sdraw"
+            assert args[2] == (8 | 55)
+    finally:
+        tu._WINDOWS_FACTORY_SEQ = saved_seq
+
+
+def test_create_native_doc_windows_impress_reuses_stable_name(monkeypatch):
+    """GHA 34657826349: leftover unique simpress _wa_factory_10 hung 30s.
+
+    leftover_open climbed to 15 after notebook/importer skipped Writer
+    close. Stable leftover swriter _wa_factory at leftover_open=15
+    returned; unique leftover simpress _wa_factory_10 hung in
+    loadComponentFromURL. GHA 34661915875: leftover _wa_simpress is
+    live and still hung. Consecutive leftover Hidden
+    create_native_doc(impress) at leftover_open<=2 must reuse one
+    CREATE|GLOBAL name. Draw reuse uses _wa_sdraw and must not steal
+    leftover Impress. GHA 34672065355: leftover_open=3 hangs.
+    """
+    from unittest.mock import MagicMock, patch
+
+    from plugin.tests.testing_utils import TestingFactory
+    import plugin.tests.testing_utils as tu
+
+    desktop = MagicMock()
+    desktop.loadComponentFromURL.return_value = MagicMock()
+    calls = []
+    saved_seq = tu._WINDOWS_FACTORY_SEQ
+    tu._WINDOWS_FACTORY_SEQ = 0
+    monkeypatch.setattr(tu.sys, "platform", "win32")
+    monkeypatch.setattr(
+        tu, "prepare_windows_writer_factory", lambda _ctx: calls.append("prepare") or 2
+    )
+    try:
+        with (
+            patch("plugin.framework.uno_context.get_desktop", return_value=desktop),
+            patch("uno.createUnoStruct", return_value=MagicMock()),
+            patch("plugin.testing_runner.probe_uno_bridge", return_value="alive"),
+        ):
+            TestingFactory.create_native_doc(object(), "impress")
+            assert calls == ["prepare"]
+            args = desktop.loadComponentFromURL.call_args.args
+            assert args[0] == "private:factory/simpress"
+            assert args[1] == "_wa_simpress"
+            assert args[2] == (8 | 55)
+            TestingFactory.create_native_doc(object(), "impress")
+            assert calls == ["prepare", "prepare"]
+            args = desktop.loadComponentFromURL.call_args.args
+            assert args[0] == "private:factory/simpress"
+            assert args[1] == "_wa_simpress"
+            assert args[2] == (8 | 55)
+            TestingFactory.create_native_doc(object(), "draw")
+            args = desktop.loadComponentFromURL.call_args.args
+            assert args[0] == "private:factory/sdraw"
+            assert args[1] == "_wa_sdraw"
+            assert args[2] == (8 | 55)
+            TestingFactory.create_native_doc(object(), "impress")
+            args = desktop.loadComponentFromURL.call_args.args
+            assert args[0] == "private:factory/simpress"
+            assert args[1] == "_wa_simpress"
+            assert args[2] == (8 | 55)
+            TestingFactory.create_native_doc(object(), "writer")
+            args = desktop.loadComponentFromURL.call_args.args
+            assert args[0] == "private:factory/swriter"
+            assert args[1] == "_wa_factory"
+            assert args[2] == (8 | 55)
+    finally:
+        tu._WINDOWS_FACTORY_SEQ = saved_seq
+
+
+def test_create_native_doc_windows_skips_leftover_impress_when_leftovers_high(
+    monkeypatch,
+):
+    """GHA 34661915875 / 34672065355: leftover _wa_simpress hung 30s.
+
+    #737's stable name is live. Leftover _wa_factory swriter at
+    leftover_open=15 returned. leftover_open=3 still hung (old max=4).
+    Skip leftover Draw/Impress; leftover Writer still loads.
+    """
+    import unittest
+    from unittest.mock import MagicMock, patch
+
+    from plugin.tests.testing_utils import TestingFactory
+    import plugin.tests.testing_utils as tu
+
+    desktop = MagicMock()
+    desktop.loadComponentFromURL.return_value = MagicMock()
+    calls = []
+    monkeypatch.setattr(tu.sys, "platform", "win32")
+    monkeypatch.setattr(
+        tu, "prepare_windows_writer_factory", lambda _ctx: calls.append("prepare") or 3
+    )
+    with (
+        patch("plugin.framework.uno_context.get_desktop", return_value=desktop),
+        patch("uno.createUnoStruct", return_value=MagicMock()),
+        patch("plugin.testing_runner.probe_uno_bridge", return_value="alive"),
+    ):
+        try:
+            TestingFactory.create_native_doc(object(), "impress")
+        except unittest.SkipTest as exc:
+            assert "simpress" in str(exc)
+            assert "leftovers=3" in str(exc)
+        else:
+            raise AssertionError("expected SkipTest")
+        desktop.loadComponentFromURL.assert_not_called()
+        try:
+            TestingFactory.create_native_doc(object(), "draw")
+        except unittest.SkipTest as exc:
+            assert "sdraw" in str(exc)
+        else:
+            raise AssertionError("expected SkipTest")
+        TestingFactory.create_native_doc(object(), "writer")
+        args = desktop.loadComponentFromURL.call_args.args
+        assert args[0] == "private:factory/swriter"
+        assert args[1] == "_wa_factory"
+        assert calls == ["prepare", "prepare", "prepare"]
+
+
+def test_windows_cross_app_factory_unsafe_threshold(monkeypatch):
+    """Leftover Draw/Impress at leftover_open=1 succeeded (34657826349).
+
+    GHA 34672065355: leftover_open=3 hung 30s; old max=4 still loaded.
+    """
+    import plugin.tests.testing_utils as tu
+
+    monkeypatch.setattr(tu.sys, "platform", "win32")
+    assert tu.windows_cross_app_factory_unsafe(1) is False
+    assert tu.windows_cross_app_factory_unsafe(2) is False
+    assert tu.windows_cross_app_factory_unsafe(3) is True
+    assert tu.windows_cross_app_factory_unsafe(4) is True
+    assert tu.windows_cross_app_factory_unsafe(15) is True
+    monkeypatch.setattr(tu.sys, "platform", "linux")
+    assert tu.windows_cross_app_factory_unsafe(3) is False
+    assert tu.windows_cross_app_factory_unsafe(15) is False
+    tu.skip_windows_cross_app_factory("private:factory/simpress", 15)
+    tu.skip_windows_cross_app_factory("private:factory/swriter", 15)
+
+
+def test_windows_notebook_load_args_avoids_blank(monkeypatch):
+    """GHA 34619751330: second Hidden _blank .ipynb hung after raw close."""
+    import plugin.tests.testing_utils as tu
+
+    monkeypatch.setattr(tu.sys, "platform", "win32")
+    target, flags = tu.windows_notebook_load_args()
+    assert target == "_wa_notebook"
+    assert flags == (8 | 55)
+    target2, flags2 = tu.windows_notebook_load_args()
+    assert target2 == "_wa_notebook"
+    assert flags2 == (8 | 55)
+    monkeypatch.setattr(tu.sys, "platform", "linux")
+    assert tu.windows_notebook_load_args() == ("_blank", 0)
+
+
+def test_note_windows_html_paste_leftover_sets_cached_count(monkeypatch):
+    """GHA 34649699848: leftover count stayed 0 after paste close skipped."""
+    import plugin.tests.testing_utils as tu
+
+    saved = tu._WINDOWS_LEFTOVER_OPEN
+    monkeypatch.setattr(tu.sys, "platform", "win32")
+    tu._set_windows_leftover_open(0)
+    try:
+        tu.note_windows_html_paste_leftover()
+        assert tu._windows_leftover_open() == 1
+        tu.note_windows_html_paste_leftover()
+        assert tu._windows_leftover_open() == 1
+    finally:
+        tu._set_windows_leftover_open(saved)
+
+
+def test_note_windows_html_paste_leftover_noop_on_posix(monkeypatch):
+    import plugin.tests.testing_utils as tu
+
+    saved = tu._WINDOWS_LEFTOVER_OPEN
+    monkeypatch.setattr(tu.sys, "platform", "linux")
+    tu._set_windows_leftover_open(0)
+    try:
+        tu.note_windows_html_paste_leftover()
+        assert tu._windows_leftover_open() == 0
+    finally:
+        tu._set_windows_leftover_open(saved)
+
+
+def test_reset_writer_page_regions_clears_first_page_and_shares(monkeypatch):
+    """GHA 35466498641: body wipe left header_first / FirstIsShared on the pool."""
+    from unittest.mock import MagicMock
+
+    import plugin.tests.testing_utils as tu
+
+    header = MagicMock()
+    header.getString.return_value = "leftover"
+    header_first = MagicMock()
+    header_first.getString.return_value = "letterhead"
+    table = MagicMock()
+    table.supportsService.side_effect = lambda s: s == "com.sun.star.text.TextTable"
+    leftover_enum = MagicMock()
+    leftover_enum.hasMoreElements.side_effect = [True, False]
+    leftover_enum.nextElement.return_value = table
+    header_first.createEnumeration.return_value = leftover_enum
+
+    style = MagicMock()
+    props = {
+        "HeaderText": header,
+        "HeaderTextFirst": header_first,
+        "HeaderTextLeft": None,
+        "FooterText": None,
+        "FooterTextFirst": None,
+        "FooterTextLeft": None,
+    }
+    style.getPropertyValue.side_effect = props.get
+    styles = MagicMock()
+    styles.getElementNames.return_value = ("Standard",)
+    styles.getByName.return_value = style
+    families = MagicMock()
+    families.getByName.return_value = styles
+    body = MagicMock()
+    doc = MagicMock()
+    doc.getStyleFamilies.return_value = families
+    doc.getText.return_value.createTextCursor.return_value = body
+
+    tu._reset_writer_page_regions(doc)
+
+    style.setPropertyValue.assert_any_call("FirstIsShared", True)
+    header.setString.assert_called_with("")
+    header_first.setString.assert_called_with("")
+    header_first.removeTextContent.assert_called_with(table)
+    body.setPropertyValue.assert_called_with("PageDescName", "Standard")
+
+
+def test_skip_windows_leftover_hidden_load_raises_on_win32(monkeypatch):
+    """GHA 34646877587 / 34648929578 / 34649699848: leftover Hidden/AWT hang."""
+    import unittest
+
+    import plugin.tests.testing_utils as tu
+
+    saved = tu._WINDOWS_LEFTOVER_OPEN
+    monkeypatch.setattr(tu.sys, "platform", "win32")
+    tu._set_windows_leftover_open(2)
+    try:
+        assert tu.windows_leftover_hidden_load_unsafe() is True
+        try:
+            tu.skip_windows_leftover_hidden_load("unit")
+        except unittest.SkipTest as exc:
+            assert "unit" in str(exc)
+            assert "leftovers=2" in str(exc)
+        else:
+            raise AssertionError("expected SkipTest")
+    finally:
+        tu._set_windows_leftover_open(saved)
+
+
+def test_skip_windows_leftover_hidden_load_noop_without_leftovers(monkeypatch):
+    import plugin.tests.testing_utils as tu
+
+    saved = tu._WINDOWS_LEFTOVER_OPEN
+    monkeypatch.setattr(tu.sys, "platform", "win32")
+    tu._set_windows_leftover_open(0)
+    try:
+        assert tu.windows_leftover_hidden_load_unsafe() is False
+        tu.skip_windows_leftover_hidden_load("unit")
+    finally:
+        tu._set_windows_leftover_open(saved)
+    monkeypatch.setattr(tu.sys, "platform", "linux")
+    tu._set_windows_leftover_open(3)
+    try:
+        assert tu.windows_leftover_hidden_load_unsafe() is False
+        tu.skip_windows_leftover_hidden_load("unit")
+    finally:
+        tu._set_windows_leftover_open(saved)
+
+
+def test_skip_windows_pooled_writer_reuse_raises_on_win32_reuse(monkeypatch):
+    """GHA 35470191616: leftover_open=0 pool reuse still needs a skip."""
+    import unittest
+
+    import plugin.tests.testing_utils as tu
+
+    saved_leftover = tu._WINDOWS_LEFTOVER_OPEN
+    saved_reused = tu._WINDOWS_WRITER_POOL_REUSED
+    monkeypatch.setattr(tu.sys, "platform", "win32")
+    tu._set_windows_leftover_open(0)
+    tu._set_windows_writer_pool_reused(True)
+    try:
+        assert tu.windows_leftover_hidden_load_unsafe() is False
+        assert tu.windows_pooled_writer_reuse() is True
+        tu.skip_windows_leftover_hidden_load("unit")
+        try:
+            tu.skip_windows_pooled_writer_reuse("unit")
+        except unittest.SkipTest as exc:
+            assert "unit" in str(exc)
+            assert "leftovers=0" in str(exc)
+        else:
+            raise AssertionError("expected SkipTest")
+    finally:
+        tu._set_windows_leftover_open(saved_leftover)
+        tu._set_windows_writer_pool_reused(saved_reused)
+
+
+def test_skip_windows_pooled_writer_reuse_noop_without_reuse(monkeypatch):
+    import plugin.tests.testing_utils as tu
+
+    saved_leftover = tu._WINDOWS_LEFTOVER_OPEN
+    saved_reused = tu._WINDOWS_WRITER_POOL_REUSED
+    monkeypatch.setattr(tu.sys, "platform", "win32")
+    tu._set_windows_leftover_open(0)
+    tu._set_windows_writer_pool_reused(False)
+    try:
+        assert tu.windows_pooled_writer_reuse() is False
+        tu.skip_windows_pooled_writer_reuse("unit")
+    finally:
+        tu._set_windows_leftover_open(saved_leftover)
+        tu._set_windows_writer_pool_reused(saved_reused)
+    monkeypatch.setattr(tu.sys, "platform", "linux")
+    tu._set_windows_leftover_open(0)
+    tu._set_windows_writer_pool_reused(True)
+    try:
+        assert tu.windows_pooled_writer_reuse() is False
+        tu.skip_windows_pooled_writer_reuse("unit")
+    finally:
+        tu._set_windows_leftover_open(saved_leftover)
+        tu._set_windows_writer_pool_reused(saved_reused)
+
+
+def test_skip_windows_awt_top_dialog_raises_on_win32(monkeypatch):
+    """GHA 34671277292: leftover_open=0 slash setVisible hung 30s after calc."""
+    import unittest
+
+    import plugin.tests.testing_utils as tu
+
+    monkeypatch.setattr(tu.sys, "platform", "win32")
+    assert tu.windows_awt_top_dialog_unsafe() is True
+    try:
+        tu.skip_windows_awt_top_dialog("slash_popup createPeer/setVisible")
+    except unittest.SkipTest as exc:
+        assert "slash_popup" in str(exc)
+        assert "AWT TOP dialog" in str(exc)
+    else:
+        raise AssertionError("expected SkipTest")
+    monkeypatch.setattr(tu.sys, "platform", "linux")
+    assert tu.windows_awt_top_dialog_unsafe() is False
+    tu.skip_windows_awt_top_dialog("slash_popup createPeer/setVisible")
+
+
+def test_create_native_doc_windows_skips_hidden_blank_after_bitmap(monkeypatch):
+    """GHA 34670295632: after Budget_read bitmap, Hidden _blank hung 30s.
+
+    #734 skipped later document_research Hidden siblings. Next suite
+    text_helpers leftover writer reuse then leftover_open=0
+    target=_blank hung. Skip Hidden _blank after bitmap; named leftover
+    factories still load.
+    """
+    import unittest
+    from unittest.mock import MagicMock, patch
+
+    from plugin.tests.testing_utils import TestingFactory
+    import plugin.tests.testing_utils as tu
+
+    desktop = MagicMock()
+    desktop.loadComponentFromURL.return_value = MagicMock()
+    saved_bitmap = tu._WINDOWS_HIDDEN_OPEN_BITMAP
+    monkeypatch.setattr(tu.sys, "platform", "win32")
+    tu._set_windows_hidden_open_bitmap(True)
+    try:
+        with (
+            patch("plugin.framework.uno_context.get_desktop", return_value=desktop),
+            patch("uno.createUnoStruct", return_value=MagicMock()),
+            patch("plugin.testing_runner.probe_uno_bridge", return_value="alive"),
+        ):
+            monkeypatch.setattr(tu, "prepare_windows_writer_factory", lambda _ctx: 0)
+            try:
+                TestingFactory.create_native_doc(object(), "writer")
+            except unittest.SkipTest as exc:
+                assert "Hidden _blank" in str(exc)
+                assert "system bitmap" in str(exc)
+            else:
+                raise AssertionError("expected SkipTest")
+            desktop.loadComponentFromURL.assert_not_called()
+            monkeypatch.setattr(tu, "prepare_windows_writer_factory", lambda _ctx: 2)
+            TestingFactory.create_native_doc(object(), "writer")
+            args = desktop.loadComponentFromURL.call_args.args
+            assert args[0] == "private:factory/swriter"
+            assert args[1] == "_wa_factory"
+    finally:
+        tu._set_windows_hidden_open_bitmap(saved_bitmap)
+
+
+def test_windows_hidden_open_bitmap_err_and_skip(monkeypatch):
+    """GHA 34655847157: leftover_open=0 Hidden Budget_read bitmap then hang."""
+    import unittest
+
+    import plugin.tests.testing_utils as tu
+
+    saved = tu._WINDOWS_HIDDEN_OPEN_BITMAP
+    monkeypatch.setattr(tu.sys, "platform", "win32")
+    tu._set_windows_hidden_open_bitmap(False)
+    try:
+        assert tu.windows_hidden_open_bitmap_err(None) is False
+        assert tu.windows_hidden_open_bitmap_err("Failed to open x") is False
+        assert tu.windows_hidden_open_bitmap_err(
+            "Failed to open Budget_read.ods: Could not create system bitmap!"
+        ) is True
+        tu.skip_windows_hidden_open_after_bitmap("unit")
+        tu.note_windows_hidden_open_bitmap(
+            "Failed to open Budget_read.ods: Could not create system bitmap!"
+        )
+        assert tu._windows_hidden_open_bitmap() is True
+        try:
+            tu.skip_windows_hidden_open_after_bitmap("unit")
+        except unittest.SkipTest as exc:
+            assert "unit" in str(exc)
+            assert "system bitmap" in str(exc)
+        else:
+            raise AssertionError("expected SkipTest")
+    finally:
+        tu._set_windows_hidden_open_bitmap(saved)
+    monkeypatch.setattr(tu.sys, "platform", "linux")
+    tu._set_windows_hidden_open_bitmap(False)
+    try:
+        assert tu.windows_hidden_open_bitmap_err(
+            "Could not create system bitmap!"
+        ) is False
+        tu.note_windows_hidden_open_bitmap("Could not create system bitmap!")
+        assert tu._windows_hidden_open_bitmap() is False
+        tu.skip_windows_hidden_open_after_bitmap("unit")
+    finally:
+        tu._set_windows_hidden_open_bitmap(saved)
+
+
+def test_windows_should_reuse_writer_even_without_leftovers(monkeypatch):
+    """GHA 34652644656: leftover_open=0 second Hidden _blank swriter hung."""
+    import plugin.tests.testing_utils as tu
+
+    monkeypatch.setattr(tu.sys, "platform", "win32")
+    tu.set_windows_notebook_host(False)
+    assert tu._windows_should_reuse_writer(object()) is True
+    tu.set_windows_notebook_host(True)
+    try:
+        assert tu._windows_should_reuse_writer(object()) is True
+    finally:
+        tu.set_windows_notebook_host(False)
+    monkeypatch.setattr(tu.sys, "platform", "linux")
+    assert tu._windows_should_reuse_writer(object()) is False
+    assert tu._windows_should_reuse_writer(None) is False
+
+
+def test_draw_doc_has_math_ole_reads_clsid():
+    from unittest.mock import MagicMock
+
+    from plugin.tests.testing_utils import _MATH_OLE_CLSID, _draw_doc_has_math_ole
+
+    shape = MagicMock()
+    shape.CLSID = _MATH_OLE_CLSID
+    page = MagicMock()
+    page.getCount.return_value = 1
+    page.getByIndex.return_value = shape
+    pages = MagicMock()
+    pages.getCount.return_value = 1
+    pages.getByIndex.return_value = page
+    doc = MagicMock()
+    doc.getDrawPages.return_value = pages
+    assert _draw_doc_has_math_ole(doc) is True
+    shape.CLSID = "not-math"
+    assert _draw_doc_has_math_ole(doc) is False
+    assert _draw_doc_has_math_ole(None) is False
+
+
+def test_close_doc_windows_skips_math_ole_draw(monkeypatch, capsys):
+    """GHA 34607010446: close_doc dispose of Math OLE Draw killed soffice."""
+    from unittest.mock import MagicMock
+
+    from plugin.tests.testing_utils import TestingFactory, mark_windows_math_ole_doc
+    import plugin.tests.testing_utils as tu
+
+    doc = MagicMock()
+    doc.RuntimeUID = "48"
+    doc.supportsService.side_effect = lambda svc: svc.endswith("DrawingDocument")
+    monkeypatch.setattr(tu.sys, "platform", "win32")
+    monkeypatch.setattr(tu, "reactivate_harness_keeper", lambda desktop=None: True)
+    tu._clear_windows_math_ole_uids()
+    try:
+        mark_windows_math_ole_doc(doc)
+        TestingFactory.close_doc(doc)
+        doc.close.assert_not_called()
+        doc.supportsService.assert_not_called()
+        err = capsys.readouterr().err
+        assert "close_doc: skip math ole close (windows) uid=48" in err
+        assert "svc=draw" not in err
+    finally:
+        tu._clear_windows_math_ole_uids()
+
+
+def test_close_doc_windows_draw_without_math_still_closes(monkeypatch, capsys):
+    from unittest.mock import MagicMock
+
+    from plugin.tests.testing_utils import TestingFactory
+    import plugin.tests.testing_utils as tu
+
+    shape = MagicMock()
+    shape.CLSID = "not-math"
+    page = MagicMock()
+    page.getCount.return_value = 1
+    page.getByIndex.return_value = shape
+    pages = MagicMock()
+    pages.getCount.return_value = 1
+    pages.getByIndex.return_value = page
+    doc = MagicMock()
+    doc.RuntimeUID = "47"
+    doc.supportsService.side_effect = lambda svc: svc.endswith("DrawingDocument")
+    doc.getDrawPages.return_value = pages
+    monkeypatch.setattr(tu.sys, "platform", "win32")
+    monkeypatch.setattr("gc.collect", lambda: None)
+    monkeypatch.setattr("time.sleep", lambda _seconds: None)
+    monkeypatch.setattr(tu, "_windows_leftover_open", lambda: 3)
+    tu._HARNESS_KEEPER_UID = "1"
+    tu._clear_windows_math_ole_uids()
+    try:
+        TestingFactory.close_doc(doc)
+        doc.close.assert_called_once_with(True)
+        doc.getDrawPages.assert_not_called()
+        err = capsys.readouterr().err
+        assert "skip math ole close" not in err
+        assert "svc=draw" not in err
+    finally:
+        tu._HARNESS_KEEPER_UID = ""
+        tu._clear_windows_math_ole_uids()
+
+
+def test_close_doc_posix_closes_math_ole_draw(monkeypatch):
+    from unittest.mock import MagicMock
+
+    from plugin.tests.testing_utils import TestingFactory, mark_windows_math_ole_doc
+    import plugin.tests.testing_utils as tu
+
+    doc = MagicMock()
+    doc.RuntimeUID = "48"
+    doc.supportsService.side_effect = lambda svc: svc.endswith("DrawingDocument")
+    monkeypatch.setattr(tu.sys, "platform", "linux")
+    monkeypatch.setattr("gc.collect", lambda: None)
+    monkeypatch.setattr("time.sleep", lambda _seconds: None)
+    mark_windows_math_ole_doc(doc)
+    TestingFactory.close_doc(doc)
+    doc.close.assert_called_once_with(True)
+
+
+def test_close_doc_skips_windows_notebook_leftover(monkeypatch):
+    """GHA 34646877587: close notebook leftover then next _wa_notebook hung."""
+    from unittest.mock import MagicMock, patch
+
+    from plugin.tests.testing_utils import TestingFactory
+    import plugin.tests.testing_utils as tu
+
+    doc = MagicMock()
+    doc.supportsService.side_effect = lambda svc: svc.endswith("TextDocument")
+    doc.RuntimeUID = "41"
+    saved = tu._WINDOWS_LEFTOVER_OPEN
+    monkeypatch.setattr(tu.sys, "platform", "win32")
+    monkeypatch.setattr(tu, "reactivate_harness_keeper", lambda desktop=None: True)
+    tu._set_windows_leftover_open(3)
+    try:
+        with patch(
+            "plugin.notebook.cell_registry.has_notebook_registry",
+            return_value=True,
+        ):
+            TestingFactory.close_doc(doc)
+        doc.close.assert_not_called()
+    finally:
+        tu._set_windows_leftover_open(saved)
+
+
+def test_windows_notebook_host_uses_dedicated_factory_target(monkeypatch):
+    """Notebook suites must not leftover-reuse HTML-paste Writers.
+
+    GHA 34661915875: leftover notebook host still reused leftover
+    ``_wa_notebook_host`` so leftover_open does not climb to 15.
+    """
+    import plugin.tests.testing_utils as tu
+
+    saved = tu._WINDOWS_LEFTOVER_OPEN
+    monkeypatch.setattr(tu.sys, "platform", "win32")
+    tu.set_windows_notebook_host(True)
+    tu._set_windows_leftover_open(5)
+    try:
+        target, flags = tu._windows_factory_load_args("private:factory/swriter", 5)
+        assert target == "_wa_notebook_host"
+        assert flags == (8 | 55)
+        assert tu._windows_should_reuse_writer(object()) is True
+    finally:
+        tu.set_windows_notebook_host(False)
+        tu._set_windows_leftover_open(saved)
+
+
+def test_close_doc_skips_windows_writer_when_leftovers_open(monkeypatch):
+    """GHA 34602219973: close_doc uid=34 returned; next unique swriter hung."""
+    from unittest.mock import MagicMock
+
+    from plugin.tests.testing_utils import TestingFactory
+    import plugin.tests.testing_utils as tu
+
+    doc = MagicMock()
+    doc.supportsService.side_effect = lambda svc: svc.endswith("TextDocument")
+    doc.RuntimeUID = "34"
+    saved = tu._WINDOWS_LEFTOVER_OPEN
+    tu._WINDOWS_LEFTOVER_OPEN = 2
+    monkeypatch.setattr(tu.sys, "platform", "win32")
+    monkeypatch.setattr(tu, "reactivate_harness_keeper", lambda desktop=None: True)
+    monkeypatch.setattr(
+        "plugin.notebook.cell_registry.has_notebook_registry",
+        lambda _doc: False,
+    )
+    try:
+        TestingFactory.close_doc(doc)
+        doc.close.assert_not_called()
+    finally:
+        tu._WINDOWS_LEFTOVER_OPEN = saved
+
+
+def test_native_doc_windows_reuses_writer_when_leftovers_open(monkeypatch):
+    """Second leftover swriter must not factory-load after the first close."""
+    from unittest.mock import MagicMock
+
+    from plugin.tests.testing_utils import TestingFactory
+    import plugin.tests.testing_utils as tu
+
+    writer = MagicMock(name="pooled_writer")
+    created = []
+    monkeypatch.setattr(tu.sys, "platform", "win32")
+    monkeypatch.setattr(tu, "prepare_windows_writer_factory", lambda _ctx: 2)
+    monkeypatch.setattr(tu, "reset_native_doc", lambda *a, **k: None)
+    monkeypatch.setattr(tu, "_writer_pool_is_clean", lambda _doc: True)
+    monkeypatch.setattr(
+        TestingFactory,
+        "create_native_doc",
+        lambda *a, **k: created.append("create") or writer,
+    )
+    monkeypatch.setattr(
+        TestingFactory, "close_doc", lambda *a, **k: created.append("close")
+    )
+    tu._NATIVE_DOC_POOL.clear()
+    ctx = object()
+    try:
+        with TestingFactory.native_doc(ctx, "writer") as first:
+            assert first is writer
+        with TestingFactory.native_doc(ctx, "writer") as second:
+            assert second is writer
+        assert created == ["create"]
+    finally:
+        tu._NATIVE_DOC_POOL.clear()
+
+
+def test_native_doc_windows_marks_pooled_writer_reuse_at_leftover_open_zero(
+    monkeypatch,
+):
+    """GHA 35470191616: leftover_open=0 still reuses; skip must see the pool."""
+    import unittest
+    from unittest.mock import MagicMock
+
+    from plugin.tests.testing_utils import TestingFactory
+    import plugin.tests.testing_utils as tu
+
+    writer = MagicMock(name="pooled_writer")
+    created = []
+    saved_leftover = tu._WINDOWS_LEFTOVER_OPEN
+    saved_reused = tu._WINDOWS_WRITER_POOL_REUSED
+    monkeypatch.setattr(tu.sys, "platform", "win32")
+    monkeypatch.setattr(tu, "reset_native_doc", lambda *a, **k: None)
+    monkeypatch.setattr(tu, "_writer_pool_is_clean", lambda _doc: True)
+    monkeypatch.setattr(
+        TestingFactory,
+        "create_native_doc",
+        lambda *a, **k: created.append("create") or writer,
+    )
+    monkeypatch.setattr(
+        TestingFactory, "close_doc", lambda *a, **k: created.append("close")
+    )
+    tu._NATIVE_DOC_POOL.clear()
+    tu._set_windows_leftover_open(0)
+    tu._set_windows_writer_pool_reused(False)
+    ctx = object()
+    try:
+        with TestingFactory.native_doc(ctx, "writer") as first:
+            assert first is writer
+            assert tu._windows_writer_pool_reused() is False
+            tu.skip_windows_pooled_writer_reuse("unit")
+        with TestingFactory.native_doc(ctx, "writer") as second:
+            assert second is writer
+            assert tu._windows_writer_pool_reused() is True
+            assert tu.windows_leftover_hidden_load_unsafe() is False
+            try:
+                tu.skip_windows_pooled_writer_reuse("unit")
+            except unittest.SkipTest as exc:
+                assert "unit" in str(exc)
+                assert "leftovers=0" in str(exc)
+            else:
+                raise AssertionError("expected SkipTest")
+        assert created == ["create"]
+    finally:
+        tu._set_windows_leftover_open(saved_leftover)
+        tu._set_windows_writer_pool_reused(saved_reused)
+        tu._NATIVE_DOC_POOL.clear()
+
+
+def test_native_doc_windows_reuses_notebook_host(monkeypatch, capsys):
+    """GHA 34661915875: leftover notebook host reuse keeps leftover_open low."""
+    from unittest.mock import MagicMock
+
+    from plugin.tests.testing_utils import TestingFactory
+    import plugin.tests.testing_utils as tu
+
+    writer = MagicMock(name="notebook_host")
+    created = []
+    monkeypatch.setattr(tu.sys, "platform", "win32")
+    monkeypatch.setattr(tu, "reset_native_doc", lambda *a, **k: None)
+    monkeypatch.setattr(tu, "_writer_pool_is_clean", lambda _doc: True)
+    monkeypatch.setattr(
+        TestingFactory,
+        "create_native_doc",
+        lambda *a, **k: created.append("create") or writer,
+    )
+    tu._NATIVE_DOC_POOL.clear()
+    tu.set_windows_notebook_host(True)
+    ctx = object()
+    try:
+        with TestingFactory.native_doc(ctx, "writer") as first:
+            assert first is writer
+        with TestingFactory.native_doc(ctx, "writer") as second:
+            assert second is writer
+        assert created == ["create"]
+        err = capsys.readouterr().err
+        assert "leftover notebook host reuse" in err
+        assert "leftover writer reuse" not in err
+    finally:
+        tu.set_windows_notebook_host(False)
+        tu._NATIVE_DOC_POOL.clear()
+
+
+def test_native_doc_windows_reuses_calc_when_leftovers_open(monkeypatch):
+    """GHA 34643210006: leftover _wa_scalc hung; reuse=False must not factory-load."""
+    from unittest.mock import MagicMock
+
+    from plugin.tests.testing_utils import TestingFactory
+    import plugin.tests.testing_utils as tu
+
+    calc = MagicMock(name="pooled_calc")
+    created = []
+    saved = tu._WINDOWS_LEFTOVER_OPEN
+    monkeypatch.setattr(tu.sys, "platform", "win32")
+    monkeypatch.setattr(tu, "reset_native_doc", lambda *a, **k: None)
+    monkeypatch.setattr(
+        TestingFactory,
+        "create_native_doc",
+        lambda *a, **k: created.append("create") or calc,
+    )
+    tu._NATIVE_DOC_POOL.clear()
+    tu._set_windows_leftover_open(5)
+    ctx = object()
+    try:
+        with TestingFactory.native_doc(ctx, "calc") as first:
+            assert first is calc
+        with TestingFactory.native_doc(ctx, "calc", reuse=False) as second:
+            assert second is calc
+        assert created == ["create"]
+    finally:
+        tu._set_windows_leftover_open(saved)
+        tu._NATIVE_DOC_POOL.clear()
+
+
+def test_native_doc_impress_teardown_uses_close_draw_family(monkeypatch):
+    """GHA 35413789298: non-pooled Impress must not close_doc (GC+50ms)."""
+    from unittest.mock import MagicMock
+
+    import plugin.tests.testing_utils as tu
+    from plugin.tests.testing_utils import TestingFactory
+
+    doc = MagicMock(name="impress_doc")
+    doc.RuntimeUID = "impress-uid"
+    events = []
+
+    def _fail_close_doc(_closed):
+        raise AssertionError("native_doc impress teardown must not call close_doc")
+
+    monkeypatch.setattr(TestingFactory, "create_native_doc", lambda *_a, **_k: doc)
+    monkeypatch.setattr(TestingFactory, "close_doc", _fail_close_doc)
+    monkeypatch.setattr(
+        tu,
+        "close_draw_family_doc",
+        lambda closed: events.append(("close_draw_family", closed)),
+    )
+    monkeypatch.setattr(tu, "settle_after_draw_family_close", lambda: events.append("settle"))
+    monkeypatch.setattr(
+        tu,
+        "_log_office_health_after_close",
+        lambda _ctx, doc_type: events.append(("health", doc_type)),
+    )
+    with TestingFactory.native_doc(object(), "impress") as got:
+        assert got is doc
+    assert events == [
+        ("close_draw_family", doc),
+        "settle",
+        ("health", "impress"),
+    ]
+
+
+def test_native_doc_draw_teardown_uses_close_draw_family(monkeypatch):
+    """Same Draw-family routing for @with_native_doc('draw')."""
+    from unittest.mock import MagicMock
+
+    import plugin.tests.testing_utils as tu
+    from plugin.tests.testing_utils import TestingFactory
+
+    doc = MagicMock(name="draw_doc")
+    doc.RuntimeUID = "draw-uid"
+    events = []
+
+    def _fail_close_doc(_closed):
+        raise AssertionError("native_doc draw teardown must not call close_doc")
+
+    monkeypatch.setattr(TestingFactory, "create_native_doc", lambda *_a, **_k: doc)
+    monkeypatch.setattr(TestingFactory, "close_doc", _fail_close_doc)
+    monkeypatch.setattr(
+        tu,
+        "close_draw_family_doc",
+        lambda closed: events.append(("close_draw_family", closed)),
+    )
+    monkeypatch.setattr(tu, "settle_after_draw_family_close", lambda: events.append("settle"))
+    monkeypatch.setattr(
+        tu,
+        "_log_office_health_after_close",
+        lambda _ctx, doc_type: events.append(("health", doc_type)),
+    )
+    with TestingFactory.native_doc(object(), "draw") as got:
+        assert got is doc
+    assert events == [
+        ("close_draw_family", doc),
+        "settle",
+        ("health", "draw"),
+    ]
+
+
+def test_native_doc_impress_teardown_skips_close_when_windows_leftovers(
+    monkeypatch, capsys
+):
+    """GHA 35450779692: leftover Writer + raw Impress close killed soffice."""
+    from unittest.mock import MagicMock
+
+    import plugin.tests.testing_utils as tu
+    from plugin.tests.testing_utils import TestingFactory
+
+    doc = MagicMock(name="impress_doc")
+    doc.RuntimeUID = "impress-uid"
+    events = []
+
+    def _fail_close(_closed):
+        raise AssertionError("leftover impress teardown must not close")
+
+    monkeypatch.setattr(TestingFactory, "create_native_doc", lambda *_a, **_k: doc)
+    monkeypatch.setattr(TestingFactory, "close_doc", _fail_close)
+    monkeypatch.setattr(tu, "close_draw_family_doc", _fail_close)
+    monkeypatch.setattr(tu, "settle_after_draw_family_close", _fail_close)
+    monkeypatch.setattr(
+        tu,
+        "_log_office_health_after_close",
+        lambda _ctx, doc_type: events.append(("health", doc_type)),
+    )
+    recycle_calls = []
+    monkeypatch.setattr(tu.sys, "platform", "win32")
+    monkeypatch.setattr(
+        "plugin.testing_runner.request_office_recycle_after_suite",
+        lambda: recycle_calls.append("recycle"),
+    )
+    saved = tu._windows_leftover_open()
+    tu._set_windows_leftover_open(1)
+    try:
+        with TestingFactory.native_doc(object(), "impress") as got:
+            assert got is doc
+        assert events == [("health", "impress")]
+        assert recycle_calls == ["recycle"]
+        err = capsys.readouterr().err
+        assert "native_doc: teardown skip impress/draw close leftover_open=1" in err
+        assert "native_doc: teardown close_draw_family start" not in err
+    finally:
+        tu._set_windows_leftover_open(saved)
+
+
+def test_native_doc_draw_teardown_skips_close_when_windows_leftovers(
+    monkeypatch, capsys
+):
+    """Same leftover skip for @with_native_doc('draw') on win32."""
+    from unittest.mock import MagicMock
+
+    import plugin.tests.testing_utils as tu
+    from plugin.tests.testing_utils import TestingFactory
+
+    doc = MagicMock(name="draw_doc")
+    doc.RuntimeUID = "draw-uid"
+    events = []
+
+    def _fail_close(_closed=None):
+        raise AssertionError("leftover draw teardown must not close")
+
+    monkeypatch.setattr(TestingFactory, "create_native_doc", lambda *_a, **_k: doc)
+    monkeypatch.setattr(TestingFactory, "close_doc", _fail_close)
+    monkeypatch.setattr(tu, "close_draw_family_doc", _fail_close)
+    monkeypatch.setattr(tu, "settle_after_draw_family_close", _fail_close)
+    monkeypatch.setattr(
+        tu,
+        "_log_office_health_after_close",
+        lambda _ctx, doc_type: events.append(("health", doc_type)),
+    )
+    recycle_calls = []
+    monkeypatch.setattr(tu.sys, "platform", "win32")
+    monkeypatch.setattr(
+        "plugin.testing_runner.request_office_recycle_after_suite",
+        lambda: recycle_calls.append("recycle"),
+    )
+    saved = tu._windows_leftover_open()
+    tu._set_windows_leftover_open(2)
+    try:
+        with TestingFactory.native_doc(object(), "draw") as got:
+            assert got is doc
+        assert events == [("health", "draw")]
+        assert recycle_calls == ["recycle"]
+        err = capsys.readouterr().err
+        assert "native_doc: teardown skip impress/draw close leftover_open=2" in err
+    finally:
+        tu._set_windows_leftover_open(saved)
+
+
+def test_native_doc_impress_teardown_closes_on_windows_without_leftovers(monkeypatch):
+    """leftover_open=0 still raw-closes on win32 (not an always-skip)."""
+    from unittest.mock import MagicMock
+
+    import plugin.tests.testing_utils as tu
+    from plugin.tests.testing_utils import TestingFactory
+
+    doc = MagicMock(name="impress_doc")
+    doc.RuntimeUID = "impress-uid"
+    events = []
+
+    def _fail_close_doc(_closed):
+        raise AssertionError("native_doc impress teardown must not call close_doc")
+
+    monkeypatch.setattr(TestingFactory, "create_native_doc", lambda *_a, **_k: doc)
+    monkeypatch.setattr(TestingFactory, "close_doc", _fail_close_doc)
+    monkeypatch.setattr(
+        tu,
+        "close_draw_family_doc",
+        lambda closed: events.append(("close_draw_family", closed)),
+    )
+    monkeypatch.setattr(tu, "settle_after_draw_family_close", lambda: events.append("settle"))
+    monkeypatch.setattr(
+        tu,
+        "_log_office_health_after_close",
+        lambda _ctx, doc_type: events.append(("health", doc_type)),
+    )
+    monkeypatch.setattr(tu.sys, "platform", "win32")
+    saved = tu._windows_leftover_open()
+    tu._set_windows_leftover_open(0)
+    try:
+        with TestingFactory.native_doc(object(), "impress") as got:
+            assert got is doc
+        assert events == [
+            ("close_draw_family", doc),
+            "settle",
+            ("health", "impress"),
+        ]
+    finally:
+        tu._set_windows_leftover_open(saved)
+
+
+def test_native_doc_impress_teardown_closes_on_posix_with_leftovers(monkeypatch):
+    """Linux still close_draw_family even when leftover_open is cached >0."""
+    from unittest.mock import MagicMock
+
+    import plugin.tests.testing_utils as tu
+    from plugin.tests.testing_utils import TestingFactory
+
+    doc = MagicMock(name="impress_doc")
+    doc.RuntimeUID = "impress-uid"
+    events = []
+
+    def _fail_close_doc(_closed):
+        raise AssertionError("native_doc impress teardown must not call close_doc")
+
+    monkeypatch.setattr(TestingFactory, "create_native_doc", lambda *_a, **_k: doc)
+    monkeypatch.setattr(TestingFactory, "close_doc", _fail_close_doc)
+    monkeypatch.setattr(
+        tu,
+        "close_draw_family_doc",
+        lambda closed: events.append(("close_draw_family", closed)),
+    )
+    monkeypatch.setattr(tu, "settle_after_draw_family_close", lambda: events.append("settle"))
+    monkeypatch.setattr(
+        tu,
+        "_log_office_health_after_close",
+        lambda _ctx, doc_type: events.append(("health", doc_type)),
+    )
+    monkeypatch.setattr(tu.sys, "platform", "linux")
+    saved = tu._windows_leftover_open()
+    tu._set_windows_leftover_open(1)
+    try:
+        with TestingFactory.native_doc(object(), "impress") as got:
+            assert got is doc
+        assert events == [
+            ("close_draw_family", doc),
+            "settle",
+            ("health", "impress"),
+        ]
+    finally:
+        tu._set_windows_leftover_open(saved)
+
+
+def test_native_doc_writer_teardown_still_uses_close_doc(monkeypatch):
+    """Writer is not Draw-family; keep close_doc."""
+    from unittest.mock import MagicMock
+
+    import plugin.tests.testing_utils as tu
+    from plugin.tests.testing_utils import TestingFactory
+
+    doc = MagicMock(name="writer_doc")
+    events = []
+
+    def _fail_draw_family(_closed):
+        raise AssertionError("Writer teardown must not call close_draw_family_doc")
+
+    monkeypatch.setattr(TestingFactory, "create_native_doc", lambda *_a, **_k: doc)
+    monkeypatch.setattr(
+        TestingFactory, "close_doc", lambda *_a, **_k: events.append("close_doc")
+    )
+    monkeypatch.setattr(tu, "close_draw_family_doc", _fail_draw_family)
+    monkeypatch.setattr(
+        tu, "settle_after_draw_family_close", lambda: events.append("settle")
+    )
+    monkeypatch.setattr(
+        tu, "_log_office_health_after_close", lambda *_a, **_k: events.append("health")
+    )
+    monkeypatch.setattr(tu, "_windows_should_reuse_writer", lambda _ctx: False)
+    with TestingFactory.native_doc(object(), "writer", reuse=False) as got:
+        assert got is doc
+    assert events == ["close_doc", "health"]
+
+
+def test_native_doc_draw_math_ole_teardown_keeps_close_doc_skip(monkeypatch):
+    """GHA 34607010446: Math OLE Draw still skips via close_doc, not raw close."""
+    from unittest.mock import MagicMock
+
+    import plugin.tests.testing_utils as tu
+    from plugin.tests.testing_utils import TestingFactory
+
+    doc = MagicMock(name="math_draw")
+    doc.RuntimeUID = "math-ole-uid"
+    events = []
+
+    def _fail_draw_family(_closed):
+        raise AssertionError("Math OLE Draw must not raw-close via close_draw_family_doc")
+
+    monkeypatch.setattr(tu.sys, "platform", "win32")
+    tu._clear_windows_math_ole_uids()
+    tu.mark_windows_math_ole_doc(doc)
+    saved = tu._windows_leftover_open()
+    tu._set_windows_leftover_open(1)
+    monkeypatch.setattr(TestingFactory, "create_native_doc", lambda *_a, **_k: doc)
+    monkeypatch.setattr(
+        TestingFactory, "close_doc", lambda *_a, **_k: events.append("close_doc")
+    )
+    monkeypatch.setattr(tu, "close_draw_family_doc", _fail_draw_family)
+    monkeypatch.setattr(
+        tu, "settle_after_draw_family_close", lambda: events.append("settle")
+    )
+    monkeypatch.setattr(
+        tu, "_log_office_health_after_close", lambda *_a, **_k: events.append("health")
+    )
+    try:
+        with TestingFactory.native_doc(object(), "draw") as got:
+            assert got is doc
+        assert events == ["close_doc", "health"]
+    finally:
+        tu._clear_windows_math_ole_uids()
+        tu._set_windows_leftover_open(saved)
+
+
+def test_native_doc_teardown_reset_failure_closes_without_session_clear(monkeypatch):
+    """Failed pooled reset closes the doc and skips session clear (no return in finally)."""
+    from unittest.mock import MagicMock
+
+    from plugin.tests.testing_utils import TestingFactory
+    import plugin.tests.testing_utils as tu
+
+    doc = MagicMock(name="pooled_doc")
+    events = []
+
+    def reset_fail(*_a, **_k):
+        events.append("reset")
+        raise RuntimeError("reset failed")
+
+    monkeypatch.setattr(tu, "reset_native_doc", reset_fail)
+    monkeypatch.setattr(TestingFactory, "create_native_doc", lambda *_a, **_k: doc)
+    monkeypatch.setattr(
+        TestingFactory, "close_doc", lambda *_a, **_k: events.append("close")
+    )
+    monkeypatch.setattr(
+        "plugin.scripting.session_manager.clear_active_calc_session",
+        lambda: events.append("clear_session"),
+    )
+    tu._NATIVE_DOC_POOL.clear()
+    ctx = object()
+    try:
+        with TestingFactory.native_doc(ctx, "calc", reuse=True) as got:
+            assert got is doc
+        assert events == ["reset", "close"]
+    finally:
+        tu._NATIVE_DOC_POOL.clear()
+
+
+def test_create_native_doc_posix_does_not_prepare_writer_factory(monkeypatch):
+    from unittest.mock import MagicMock, patch
+
+    from plugin.tests.testing_utils import TestingFactory
+    import plugin.tests.testing_utils as tu
+
+    desktop = MagicMock()
+    desktop.loadComponentFromURL.return_value = MagicMock()
+    calls = []
+    monkeypatch.setattr(tu.sys, "platform", "linux")
+    monkeypatch.setattr(
+        tu, "prepare_windows_writer_factory", lambda _ctx: calls.append("prepare")
+    )
+    with (
+        patch("plugin.framework.uno_context.get_desktop", return_value=desktop),
+        patch("uno.createUnoStruct", return_value=MagicMock()),
+        patch("plugin.testing_runner.probe_uno_bridge", return_value="alive"),
+    ):
+        TestingFactory.create_native_doc(object(), "writer")
+    assert calls == []
+
+
+def test_create_native_doc_skips_load_when_bridge_already_dead(monkeypatch):
+    from unittest.mock import MagicMock, patch
+
+    import plugin.testing_runner as tr
+    from plugin.tests.testing_utils import TestingFactory
+
+    tr.reset_lifecycle_breadcrumb()
+    tr.record_test_end("draw.test_draw_uno.test_duplicate_slide_copies_shapes", "OK")
+    tr.record_test_start("draw.test_draw_uno.test_duplicate_rename_move_slide")
+
+    class _DeadCtx:
+        def getServiceManager(self) -> None:
+            raise RuntimeError("Binary URP bridge disposed during call")
+
+    desktop = MagicMock()
+    with (
+        patch("plugin.framework.uno_context.get_desktop", return_value=desktop),
+        patch("uno.createUnoStruct", return_value=MagicMock()),
+        pytest.raises(RuntimeError, match="pre_open=disposed") as caught,
+    ):
+        TestingFactory.create_native_doc(_DeadCtx(), "draw")
+    assert "already disposed before loadComponentFromURL" in str(caught.value)
+    assert "previous=draw.test_draw_uno.test_duplicate_slide_copies_shapes" in str(caught.value)
+    desktop.loadComponentFromURL.assert_not_called()
+    tr.reset_lifecycle_breadcrumb()
+
+
+def test_create_native_doc_wraps_disposed_exception(monkeypatch):
+    from unittest.mock import MagicMock, patch
+
+    import plugin.testing_runner as tr
+    from plugin.tests.testing_utils import TestingFactory
+
+    tr.reset_lifecycle_breadcrumb()
+    tr.record_test_end("draw.test_draw_uno.test_get_draw_tree", "OK")
+    tr.record_test_start("draw.test_draw_uno.test_insert_math_draw")
+
+    desktop = MagicMock()
+    desktop.loadComponentFromURL.side_effect = RuntimeError("Binary URP bridge disposed during call")
+    with (
+        patch("plugin.framework.uno_context.get_desktop", return_value=desktop),
+        patch("uno.createUnoStruct", return_value=MagicMock()),
+        pytest.raises(RuntimeError, match="previous=draw.test_draw_uno.test_get_draw_tree"),
+    ):
+        TestingFactory.create_native_doc(object(), "draw")
+    tr.reset_lifecycle_breadcrumb()
+
+
+def test_log_close_doc_failure_and_office_health(capsys, monkeypatch):
+    from unittest.mock import MagicMock, patch
+
+    import plugin.testing_runner as tr
+    from plugin.tests.testing_utils import _log_close_doc_failure, _log_office_health_after_close
+
+    monkeypatch.setattr(tr, "_soffice_pids", lambda: "-")
+    tr.reset_lifecycle_breadcrumb()
+    tr.record_test_end("draw.test_draw_uno.test_get_draw_tree", "OK")
+
+    _log_close_doc_failure(RuntimeError("Binary URP bridge disposed during call"))
+    err = capsys.readouterr().err
+    assert "LIFECYCLE close_doc dispose" in err
+    assert "previous=draw.test_draw_uno.test_get_draw_tree" in err
+
+    desktop = MagicMock()
+    desktop.getComponents.side_effect = RuntimeError("Binary URP bridge disposed during call")
+    with patch("plugin.framework.uno_context.get_desktop", return_value=desktop):
+        _log_office_health_after_close(object(), "draw")
+    err = capsys.readouterr().err
+    assert "LIFECYCLE office dead after close doc_type=draw" in err
+    assert "previous=draw.test_draw_uno.test_get_draw_tree" in err
+    tr.reset_lifecycle_breadcrumb()
+
+
+def test_close_doc_logs_urp_dispose(capsys, monkeypatch):
+    from unittest.mock import MagicMock
+
+    import plugin.testing_runner as tr
+    from plugin.tests import testing_utils as tu
+    from plugin.tests.testing_utils import TestingFactory
+
+    # GHA 34609539461: prepare left leftover=1; MagicMock looked like Writer
+    # and Windows skip-close hid the dispose breadcrumb.
+    monkeypatch.setattr(tr, "_soffice_pids", lambda: "8")
+    tr.reset_lifecycle_breadcrumb()
+    tr.record_test_start("draw.test_draw_uno.test_get_draw_tree")
+    saved = tu._WINDOWS_LEFTOVER_OPEN
+    tu._set_windows_leftover_open(0)
+    doc = MagicMock()
+    doc.close.side_effect = RuntimeError("Binary URP bridge disposed during call")
+    try:
+        TestingFactory.close_doc(doc)
+        err = capsys.readouterr().err
+        assert "LIFECYCLE close_doc dispose" in err
+    finally:
+        tu._set_windows_leftover_open(saved)
+        tr.reset_lifecycle_breadcrumb()
+
+
+def test_close_doc_windows_untyped_mock_still_logs_dispose(capsys, monkeypatch):
+    """GHA 34609539461: leftover=1 + MagicMock Writer skip hid the dispose log."""
+    from unittest.mock import MagicMock
+
+    import plugin.testing_runner as tr
+    from plugin.tests import testing_utils as tu
+    from plugin.tests.testing_utils import TestingFactory
+
+    monkeypatch.setattr(tu.sys, "platform", "win32")
+    monkeypatch.setattr(tr, "_soffice_pids", lambda: "8")
+    monkeypatch.setattr("gc.collect", lambda: None)
+    monkeypatch.setattr("time.sleep", lambda _seconds: None)
+    saved = tu._WINDOWS_LEFTOVER_OPEN
+    tu._set_windows_leftover_open(1)
+    doc = MagicMock()
+    doc.close.side_effect = RuntimeError("Binary URP bridge disposed during call")
+    try:
+        TestingFactory.close_doc(doc)
+        err = capsys.readouterr().err
+        assert "LIFECYCLE close_doc dispose" in err
+        assert "skip writer close" not in err
+    finally:
+        tu._set_windows_leftover_open(saved)
+
+
+def test_native_doc_svc_magicmock_is_not_writer():
+    """GHA 34609539461: truthy MagicMock.supportsService classified mocks as Writer."""
+    from unittest.mock import MagicMock
+
+    from plugin.tests.testing_utils import _native_doc_svc
+
+    assert _native_doc_svc(MagicMock()) == ""
+
+
+def test_close_doc_windows_draw_logs_close_steps(capsys, monkeypatch):
+    """GHA 34606276107: Draw close_doc dispose had no start/close(True) trail."""
+    from unittest.mock import MagicMock
+
+    from plugin.tests import testing_utils as tu
+    from plugin.tests.testing_utils import TestingFactory
+
+    monkeypatch.setattr(tu.sys, "platform", "win32")
+    monkeypatch.setattr("gc.collect", lambda: None)
+    monkeypatch.setattr("time.sleep", lambda _seconds: None)
+    monkeypatch.setattr("plugin.testing_runner._soffice_pids", lambda: "7196,5792")
+    saved = tu._WINDOWS_LEFTOVER_OPEN
+    tu._WINDOWS_LEFTOVER_OPEN = 3
+    tu.set_harness_keeper_uid("1")
+    tu._clear_windows_math_ole_uids()
+    doc = MagicMock()
+    doc.RuntimeUID = "48"
+    doc.supportsService.side_effect = lambda svc: svc.endswith("DrawingDocument")
+    try:
+        TestingFactory.close_doc(doc)
+        doc.close.assert_called_once_with(True)
+        err = capsys.readouterr().err
+        # GHA 34612145495: Draw svc probe + page walk before close(True)
+        # killed the first forms Draw. Unmarked Draw must close like master.
+        assert "skip math ole close" not in err
+        assert "close_doc: start uid=48 svc=draw" not in err
+        assert "close_doc: close(True) start uid=48" not in err
+    finally:
+        tu._WINDOWS_LEFTOVER_OPEN = saved
+        tu.set_harness_keeper_uid("")
+        tu._clear_windows_math_ole_uids()
+
+
+def test_close_doc_windows_writer_reactivates_keeper(monkeypatch):
+    """GHA 34554275072: after test Writer close, keep leftover off current."""
+    from unittest.mock import MagicMock
+
+    from plugin.tests import testing_utils as tu
+    from plugin.tests.testing_utils import TestingFactory
+
+    keeper = MagicMock(name="keeper")
+    frame = MagicMock(name="keeper_frame")
+    desktop = MagicMock(name="desktop")
+    keeper.getCurrentController.return_value.getFrame.return_value = frame
+    frame.getCreator.return_value = desktop
+    monkeypatch.setattr(tu.sys, "platform", "win32")
+    monkeypatch.setattr("gc.collect", lambda: None)
+    monkeypatch.setattr("time.sleep", lambda _seconds: None)
+    tu.set_harness_keeper_uid("1", keeper)
+    saved_leftover = tu._WINDOWS_LEFTOVER_OPEN
+    tu._WINDOWS_LEFTOVER_OPEN = 0
+    doc = MagicMock()
+    doc.RuntimeUID = "99"
+    doc.supportsService.side_effect = lambda svc: svc.endswith("TextDocument")
+    try:
+        TestingFactory.close_doc(doc)
+        doc.close.assert_called_once_with(True)
+        desktop.setActiveFrame.assert_called_once_with(frame)
+    finally:
+        tu._WINDOWS_LEFTOVER_OPEN = saved_leftover
+        tu.set_harness_keeper_uid("")
+
+
+def test_close_doc_settles_urp_before_close(monkeypatch):
+    """GC then settle must run before close so URP can finish ~SvxShape."""
+    from unittest.mock import MagicMock
+
+    from plugin.tests.testing_utils import TestingFactory, _CLOSE_DOC_URP_SETTLE_S
+
+    order = []
+    monkeypatch.setattr("gc.collect", lambda: order.append("gc"))
+    monkeypatch.setattr("time.sleep", lambda seconds: order.append(("sleep", seconds)))
+    doc = MagicMock()
+    doc.close.side_effect = lambda _save: order.append("close")
+    TestingFactory.close_doc(doc)
+    assert order == ["gc", ("sleep", _CLOSE_DOC_URP_SETTLE_S), "close"]
+    doc.close.assert_called_once_with(True)
+
+
+def test_close_doc_none_skips_settle(monkeypatch):
+    from plugin.tests.testing_utils import TestingFactory
+
+    def _fail_sleep(_seconds):
+        raise AssertionError("close_doc(None) must not sleep")
+
+    monkeypatch.setattr("time.sleep", _fail_sleep)
+    TestingFactory.close_doc(None)
+
+
+def test_settle_after_draw_family_close_gcs_then_sleeps(monkeypatch):
+    """Post-Impress settle must GC after the caller drops the closed proxy."""
+    from plugin.tests.testing_utils import (
+        _DRAW_FAMILY_POST_CLOSE_SETTLE_S,
+        settle_after_draw_family_close,
+    )
+
+    order = []
+    monkeypatch.setattr("gc.collect", lambda: order.append("gc"))
+    monkeypatch.setattr("time.sleep", lambda seconds: order.append(("sleep", seconds)))
+    settle_after_draw_family_close()
+    assert order == ["gc", ("sleep", _DRAW_FAMILY_POST_CLOSE_SETTLE_S)]
+
+
+def test_settle_after_draw_family_close_windows_longer_than_posix():
+    """Windows is the hang host (GHA 34419828920); POSIX stays a short drain."""
+    from plugin.tests import testing_utils as tu
+
+    assert tu._DRAW_FAMILY_POST_CLOSE_SETTLE_S > tu._CLOSE_DOC_URP_SETTLE_S
+    assert tu._DRAW_FAMILY_PRE_CLOSE_SETTLE_S == tu._DRAW_FAMILY_POST_CLOSE_SETTLE_S
+    if tu.sys.platform == "win32":
+        assert tu._DRAW_FAMILY_POST_CLOSE_SETTLE_S == 0.75
+    else:
+        assert tu._DRAW_FAMILY_POST_CLOSE_SETTLE_S == 0.15
+
+
+def test_close_draw_family_doc_setmodified_gc_settle_then_close(monkeypatch):
+    """POSIX Impress close uses close(True), never close_doc (GHA 34518091151)."""
+    from unittest.mock import MagicMock
+
+    from plugin.tests.testing_utils import (
+        TestingFactory,
+        _DRAW_FAMILY_PRE_CLOSE_SETTLE_S,
+        close_draw_family_doc,
+    )
+
+    order = []
+    monkeypatch.setattr("gc.collect", lambda: order.append("gc"))
+    monkeypatch.setattr("time.sleep", lambda seconds: order.append(("sleep", seconds)))
+    monkeypatch.setattr(
+        "plugin.tests.testing_utils._draw_family_raw_close",
+        lambda: False,
+    )
+
+    def _fail_close_doc(_doc):
+        raise AssertionError("close_draw_family_doc must not call close_doc")
+
+    monkeypatch.setattr(TestingFactory, "close_doc", _fail_close_doc)
+    doc = MagicMock()
+    doc.supportsService.side_effect = lambda svc: svc.endswith("PresentationDocument")
+    doc.RuntimeUID = "impress-uid"
+    doc.setModified.side_effect = lambda _modified: order.append("setModified")
+    doc.close.side_effect = lambda _save: order.append("close")
+    close_draw_family_doc(doc)
+    assert order == [
+        "setModified",
+        "gc",
+        ("sleep", _DRAW_FAMILY_PRE_CLOSE_SETTLE_S),
+        "close",
+    ]
+    doc.setModified.assert_called_once_with(False)
+    doc.close.assert_called_once_with(True)
+    doc.dispose.assert_not_called()
+
+
+def test_close_draw_family_doc_windows_raw_close_skips_pre_close_gc(monkeypatch):
+    """GHA 34537826720: skip left Impress alive; #710 raw close returned."""
+    from unittest.mock import MagicMock
+
+    from plugin.tests.testing_utils import close_draw_family_doc
+
+    order = []
+
+    def _fail_gc():
+        raise AssertionError("Windows raw close must not gc.collect before close")
+
+    def _fail_sleep(_seconds):
+        raise AssertionError("Windows raw close must not sleep before close")
+
+    monkeypatch.setattr("gc.collect", _fail_gc)
+    monkeypatch.setattr("time.sleep", _fail_sleep)
+    monkeypatch.setattr(
+        "plugin.tests.testing_utils._draw_family_raw_close",
+        lambda: True,
+    )
+    doc = MagicMock()
+    doc.supportsService.side_effect = lambda svc: svc.endswith("PresentationDocument")
+    doc.RuntimeUID = "impress-uid"
+    doc.setModified.side_effect = lambda _modified: order.append("setModified")
+    doc.close.side_effect = lambda _save: order.append("close")
+    close_draw_family_doc(doc)
+    assert order == ["close"]
+    doc.setModified.assert_not_called()
+    doc.close.assert_called_once_with(True)
+    doc.dispose.assert_not_called()
+
+
+def test_close_draw_family_doc_none_skips_settle(monkeypatch):
+    from plugin.tests.testing_utils import close_draw_family_doc
+
+    def _fail_sleep(_seconds):
+        raise AssertionError("close_draw_family_doc(None) must not sleep")
+
+    monkeypatch.setattr("time.sleep", _fail_sleep)
+    close_draw_family_doc(None)
+
+
+def test_close_draw_family_doc_logs_svc_and_steps(capsys, monkeypatch):
+    from unittest.mock import MagicMock
+
+    from plugin.tests.testing_utils import close_draw_family_doc
+
+    monkeypatch.setattr("gc.collect", lambda: None)
+    monkeypatch.setattr("time.sleep", lambda _seconds: None)
+    monkeypatch.setattr(
+        "plugin.tests.testing_utils._draw_family_raw_close",
+        lambda: False,
+    )
+    doc = MagicMock()
+    doc.supportsService.side_effect = lambda svc: svc.endswith("PresentationDocument")
+    doc.RuntimeUID = "uid-9"
+    close_draw_family_doc(doc)
+    err = capsys.readouterr().err
+    assert "close_draw_family: start svc=impress uid=uid-9" in err
+    assert "close_draw_family: setModified(False) ok" in err
+    assert "close_draw_family: close(True) start svc=impress uid=uid-9" in err
+    assert "close_draw_family: close(True) done svc=impress uid=uid-9" in err
+
+
+def test_close_draw_family_doc_windows_logs_raw_close(capsys, monkeypatch):
+    from unittest.mock import MagicMock
+
+    from plugin.tests.testing_utils import close_draw_family_doc
+
+    monkeypatch.setattr(
+        "plugin.tests.testing_utils._draw_family_raw_close",
+        lambda: True,
+    )
+    doc = MagicMock()
+    doc.supportsService.side_effect = lambda svc: svc.endswith("PresentationDocument")
+    doc.RuntimeUID = "uid-9"
+    close_draw_family_doc(doc)
+    err = capsys.readouterr().err
+    assert "close_draw_family: start svc=impress uid=uid-9" in err
+    assert "close_draw_family: raw close(True) start svc=impress uid=uid-9" in err
+    assert "close_draw_family: raw close(True) done svc=impress uid=uid-9" in err
+    assert "skip uno teardown" not in err
+    assert "setModified" not in err
+    doc.close.assert_called_once_with(True)
+
+
+def test_teardown_peer_pair_closes_writer_before_impress(monkeypatch):
+    """POSIX: Writer first, then Impress (GHA 34518091151)."""
+    from unittest.mock import MagicMock
+
+    from tests.chatbot.test_peer_message_uno import _teardown_peer_pair
+
+    order = []
+    monkeypatch.setattr(
+        "tests.chatbot.test_peer_message_uno._draw_family_raw_close",
+        lambda: False,
+    )
+    monkeypatch.setattr(
+        "tests.chatbot.test_peer_message_uno._close",
+        lambda doc: order.append(("close_doc", doc)) or None,
+    )
+    monkeypatch.setattr(
+        "tests.chatbot.test_peer_message_uno.close_draw_family_doc",
+        lambda doc: order.append(("close_draw_family", doc)),
+    )
+    monkeypatch.setattr(
+        "tests.chatbot.test_peer_message_uno.settle_after_draw_family_close",
+        lambda: order.append("post_settle"),
+    )
+    monkeypatch.setattr(
+        "tests.chatbot.test_peer_message_uno._reactivate_writer_after_impress",
+        lambda ctx, doc: order.append(("reactivate", ctx, doc)),
+    )
+    writer = MagicMock(name="writer")
+    impress = MagicMock(name="impress")
+    out_writer, out_impress = _teardown_peer_pair(writer, impress)
+    assert out_writer is None and out_impress is None
+    assert order == [
+        ("close_doc", writer),
+        ("close_draw_family", impress),
+        "post_settle",
+    ]
+
+
+def test_teardown_peer_pair_windows_closes_impress_skips_writer(monkeypatch):
+    """GHA 34540353452: Impress raw close returned; Writer close_doc hung."""
+    from unittest.mock import MagicMock
+
+    import tests.chatbot.test_peer_message_uno as peer
+    from tests.chatbot.test_peer_message_uno import _teardown_peer_pair
+
+    peer._windows_impress_raw_closed = False
+    order = []
+    monkeypatch.setattr(
+        "tests.chatbot.test_peer_message_uno._draw_family_raw_close",
+        lambda: True,
+    )
+    monkeypatch.setattr(
+        "tests.chatbot.test_peer_message_uno._close",
+        lambda doc: order.append(("close_doc", doc)) or None,
+    )
+    monkeypatch.setattr(
+        "tests.chatbot.test_peer_message_uno.close_draw_family_doc",
+        lambda doc: order.append(("close_draw_family", doc)),
+    )
+    monkeypatch.setattr(
+        "tests.chatbot.test_peer_message_uno.settle_after_draw_family_close",
+        lambda: order.append("post_settle"),
+    )
+    monkeypatch.setattr(
+        "tests.chatbot.test_peer_message_uno._reactivate_writer_after_impress",
+        lambda ctx, doc: order.append(("reactivate", ctx, doc)),
+    )
+    writer = MagicMock(name="writer")
+    impress = MagicMock(name="impress")
+    ctx = MagicMock(name="ctx")
+    recycle_calls = []
+    monkeypatch.setattr(
+        "plugin.testing_runner.request_office_recycle_after_suite",
+        lambda: recycle_calls.append("recycle"),
+    )
+    try:
+        out_writer, out_impress = _teardown_peer_pair(writer, impress, ctx)
+        assert out_writer is None and out_impress is None
+        assert order == [
+            ("close_draw_family", impress),
+            "post_settle",
+            ("reactivate", ctx, writer),
+        ]
+        assert recycle_calls == ["recycle"]
+        assert peer._windows_impress_raw_closed is True
+    finally:
+        peer._windows_impress_raw_closed = False
+
+
+def test_teardown_peer_pair_windows_skips_second_impress_close(capsys, monkeypatch):
+    """GHA 34547869791: second Impress raw close exited soffice 0."""
+    from unittest.mock import MagicMock
+
+    import tests.chatbot.test_peer_message_uno as peer
+    from tests.chatbot.test_peer_message_uno import _teardown_peer_pair
+
+    peer._windows_impress_raw_closed = False
+    order = []
+    monkeypatch.setattr(
+        "tests.chatbot.test_peer_message_uno._draw_family_raw_close",
+        lambda: True,
+    )
+    monkeypatch.setattr(
+        "tests.chatbot.test_peer_message_uno._close",
+        lambda doc: order.append(("close_doc", doc)) or None,
+    )
+    monkeypatch.setattr(
+        "tests.chatbot.test_peer_message_uno.close_draw_family_doc",
+        lambda doc: order.append(("close_draw_family", doc)),
+    )
+    monkeypatch.setattr(
+        "tests.chatbot.test_peer_message_uno.settle_after_draw_family_close",
+        lambda: order.append("post_settle"),
+    )
+    monkeypatch.setattr(
+        "tests.chatbot.test_peer_message_uno._reactivate_writer_after_impress",
+        lambda ctx, doc: order.append(("reactivate", ctx, doc)),
+    )
+    recycle_calls = []
+    monkeypatch.setattr(
+        "plugin.testing_runner.request_office_recycle_after_suite",
+        lambda: recycle_calls.append("recycle"),
+    )
+    writer1 = MagicMock(name="writer1")
+    impress1 = MagicMock(name="impress1")
+    writer2 = MagicMock(name="writer2")
+    impress2 = MagicMock(name="impress2")
+    ctx = MagicMock(name="ctx")
+    try:
+        _teardown_peer_pair(writer1, impress1, ctx)
+        _teardown_peer_pair(writer2, impress2, ctx)
+        assert order == [
+            ("close_draw_family", impress1),
+            "post_settle",
+            ("reactivate", ctx, writer1),
+        ]
+        assert recycle_calls == ["recycle", "recycle"]
+        err = capsys.readouterr().err
+        assert "peer_message_uno: skip second impress close (windows)" in err
+    finally:
+        peer._windows_impress_raw_closed = False
+
+
+def test_reactivate_writer_after_impress_sets_active_frame(monkeypatch):
+    from unittest.mock import MagicMock, patch
+
+    from tests.chatbot.test_peer_message_uno import _reactivate_writer_after_impress
+
+    frame = MagicMock()
+    writer = MagicMock()
+    writer.getCurrentController.return_value.getFrame.return_value = frame
+    desktop = MagicMock()
+    ctx = MagicMock()
+    with patch(
+        "tests.chatbot.test_peer_message_uno.get_desktop",
+        return_value=desktop,
+    ) as get_desktop:
+        _reactivate_writer_after_impress(ctx, writer)
+    get_desktop.assert_called_once_with(ctx)
+    desktop.setActiveFrame.assert_called_once_with(frame)
+    frame.getContainerWindow.return_value.toFront.assert_called_once_with()
+
+
+def test_windows_skip_doc_close_follows_platform(monkeypatch):
+    import tests.chatbot.test_peer_message_uno as peer
+
+    monkeypatch.setattr(peer.sys, "platform", "win32")
+    assert peer._windows_skip_doc_close() is True
+    monkeypatch.setattr(peer.sys, "platform", "linux")
+    assert peer._windows_skip_doc_close() is False
+
+
+def test_close_skips_on_windows(capsys, monkeypatch):
+    """GHA 34544965319: second Writer close_doc hung before any Impress."""
+    from unittest.mock import MagicMock
+
+    import tests.chatbot.test_peer_message_uno as peer
+    from plugin.tests.testing_utils import TestingFactory
+
+    doc = MagicMock()
+    doc.RuntimeUID = "uid-later"
+    calls = []
+    recycle_calls = []
+    monkeypatch.setattr(peer, "_windows_skip_doc_close", lambda: True)
+    monkeypatch.setattr(
+        TestingFactory, "close_doc", lambda _doc: calls.append("close_doc")
+    )
+    monkeypatch.setattr(
+        "plugin.testing_runner.request_office_recycle_after_suite",
+        lambda: recycle_calls.append("recycle"),
+    )
+    assert peer._close(doc) is None
+    assert calls == []
+    assert recycle_calls == ["recycle"]
+    err = capsys.readouterr().err
+    assert "peer_message_uno: skip close (windows) uid=uid-later" in err
+
+
+def test_close_logs_uid_before_close_doc(capsys, monkeypatch):
+    from unittest.mock import MagicMock
+
+    import tests.chatbot.test_peer_message_uno as peer
+    from plugin.tests.testing_utils import TestingFactory
+
+    doc = MagicMock()
+    doc.RuntimeUID = "uid-7"
+    monkeypatch.setattr(peer, "_windows_skip_doc_close", lambda: False)
+    monkeypatch.setattr(TestingFactory, "close_doc", lambda _doc: None)
+    peer._close(doc)
+    err = capsys.readouterr().err
+    assert "peer_message_uno: close_doc start uid=uid-7" in err
+    assert "peer_message_uno: close_doc done uid=uid-7" in err
+
+
+def test_teardown_peer_pair_windows_no_impress_just_closes_writer(monkeypatch):
+    from unittest.mock import MagicMock
+
+    from tests.chatbot.test_peer_message_uno import _teardown_peer_pair
+
+    order = []
+    monkeypatch.setattr(
+        "tests.chatbot.test_peer_message_uno._draw_family_raw_close",
+        lambda: True,
+    )
+    monkeypatch.setattr(
+        "tests.chatbot.test_peer_message_uno._close",
+        lambda doc: order.append(("close_doc", doc)) or None,
+    )
+    monkeypatch.setattr(
+        "tests.chatbot.test_peer_message_uno.close_draw_family_doc",
+        lambda doc: order.append(("close_draw_family", doc)),
+    )
+    monkeypatch.setattr(
+        "tests.chatbot.test_peer_message_uno.settle_after_draw_family_close",
+        lambda: order.append("post_settle"),
+    )
+    writer = MagicMock(name="writer")
+    out_writer, out_impress = _teardown_peer_pair(writer, None, MagicMock())
+    assert out_writer is None and out_impress is None
+    assert order == [("close_doc", writer)]
+
+
+def test_reactivate_writer_after_impress_skips_when_missing():
+    from unittest.mock import MagicMock, patch
+
+    from tests.chatbot.test_peer_message_uno import _reactivate_writer_after_impress
+
+    with patch("tests.chatbot.test_peer_message_uno.get_desktop") as get_desktop:
+        _reactivate_writer_after_impress(None, MagicMock())
+        _reactivate_writer_after_impress(MagicMock(), None)
+    get_desktop.assert_not_called()
+
+
 def test_testing_factory_execute_tool_unknown_name():
     from unittest.mock import MagicMock, patch
 
@@ -252,3 +2373,34 @@ def test_testing_factory_execute_tool_unknown_name():
         res = TestingFactory.execute_tool(doc, ctx, "bad_tool", {}, doc_type="calc")
     assert res["status"] == "error"
     assert "bad_tool" in res["error"]
+
+
+def test_default_native_doc_reuse():
+    import plugin.tests.testing_utils as tu
+
+    assert tu._default_native_doc_reuse("calc") is True
+    assert tu._default_native_doc_reuse("writer") is True
+    assert tu._default_native_doc_reuse("draw") is False
+    assert tu._default_native_doc_reuse("impress") is False
+
+
+def test_native_doc_pool_clean_tracking():
+    from plugin.tests.testing_utils import _NativeDocPool
+
+    pool = _NativeDocPool()
+    doc1 = object()
+    doc2 = object()
+
+    assert pool.is_clean(doc1) is False
+    pool.mark_clean(doc1, True)
+    assert pool.is_clean(doc1) is True
+    assert pool.is_clean(doc2) is False
+
+    pool.mark_clean(doc1, False)
+    assert pool.is_clean(doc1) is False
+
+    pool["key1"] = doc1
+    pool.mark_clean(doc1, True)
+    pool.clear()
+    assert len(pool) == 0
+    assert pool.is_clean(doc1) is False

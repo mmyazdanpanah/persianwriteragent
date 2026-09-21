@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: PACKAGE VERSION\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-09-04 14:15-0400\n"
+"POT-Creation-Date: 2026-09-14 16:20-0400\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: Romanian <LL@li.org>\n"
@@ -72,9 +72,28 @@ msgstr "Nu s-a putut găsi celula notebook pentru acest control."
 msgid "Open a Writer document first."
 msgstr "Deschideți mai întâi un document Writer."
 
-#: plugin/notebook/writer_importer.py
+#: plugin/notebook/notebook_controls.py
 msgid "Run code cell"
 msgstr "Execută celula de cod"
+
+#: plugin/embeddings/search_ui.py
+msgid "just now"
+msgstr "chiar acum"
+
+#: plugin/embeddings/search_ui.py
+#, python-brace-format
+msgid "{0}m ago"
+msgstr "acum {0}m"
+
+#: plugin/embeddings/search_ui.py
+#, python-brace-format
+msgid "{0}h ago"
+msgstr "acum {0}h"
+
+#: plugin/embeddings/search_ui.py
+#, python-brace-format
+msgid "{0}d ago"
+msgstr "acum {0}z"
 
 #: plugin/embeddings/search_ui.py
 msgid "Cache Status: No active document"
@@ -95,20 +114,6 @@ msgstr "Stare cache: Neconstruit (lancedb)"
 #: plugin/embeddings/search_ui.py
 msgid "Cache Status: Not built"
 msgstr "Stare cache: Neconstruit"
-
-#: plugin/embeddings/search_ui.py
-msgid "just now"
-msgstr "chiar acum"
-
-#: plugin/embeddings/search_ui.py
-#, python-brace-format
-msgid "{0}m ago"
-msgstr "acum {0}m"
-
-#: plugin/embeddings/search_ui.py
-#, python-brace-format
-msgid "{0}h ago"
-msgstr "acum {0}h"
 
 #: plugin/embeddings/search_ui.py
 #, python-brace-format
@@ -419,7 +424,8 @@ msgid "Status:"
 msgstr "Stare:"
 
 #: plugin/calc/python/cell_editor_ui.py plugin/chatbot/panel_wiring.py
-#: plugin/scripting/editor_ui_strings.py plugin/xdl_strings.py
+#: plugin/chatbot/panel.py plugin/scripting/editor_ui_strings.py
+#: plugin/xdl_strings.py
 msgid "Ready"
 msgstr "Pregătit"
 
@@ -563,14 +569,14 @@ msgstr "Imagini inserate"
 #: plugin/calc/python/geometric_recalc.py
 #, python-format
 msgid ""
-"Geometric Recalc Order skipped sheet '%s': found %s or more Python cells "
-"(discovery cap). The sheet was left unchained so a partial list is not "
-"treated as complete."
+"Geometric Recalc Order skipped sheet '%(sheet)s': found %(cap)s or more "
+"Python cells (discovery cap). The sheet was left unchained so a partial list "
+"is not treated as complete."
 msgstr ""
-"Ordinea de recalculare geometrică a omis foaia „%s”: s-au găsit %s sau mai "
-"multe celule Python (limită de descoperire). Foaia a fost lăsată "
-"neînlănțuită, astfel încât o listă parțială să nu fie tratată ca fiind "
-"completă."
+"Ordinea de recalculare geometrică a omis foaia „%(sheet)s”: s-au găsit "
+"%(cap)s sau mai multe celule Python (limită de descoperire). Foaia a fost "
+"lăsată neînlănțuită, astfel încât o listă parțială să nu fie tratată ca "
+"fiind completă."
 
 #: plugin/calc/excel_py_convert/auto_open.py
 #, python-brace-format
@@ -1337,6 +1343,10 @@ msgid ""
 msgstr ""
 "[Modelul {0} nu acceptă audio nativ. Vă rugăm să selectați un model STT în "
 "Setări.]"
+
+#: plugin/chatbot/panel.py
+msgid "[Peer send requires Chat mode on this sidebar.]"
+msgstr "[Trimiterea între egali necesită modul Chat în această bară laterală.]"
 
 #: plugin/chatbot/web_research_chat.py
 #, python-format
@@ -3167,6 +3177,21 @@ msgstr "Instrumente pentru foaia de calcul Calc"
 
 msgid "Max Rows Display"
 msgstr "Număr maxim de rânduri afișate"
+
+msgid "Cache Excel siblings as ODS"
+msgstr "Stochează fișierele Excel înrudite ca ODS"
+
+msgid ""
+"Convert sibling .xlsx/.xls to writeragent_ods_cache/ beside the folder so "
+"repeated DuckDB SQL reuses the ODS. Native .ods and the live workbook are "
+"never cached. Set calc.ods_cache_enabled false in writeragent.json to "
+"disable."
+msgstr ""
+"Convertește fișierele .xlsx/.xls înrudite în writeragent_ods_cache/ lângă "
+"folder, astfel încât SQL-ul DuckDB repetat să reutilizeze ODS-ul. "
+"Fișierele .ods native și registrul de lucru activ nu sunt niciodată stocate "
+"în cache. Setați calc.ods_cache_enabled false în writeragent.json pentru a "
+"dezactiva."
 
 msgid "Sidebar"
 msgstr "Bară laterală"

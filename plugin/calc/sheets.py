@@ -24,9 +24,10 @@ appropriate helper class per call using ``ctx.doc``.
 import logging
 
 from plugin.framework.errors import ToolExecutionError, UnoObjectError
+from plugin.framework.prompts import get_sheets_create_completion_instruction
 from plugin.framework.tool import ToolBase
 from plugin.calc.base import ToolCalcSheetBase
-from plugin.calc.bridge import CalcBridge
+from plugin.calc.bridge import CalcBridge, filter_agent_sheet_names, is_agent_visible_sheet
 from plugin.calc.analyzer import SheetAnalyzer
 
 log = logging.getLogger("writeragent.calc")
@@ -36,7 +37,7 @@ class ListSheets(ToolCalcSheetBase):
     """List all sheet names in the workbook."""
 
     name = "list_sheets"
-    description = "Lists all sheet names in the workbook."
+    description = "Lists user-visible sheet names in the workbook (omits LibreOffice internal tabs)."
     parameters = {"type": "object", "properties": {}}
     is_mutation = False
 
@@ -44,7 +45,7 @@ class ListSheets(ToolCalcSheetBase):
         bridge = CalcBridge(ctx.doc)
         try:
             doc = bridge.get_active_document()
-            sheet_names = list(doc.getSheets().getElementNames())
+            sheet_names = filter_agent_sheet_names(doc.getSheets().getElementNames())
             log.info("Sheets listed: %s", sheet_names)
             return {"status": "ok", "result": sheet_names}
         except Exception as e:
@@ -87,8 +88,28 @@ class CreateSheet(ToolCalcSheetBase):
 
     name = "create_sheet"
     intent = "edit"
-    description = "Creates a new sheet."
-    parameters = {"type": "object", "properties": {"sheet": {"type": "string", "description": "New sheet name"}, "position": {"type": "integer", "description": ("Sheet position (0-based). Appended to end if not specified.")}}, "required": ["sheet"]}
+    description = (
+        "Creates a new empty sheet (tab exists; no cells copied). "
+        "create_sheet is not Sample/deliverable populate — after create, "
+        "write_formula_range with source to copy a block onto the new sheet."
+    )
+    parameters = {
+        "type": "object",
+        "properties": {
+            "sheet": {
+                "type": "string",
+                "description": (
+                    "Exact new sheet title from the request; preserve spaces "
+                    "(do not snake_case or invent aliases)."
+                ),
+            },
+            "position": {
+                "type": "integer",
+                "description": "Sheet position (0-based). Appended to end if not specified.",
+            },
+        },
+        "required": ["sheet"],
+    }
     is_mutation = True
 
     def execute(self, ctx, **kwargs):
@@ -103,8 +124,15 @@ class CreateSheet(ToolCalcSheetBase):
                 position = sheets.getCount()
             sheets.insertNewByName(sheet_name, position)
             log.info("New sheet created: %s (position: %d)", sheet_name, position)
-            result = f"New sheet named '{sheet_name}' created."
-            return {"status": "ok", "message": result}
+            result = f"New sheet named '{sheet_name}' created; no cells copied."
+            # Inner-only ok string used to stop here; the outer never saw it.
+            # Same `instruction` field as web research so specialized finish
+            # can forward the create≠populate nudge to the main agent.
+            return {
+                "status": "ok",
+                "message": result,
+                "instruction": get_sheets_create_completion_instruction(),
+            }
         except Exception as e:
             log.exception("Sheet creation failed for %s", sheet_name)
             raise ToolExecutionError(str(e)) from e
@@ -220,6 +248,12 @@ class GetSheetSummary(ToolBase):
         bridge = CalcBridge(ctx.doc)
         analyzer = SheetAnalyzer(bridge)
         sheet_name = kwargs.get("sheet")
+        # Leading '_' tabs are LO internals (xlsx→ods ``__Anonymous_Sheet_DB__*``).
+        # Omit from agent summaries; do not delete the sheet.
+        if sheet_name and not is_agent_visible_sheet(sheet_name):
+            return self._tool_error(f"No user-visible sheet named '{sheet_name}'.")
 
         result = analyzer.get_sheet_summary(sheet_name=sheet_name)
+        if not is_agent_visible_sheet(result.get("sheet_name", "")):
+            return self._tool_error("Active sheet is a LibreOffice internal tab; specify a user-visible sheet.")
         return {"status": "ok", "result": result}

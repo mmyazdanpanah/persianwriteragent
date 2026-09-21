@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: PACKAGE VERSION\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-09-04 14:15-0400\n"
+"POT-Creation-Date: 2026-09-14 16:20-0400\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: Bulgarian <LL@li.org>\n"
@@ -73,9 +73,28 @@ msgstr "Неуспешно намиране на клетка от тетрад�
 msgid "Open a Writer document first."
 msgstr "Първо отворете документ на Writer."
 
-#: plugin/notebook/writer_importer.py
+#: plugin/notebook/notebook_controls.py
 msgid "Run code cell"
 msgstr "Изпълнение на клетка с код"
+
+#: plugin/embeddings/search_ui.py
+msgid "just now"
+msgstr "току-що"
+
+#: plugin/embeddings/search_ui.py
+#, python-brace-format
+msgid "{0}m ago"
+msgstr "преди {0} м."
+
+#: plugin/embeddings/search_ui.py
+#, python-brace-format
+msgid "{0}h ago"
+msgstr "преди {0} ч."
+
+#: plugin/embeddings/search_ui.py
+#, python-brace-format
+msgid "{0}d ago"
+msgstr "преди {0} д."
 
 #: plugin/embeddings/search_ui.py
 msgid "Cache Status: No active document"
@@ -96,20 +115,6 @@ msgstr "Състояние на кеша: Не е изграден (lancedb)"
 #: plugin/embeddings/search_ui.py
 msgid "Cache Status: Not built"
 msgstr "Състояние на кеша: Не е изграден"
-
-#: plugin/embeddings/search_ui.py
-msgid "just now"
-msgstr "току-що"
-
-#: plugin/embeddings/search_ui.py
-#, python-brace-format
-msgid "{0}m ago"
-msgstr "преди {0} м."
-
-#: plugin/embeddings/search_ui.py
-#, python-brace-format
-msgid "{0}h ago"
-msgstr "преди {0} ч."
 
 #: plugin/embeddings/search_ui.py
 #, python-brace-format
@@ -426,7 +431,8 @@ msgid "Status:"
 msgstr "Състояние:"
 
 #: plugin/calc/python/cell_editor_ui.py plugin/chatbot/panel_wiring.py
-#: plugin/scripting/editor_ui_strings.py plugin/xdl_strings.py
+#: plugin/chatbot/panel.py plugin/scripting/editor_ui_strings.py
+#: plugin/xdl_strings.py
 msgid "Ready"
 msgstr "Готов"
 
@@ -572,13 +578,13 @@ msgstr "Вмъкнати изображения"
 #: plugin/calc/python/geometric_recalc.py
 #, python-format
 msgid ""
-"Geometric Recalc Order skipped sheet '%s': found %s or more Python cells "
-"(discovery cap). The sheet was left unchained so a partial list is not "
-"treated as complete."
+"Geometric Recalc Order skipped sheet '%(sheet)s': found %(cap)s or more "
+"Python cells (discovery cap). The sheet was left unchained so a partial list "
+"is not treated as complete."
 msgstr ""
-"Редът за геометрично преизчисляване пропусна листа „%s“: открити са %s или "
-"повече клетки на Python (лимит за откриване). Листът беше оставен без "
-"промени, за да не се третира частичен списък като пълен."
+"Геометричният ред на преизчисляване пропусна листа „%(sheet)s“: открити са "
+"%(cap)s или повече клетки на Python (лимит за откриване). Листът е оставен "
+"без промени, за да не се третира частичен списък като пълен."
 
 #: plugin/calc/excel_py_convert/auto_open.py
 #, python-brace-format
@@ -1341,6 +1347,10 @@ msgid ""
 msgstr ""
 "[Моделът {0} не поддържа собствен аудио формат. Моля, изберете модел за "
 "преобразуване на реч в текст (STT) в настройките.]"
+
+#: plugin/chatbot/panel.py
+msgid "[Peer send requires Chat mode on this sidebar.]"
+msgstr "[Изпращането към партньор изисква режим „Чат“ в тази странична лента.]"
 
 #: plugin/chatbot/web_research_chat.py
 #, python-format
@@ -3174,6 +3184,20 @@ msgstr "Инструменти за електронни таблици в Calc"
 
 msgid "Max Rows Display"
 msgstr "Макс. брой редове"
+
+msgid "Cache Excel siblings as ODS"
+msgstr "Кеширане на Excel събратя като ODS"
+
+msgid ""
+"Convert sibling .xlsx/.xls to writeragent_ods_cache/ beside the folder so "
+"repeated DuckDB SQL reuses the ODS. Native .ods and the live workbook are "
+"never cached. Set calc.ods_cache_enabled false in writeragent.json to "
+"disable."
+msgstr ""
+"Конвертиране на съпътстващи .xlsx/.xls файлове в writeragent_ods_cache/ до "
+"папката, така че повторните DuckDB SQL заявки да използват кеширания ODS. "
+"Родните .ods файлове и активната работна книга никога не се кешират. Задайте "
+"calc.ods_cache_enabled false във writeragent.json, за да деактивирате."
 
 msgid "Sidebar"
 msgstr "Странична лента"

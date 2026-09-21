@@ -80,8 +80,8 @@ def merge_openrouter_chat_extra(base: dict[str, Any], extra: dict[str, Any] | No
             base[key] = val
 
 
-# accumulate_delta is required for tool-calling: it merges streaming deltas into message_snapshot so full tool_calls (with function.arguments) are available.
-from plugin.framework.async_stream import accumulate_delta
+# accumulate_delta merges streaming deltas into message_snapshot; coalesce_split_tool_calls repairs OpenRouter empty-name split tool_calls.
+from plugin.framework.async_stream import accumulate_delta, coalesce_split_tool_calls
 from plugin.framework.constants import USER_AGENT
 
 from plugin.framework.logging import init_logging, redact_sensitive_payload_for_log
@@ -627,7 +627,12 @@ class LlmClient:
         # Path/query must not include API keys (Google image used to put ?key= here).
         log.debug("URL: %s" % urllib.parse.urlunparse(urllib.parse.urlparse(url)._replace(query="", fragment="")))
 
-        res = sync_request(url, method=method, data=body, headers=headers)
+        # Image generate/edit used to omit timeout, so sync_request's old
+        # default of 10s fired while Settings request_timeout (e.g. 122) was
+        # ignored — OpenRouter /images then showed a misleading "increase
+        # Request Timeout" message after ~10s wall clock. Pass the same
+        # Settings budget as chat sync / STT.
+        res = sync_request(url, method=method, data=body, headers=headers, timeout=self._timeout())
         if not res:
             return []
 
@@ -1082,6 +1087,9 @@ class LlmClient:
             message_snapshot["content"] = content
             tool_calls = message_snapshot.get("tool_calls")
             if tool_calls is not None:
+                tool_calls = coalesce_split_tool_calls(tool_calls) or None
+                message_snapshot["tool_calls"] = tool_calls
+            if tool_calls is not None:
                 log.debug(
                     "streaming_loop: accumulated tool_calls model=%r tool_calls=%s",
                     requested_model,
@@ -1195,7 +1203,7 @@ class LlmClient:
                     log.exception("request_with_tools failed")
                     raise NetworkError(err_msg, details={"url": path}) from e
 
-            log.debug("=== Sync response: %s" % json.dumps(result, indent=2))
+            log.debug("=== Sync response: %s" % json.dumps(redact_sensitive_payload_for_log(result), indent=2))
 
             if result is None:
                 result = {}
@@ -1238,6 +1246,9 @@ class LlmClient:
                     content = p_content or ""
                     if last_finish_reason != "tool_calls":
                         last_finish_reason = "tool_calls"
+
+        if tool_calls:
+            tool_calls = coalesce_split_tool_calls(tool_calls) or None
 
         out: dict[str, Any] = {"role": "assistant", "content": content, "tool_calls": tool_calls, "finish_reason": last_finish_reason, "images": images, "usage": usage, "model": used_model}
         out.update(reasoning_replay)

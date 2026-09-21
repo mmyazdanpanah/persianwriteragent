@@ -6,19 +6,24 @@ from plugin.tests.testing_utils import setup_uno_mocks
 setup_uno_mocks()
 
 from plugin.framework.prompts import (
-    DELEGATION_USER_FILE_DATA_HINT,
-    SIDEBAR_VS_DOCUMENT,
-    get_greeting_for_document,
-    get_chat_system_prompt_for_document,
-    get_core_directives,
-    get_specialized_delegation_for_model,
-    python_specialized_sub_agent_hint,
-    WRITER_CORE_DIRECTIVES,
     CALC_CORE_DIRECTIVES,
-    DRAW_CORE_DIRECTIVES,
-    DEFAULT_WRITER_GREETING,
     DEFAULT_CALC_GREETING,
     DEFAULT_DRAW_GREETING,
+    DEFAULT_WRITER_GREETING,
+    DELEGATION_USER_FILE_DATA_HINT,
+    DRAW_CORE_DIRECTIVES,
+    SIDEBAR_VS_DOCUMENT,
+    WRITER_CORE_DIRECTIVES,
+    WRITER_SPECIALIZED_DELEGATION_TEMPLATE,
+    get_chat_system_prompt_for_document,
+    get_core_directives,
+    get_greeting_for_document,
+    get_specialized_delegation_for_model,
+    DELEGATE_SPECIALIZED_TASK_PARAM_HINT,
+    SPECIALIZED_TASK_RULES,
+    WRITER_IMAGES_RULES,
+    images_specialized_sub_agent_hint,
+    python_specialized_sub_agent_hint,
 )
 
 # NOTE: the EXTERNAL_AGENT_GUIDANCE pin test moved to tests/chatbot/test_agent_manual.py —
@@ -210,6 +215,11 @@ def test_writer_apply_document_math_latex_rules_document_only():
     assert "Math (CRITICAL)" not in HTML_FRAGMENT_RULES
     assert "Local edits use target='search'" in WRITER_APPLY_DOCUMENT_HTML_RULES
     assert "target='full_document' is rewrite/translation only" in WRITER_APPLY_DOCUMENT_HTML_RULES
+    assert "page_get_header_footer_text" in WRITER_APPLY_DOCUMENT_HTML_RULES
+    assert "page_set_header_footer_text" in WRITER_APPLY_DOCUMENT_HTML_RULES
+    assert "setString wipe" not in WRITER_APPLY_DOCUMENT_HTML_RULES
+    assert "force=true" not in WRITER_APPLY_DOCUMENT_HTML_RULES
+    assert "target='search' still reaches headers" not in WRITER_APPLY_DOCUMENT_HTML_RULES
 
     model = MagicMock()
     model.supportsService.return_value = False
@@ -255,6 +265,62 @@ def test_get_chat_system_prompt_for_document_draw():
     assert CHAT_RESPONSE_FORMAT not in prompt
     assert "plain text only" in prompt
     assert "Draw" in prompt
+    assert "IMPRESS TEXT FILLS" in prompt
+    assert "list_placeholders" in prompt
+    assert "0-based" in prompt
+
+
+def test_draw_prompt_omits_get_image_when_model_has_no_vision():
+    from plugin.framework.prompts import DRAW_GET_IMAGE_TOOL_LINE
+
+    model = MagicMock()
+
+    def supportsService(service):
+        return service in (
+            "com.sun.star.drawing.DrawingDocument",
+            "com.sun.star.presentation.PresentationDocument",
+        )
+
+    model.supportsService.side_effect = supportsService
+    with (
+        patch("plugin.framework.config.get_config_bool_safe", return_value=False),
+        patch("plugin.vision.vision_availability.chat_text_model_has_native_vision", return_value=False),
+    ):
+        prompt = get_chat_system_prompt_for_document(model)
+    assert DRAW_GET_IMAGE_TOOL_LINE not in prompt
+    assert "get_image" not in prompt
+    assert "get_draw_tree" in prompt
+
+
+def test_draw_prompt_keeps_get_image_when_model_has_vision():
+    from plugin.framework.prompts import DRAW_GET_IMAGE_TOOL_LINE
+
+    model = MagicMock()
+
+    def supportsService(service):
+        return service in (
+            "com.sun.star.drawing.DrawingDocument",
+            "com.sun.star.presentation.PresentationDocument",
+        )
+
+    model.supportsService.side_effect = supportsService
+    with (
+        patch("plugin.framework.config.get_config_bool_safe", return_value=False),
+        patch("plugin.vision.vision_availability.chat_text_model_has_native_vision", return_value=True),
+    ):
+        prompt = get_chat_system_prompt_for_document(model)
+    assert DRAW_GET_IMAGE_TOOL_LINE in prompt
+
+
+def test_get_core_directives_for_type_is_string_only():
+    from plugin.framework.prompts import get_core_directives_for_type
+
+    assert get_core_directives_for_type("writer") == WRITER_CORE_DIRECTIVES
+    assert get_core_directives_for_type("calc") == CALC_CORE_DIRECTIVES
+    assert get_core_directives_for_type("draw") == DRAW_CORE_DIRECTIVES
+    assert get_core_directives_for_type("impress") == DRAW_CORE_DIRECTIVES
+    assert get_core_directives_for_type(None) == WRITER_CORE_DIRECTIVES
+    assert get_core_directives_for_type("") == WRITER_CORE_DIRECTIVES
 
 
 def test_get_core_directives_writer():
@@ -286,6 +352,7 @@ def test_specialized_delegation_block_is_single_line():
     block = get_specialized_delegation_for_model(model)
     assert "SPECIALIZED WRITER" in block
     assert SPECIALIZED_TASK_RULES in block
+    assert "source_image='selection'" in block
     assert "Enumerate what must be true" not in block
     assert "\n" not in block
     assert get_specialized_delegation_tool_hint(ToolWriterSpecialBase, "Writer") == block
@@ -358,6 +425,11 @@ def test_write_formula_range_description_owns_py_dest_and_spill():
     from plugin.calc.cells import WriteCellRange
 
     desc = WriteCellRange.description
+    fill_at = desc.find("fill-down")
+    py_at = desc.find('=PY("result = …"; DataRange)')
+    assert fill_at != -1
+    assert py_at != -1
+    assert fill_at < py_at
     assert "J1" in desc
     assert "new sheet" in desc
     assert "circular" in desc
@@ -365,9 +437,16 @@ def test_write_formula_range_description_owns_py_dest_and_spill():
     assert "small peek" in desc
     assert "do not dump the input or full spill" in desc
     assert "do not write =PY onto DataRange" in desc
+    # Anti-husk paragraph stays verbatim after the =PY spill block.
+    assert 'Tables (headers, mixed types): =PY("result = data.to_pandas().drop_duplicates()"; DataRange).' in desc
+    assert "Always use data.to_pandas() rather than pd.DataFrame(data) because to_pandas() uses row 0 as column headers;" in desc
+    assert "pd.DataFrame(data) treats headers as data and generates synthetic numeric columns (0..N) that spill as a junk top row." in desc
+    assert "np.unique on mixed rows fails — NumPy object arrays cannot compare/hash mixed cell types." in desc
     assert "data.to_pandas().drop_duplicates()" in desc
     assert "mixed cell types" in desc
     assert "multiline CSV from a start cell" in desc
+    assert "DO: to copy a block onto another sheet or place, pass source and dest range" in desc
+    assert "do not pass values" in desc
 
 
 def test_insert_cell_html_description_keeps_border_guidance():
@@ -408,7 +487,16 @@ def test_calc_workflow_warns_large_range_overloads_context():
 
     assert "overloads the model context" in CALC_WORKFLOW
     assert "get_sheet_summary" in CALC_WORKFLOW
-    assert "pass the A1 address to =PY" in CALC_WORKFLOW
+    assert "pass the A1 address to =PY" not in CALC_WORKFLOW
+    assert "peek only" in CALC_WORKFLOW
+    assert "write_formula_range (fill-down adjusts relative refs)" in CALC_WORKFLOW
+    assert "=PY into one empty cell outside the data" in CALC_WORKFLOW
+    assert CALC_WORKFLOW.index("write_formula_range") < CALC_WORKFLOW.index("=PY into one empty cell")
+    assert 'domain="sheets"' in CALC_WORKFLOW
+    assert "create is not populate" in CALC_WORKFLOW
+    assert "write_formula_range" in CALC_WORKFLOW
+    assert "source" in CALC_WORKFLOW
+    assert "create_sheet makes an empty tab" not in CALC_WORKFLOW
 
 
 def test_calc_chat_prompt_includes_context_overload_why():
@@ -438,6 +526,36 @@ def test_core_directives_prohibit_asking_user_to_paste():
     assert "described file(s)" in DRAW_CORE_DIRECTIVES
 
 
+def test_parent_images_edit_task_steers_source_image():
+    """Parent must pass an edit task, not a generate-new paraphrase."""
+    for text in (SPECIALIZED_TASK_RULES, DELEGATE_SPECIALIZED_TASK_PARAM_HINT, WRITER_IMAGES_RULES):
+        assert "source_image" in text
+        assert "selection" in text
+        assert "image_generate" in text
+    assert "make it look like a wizard" in SPECIALIZED_TASK_RULES
+    assert "\n" not in SPECIALIZED_TASK_RULES
+
+
+def test_images_specialized_sub_agent_hint_steers_source_image():
+    hint = images_specialized_sub_agent_hint()
+    assert "source_image" in hint
+    assert "selection" in hint
+    assert "image_generate" in hint
+    assert "replace_image_in_place" in hint
+    assert "image_list_nearby_files" in hint
+
+
+def test_images_domain_descriptions_steer_source_image():
+    from plugin.calc.base import ToolCalcImageBase
+    from plugin.draw.base import ToolDrawImageBase
+    from plugin.writer.specialized_base import ToolWriterImageBase
+
+    for cls in (ToolWriterImageBase, ToolCalcImageBase, ToolDrawImageBase):
+        desc = cls.specialized_domain_description or ""
+        assert "source_image" in desc
+        assert "selection" in desc
+
+
 def test_python_specialized_sub_agent_hint_writer():
     hint = python_specialized_sub_agent_hint("Writer")
     assert "PYTHON VENV SANDBOX" in hint
@@ -464,4 +582,58 @@ def test_document_research_multi_file_delegation_in_prompts():
     for directives in (WRITER_CORE_DIRECTIVES, CALC_CORE_DIRECTIVES, DRAW_CORE_DIRECTIVES):
         assert "described file(s)" in directives
         assert "once with" in directives or "once with their" in directives
+
+
+def test_document_research_prompt_is_other_docs_not_open_workbook():
+    # Tiny wording only: "same folder" taught models to scan leftover siblings.
+    assert "not the open workbook" in WRITER_SPECIALIZED_DELEGATION_TEMPLATE
+    assert "same folder" not in WRITER_SPECIALIZED_DELEGATION_TEMPLATE
+
+
+def test_sheets_create_completion_instruction_is_create_not_populate():
+    from plugin.framework.prompts import (
+        SHEETS_CREATED_NOT_POPULATED_INSTRUCTION,
+        attach_sheets_create_completion_instruction,
+        first_instruction_from_tool_results,
+        get_sheets_create_completion_instruction,
+    )
+
+    inst = get_sheets_create_completion_instruction()
+    assert inst == SHEETS_CREATED_NOT_POPULATED_INSTRUCTION
+    assert "not populated" in inst
+    assert "write_formula_range" in inst
+    assert "source" in inst
+    assert "Ready" not in inst
+    assert "AFC" not in inst
+
+    inner = {
+        "status": "ok",
+        "message": "New sheet named 'Q1 Actuals' created; no cells copied.",
+        "instruction": inst,
+    }
+    assert first_instruction_from_tool_results([inner]) == inst
+
+    finish = {
+        "status": "ok",
+        "finished": True,
+        "answer": "Created Q1 Actuals",
+        "message": "Specialized task complete.",
+    }
+    forwarded = attach_sheets_create_completion_instruction(
+        finish, create_sheet_ran=True, tool_results=[inner]
+    )
+    assert forwarded["instruction"] == inst
+    assert forwarded["answer"] == "Created Q1 Actuals"
+
+    listed = attach_sheets_create_completion_instruction(
+        {"status": "ok", "answer": "Sheet1, Sheet2"},
+        create_sheet_ran=False,
+    )
+    assert "instruction" not in listed
+
+    reported = attach_sheets_create_completion_instruction(
+        {"status": "ok", "answer": "New sheet named 'Sample' created; no cells copied."},
+        create_sheet_ran=False,
+    )
+    assert reported["instruction"] == inst
 
