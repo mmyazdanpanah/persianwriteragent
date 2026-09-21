@@ -11,8 +11,6 @@ input Persian text
 → individual LibreOffice Track Changes
 """
 
-import sys
-sys.path.insert(0, "/Users/mostafa/Workspace/02_AI_Lab/Persian_Writing/Tools/writeragent")
 
 from plugin.persian.normalize import extract_hazm_changes
 from plugin.persian.spelling import find_spelling_changes
@@ -182,7 +180,3 @@ def main():
     print("=" * 60)
 
     return 0 if all_passed else 1
-
-
-if __name__ == "__main__":
-    sys.exit(main())

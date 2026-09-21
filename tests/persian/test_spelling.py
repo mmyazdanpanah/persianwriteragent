@@ -9,9 +9,14 @@ Tests the corrected candidate extraction behavior:
 4. Protection of URLs, emails, versions, etc. still works
 """
 
-import sys
-sys.path.insert(0, "/Users/mostafa/Workspace/02_AI_Lab/Persian_Writing/Tools/writeragent")
+from pathlib import Path
 
+
+import json
+
+import pytest
+
+import plugin.persian.spelling as spelling
 from plugin.persian.spelling import (
     find_spelling_changes,
     load_approved_dictionary,
@@ -226,31 +231,71 @@ print()
 # ============================================================
 # Test 10: Candidate Management (add, promote, etc.)
 # ============================================================
-print("=== Test 10: Candidate Management ===")
-# Clean up any existing test candidates
-from plugin.persian.spelling import save_candidates_dictionary
-save_candidates_dictionary([])
+def test_candidate_management(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    print("=== Test 10: Candidate Management ===")
 
-add_candidate_entry("موزه\u200cشناسی", frequency=5, sources=["test-doc.md"])
-candidates = load_candidates_dictionary()
-print(f"Candidates after adding: {candidates}")
-assert len(candidates) == 1
-assert candidates[0]["candidate"] == "موزه\u200cشناسی"
-assert candidates[0]["frequency"] == 5
+    dictionary_path = tmp_path / "dictionary"
+    dictionary_path.mkdir()
+    (dictionary_path / "approved.json").write_text(
+        json.dumps(
+            [
+                {
+                    "wrong": "صرفا",
+                    "correct": "صرفاً",
+                    "type": "spelling",
+                    "status": "approved",
+                    "source": ["manual"],
+                },
+                {
+                    "wrong": "بعنوان",
+                    "correct": "به‌عنوان",
+                    "type": "spelling",
+                    "status": "approved",
+                    "source": ["manual"],
+                },
+                {
+                    "wrong": "بویژه",
+                    "correct": "به‌ویژه",
+                    "type": "spelling",
+                    "status": "approved",
+                    "source": ["manual"],
+                },
+            ],
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    (dictionary_path / "candidates.json").write_text("[]", encoding="utf-8")
 
-# Promote to approved
-promote_candidate_to_approved("موزه\u200cشناسی", "موزه\u200cشناسی", "terminology", ["test-doc.md"])
-approved = load_approved_dictionary()
-print(f"Approved after promotion: {len(approved)} entries")
-for e in approved:
-    print(f"  {e['wrong']} -> {e['correct']} ({e['type']})")
+    monkeypatch.setattr(spelling, "get_dictionary_path", lambda: dictionary_path)
 
-# Verify terminology with identical wrong/correct produces no changes
-text = "موزه\u200cشناسی مهم است"
-result = find_spelling_changes(text)
-assert result.get("changes") == [], f"Terminology with same wrong/correct should produce no changes: {result}"
-print("✓ PASS: Candidate management works")
-print()
+    add_candidate_entry("موزه\u200cشناسی", frequency=5, sources=["test-doc.md"])
+    candidates = load_candidates_dictionary()
+    print(f"Candidates after adding: {candidates}")
+    assert len(candidates) == 1
+    assert candidates[0]["candidate"] == "موزه\u200cشناسی"
+    assert candidates[0]["frequency"] == 5
+
+    promote_candidate_to_approved(
+        "موزه\u200cشناسی",
+        "موزه\u200cشناسی",
+        "terminology",
+        ["test-doc.md"],
+    )
+    approved = load_approved_dictionary()
+    print(f"Approved after promotion: {len(approved)} entries")
+    for entry in approved:
+        print(
+            f"  {entry['wrong']} -> {entry['correct']} "
+            f"({entry['type']})"
+        )
+
+    result = find_spelling_changes("موزه\u200cشناسی مهم است")
+    assert result.get("changes") == []
+
+    print("✓ PASS: Candidate management works")
+    print()
 
 # ============================================================
 # Test 11: Repetition Test

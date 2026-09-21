@@ -5,8 +5,6 @@
 Run this directly with Python to test the algorithm without LibreOffice.
 """
 
-import sys
-sys.path.insert(0, "/Users/mostafa/Workspace/02_AI_Lab/Persian_Writing/Tools/writeragent")
 
 from plugin.persian.normalize import extract_hazm_changes, normalize_with_hazm
 
