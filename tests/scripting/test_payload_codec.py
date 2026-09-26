@@ -212,6 +212,21 @@ def test_scalar_egress_stays_json():
     wire = child_pack_result(42.5, force="auto")
     assert wire == 42.5
 
+def test_child_pack_plain_python_without_numpy() -> None:
+    """Plain Python results serialize when NumPy is unavailable."""
+    result = {"changes": [["می پردازد", "می‌پردازد"]]}
+
+    real_import = __import__
+
+    def import_without_numpy(name, *args, **kwargs):
+        if name == "numpy":
+            raise ModuleNotFoundError("No module named 'numpy'")
+        return real_import(name, *args, **kwargs)
+
+    with patch("builtins.__import__", side_effect=import_without_numpy):
+        assert child_pack_result(result, force="auto") == result
+
+
 
 def test_is_numeric_grid_rejects_text():
     assert is_numeric_grid([1.0, "hello"]) is False
