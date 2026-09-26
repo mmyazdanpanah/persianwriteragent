@@ -23,6 +23,10 @@ If you only want to use PersianWriterAgent:
 
 **[→ Persian user guide](docs/persian/user-guide.md)**
 
+For a complete dependency/setup reference:
+
+**[→ Persian dependencies](docs/persian/dependencies.md)**
+
 For troubleshooting:
 
 **[→ Persian troubleshooting](docs/persian/troubleshooting.md)**
@@ -111,7 +115,7 @@ Ambiguous or context-dependent changes should not be invented by the project.
 
 ### No unnecessary AI in the normalization path
 
-The current normalization/review workflow is deterministic and reproducible. It does not require a language model to decide whether a basic orthographic normalization should happen.
+The current normalization/review workflow is deterministic and reproducible. It does not require a language model to decide whether a basic orthographic normalization should happen. Semantic assistance, if added later, remains a separate concern.
 
 Future semantic assistance may build on the existing WriterAgent architecture, but it is not part of the current normalization contract.
 
