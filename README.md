@@ -2,6 +2,8 @@
 
 > **Persian-first scholarly writing assistance for LibreOffice.**
 
+[![CI status](https://mmyazdanpanah.github.io/persianwriteragent/status.svg)](https://mmyazdanpanah.github.io/persianwriteragent/)
+
 PersianWriterAgent adds a focused Persian language layer to [WriterAgent](https://github.com/KeithCu/writeragent). It is intended for Persian academic, research, and professional writing where corrections should be useful **without silently rewriting the author's text**.
 
 The Persian layer currently provides:
