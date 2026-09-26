@@ -5,7 +5,6 @@ import pytest
 from plugin.persian.normalize import (
     extract_hazm_changes,
     find_hazm_zwnj_changes,
-    normalize_with_hazm,
 )
 
 
@@ -33,7 +32,6 @@ def test_real_academic_paragraph_exposes_hazm_zwnj_changes() -> None:
 بود که این هدف در موقعیت فرانسه نیز دنبال
 می شد."""
 
-    normalized = normalize_with_hazm(text)
     changes = extract_hazm_changes(text)["changes"]
     change_pairs = {tuple(pair) for pair in changes}
 
