@@ -379,6 +379,34 @@ def execute_and_insert_result(
     bindings: dict[str, Any] | None = None
     from plugin.scripting.helper_domain import parse_run_import_call_spec, script_uses_run_import
 
+    if is_writer(doc) and (script_uses_run_import(code, run_name="run_persian") or "writeragent.persian.scripts" in code):
+        from plugin.scripting.helper_domain import prepend_run_import_document_bindings
+
+        call_spec = parse_run_import_call_spec(code, run_name="run_persian") or {}
+        if str(call_spec.get("helper") or "").strip() not in {"normalize_review"}:
+            return rps_error_outcome(_("Unknown Persian helper."), t0=t0)
+
+        try:
+            controller = doc.getCurrentController()
+            selection = controller.getSelection() if controller is not None else None
+            if selection is None or not hasattr(selection, "getCount") or selection.getCount() == 0:
+                return rps_error_outcome(_("Select Persian text before running the Persian helper."), t0=t0)
+
+            selected_range = selection.getByIndex(0)
+            selected_text = str(selected_range.getString() or "")
+            if not selected_text.strip():
+                return rps_error_outcome(_("Select Persian text before running the Persian helper."), t0=t0)
+
+            exec_code = prepend_run_import_document_bindings(
+                code,
+                bindings={"text": selected_text},
+            )
+        except Exception as exc:
+            return rps_error_outcome(
+                _("Could not read the selected Writer text: {error}").format(error=str(exc)),
+                t0=t0,
+            )
+
     if is_writer(doc) and (script_uses_run_import(code, run_name="run_text_analytics") or "writeragent.scripting.text_analytics" in code):
         from plugin.scripting.helper_domain import prepend_run_import_document_bindings
         from plugin.scripting.text_analytics import resolve_text_analytics_document_inputs

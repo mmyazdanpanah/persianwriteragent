@@ -42,6 +42,7 @@ SCRIPT_ORIGIN_QUANT = "quant"
 SCRIPT_ORIGIN_OPTIMIZE = "optimize"
 SCRIPT_ORIGIN_FORECAST = "forecast"
 SCRIPT_ORIGIN_SQL = "sql"
+SCRIPT_ORIGIN_PERSIAN = "persian"
 
 DOC_SCRIPT_DISPLAY_PREFIX = "[Doc] "
 ANALYSIS_SCRIPT_DISPLAY_PREFIX = "[Analysis] "
@@ -53,6 +54,7 @@ QUANT_SCRIPT_DISPLAY_PREFIX = "[Quant] "
 OPTIMIZE_SCRIPT_DISPLAY_PREFIX = "[Optimize] "
 FORECAST_SCRIPT_DISPLAY_PREFIX = "[Forecast] "
 SQL_SCRIPT_DISPLAY_PREFIX = "[SQL] "
+PERSIAN_SCRIPT_DISPLAY_PREFIX = "[Persian] "
 
 
 @dataclass(frozen=True)
@@ -477,6 +479,13 @@ PICKER_WIRING: tuple[PickerWiring, ...] = (
         title="Viz Helpers",
         supports="plugin.scripting.viz:supports_viz_manual",
         templates="plugin.scripting.viz:get_viz_script_templates",
+    ),
+    PickerWiring(
+        origin=SCRIPT_ORIGIN_PERSIAN,
+        display_prefix=PERSIAN_SCRIPT_DISPLAY_PREFIX,
+        title="Persian Helpers",
+        supports="plugin.persian.scripts:supports_persian_manual",
+        templates="plugin.persian.scripts:get_persian_script_templates",
     ),
     PickerWiring(
         origin=SCRIPT_ORIGIN_QUANT,
