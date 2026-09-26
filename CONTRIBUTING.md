@@ -86,17 +86,15 @@ When reporting a platform-specific issue, please include your operating system, 
 
 For Persian-specific changes, keep the processing layers separate:
 
-```text
+~~~text
 mechanical normalization
         ↓
 reviewed spelling dictionary
         ↓
-future terminology layer
-        ↓
-optional configurable Persian-tuned LLM assistance
-```
+future Persian language features, only when justified
+~~~
 
-Deterministic changes should be conservative and reviewable through LibreOffice Track Changes. The planned LLM layer is a separate contextual assistance layer and should remain optional, configurable, and compatible with the existing WriterAgent architecture.
+Deterministic changes should be conservative and reviewable through LibreOffice Track Changes. Keep the current normalization path small and reproducible.
 
 Every automatic correction should be:
 
@@ -137,7 +135,7 @@ A useful bug report includes:
 - actual behavior
 - relevant logs or screenshots, with secrets and personal data removed
 
-For language-related bugs, a minimal Persian example is especially valuable.
+For language-related bugs, a minimal Persian example is especially valuable. See [Persian dependencies](docs/persian/dependencies.md) and the [Persian developer architecture](docs/persian/developer-architecture.md) before changing the Persian runtime.
 
 ## First contributions
 
