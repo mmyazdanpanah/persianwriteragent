@@ -162,6 +162,7 @@ def test_insert_content_at_position_text_selection_clears_range():
 
     text_rng = MagicMock()
     text_rng.getText.return_value.createTextCursorByRange.return_value = MagicMock()
+    text_rng.supportsService.return_value = False
 
     sel = MagicMock()
     sel.getCount.return_value = 1
@@ -176,17 +177,88 @@ def test_insert_content_at_position_text_selection_clears_range():
 
     with patch.object(visual_helpers, "is_graphic_object", return_value=False), patch(
         "plugin.writer.html_import._insert_mixed_or_plain_html"
+    ), patch(
+        # Master nested-table check walks MagicMock enumerations forever.
+        "plugin.writer.specialized.tables.raise_if_range_hosts_nested_table",
     ):
         insert_content_at_position(model, MagicMock(), "<p>hi</p>", "selection")
 
     text_rng.setString.assert_called_once_with("")
 
 
+def test_insert_content_at_position_shape_selection_falls_back_to_doc_end():
+    """After shape.upsert, controller selects the Draw shape — HTML insert must not use it."""
+    from unittest.mock import MagicMock, patch
+
+    from plugin.writer.format import insert_content_at_position
+
+    shape = MagicMock()
+    # LibreOffice often returns 1 rather than True
+    shape.supportsService.side_effect = lambda s: 1 if s == "com.sun.star.drawing.Shape" else 0
+
+    sel = MagicMock()
+    sel.getCount.return_value = 1
+    sel.getByIndex.return_value = shape
+
+    controller = MagicMock()
+    controller.getSelection.return_value = sel
+    # View cursor also unusable / shape-like → force document end
+    controller.getViewCursor.side_effect = Exception("no view cursor")
+
+    body_cursor = MagicMock()
+    body_text = MagicMock()
+    body_text.createTextCursor.return_value = body_cursor
+
+    model = MagicMock()
+    model.getCurrentController.return_value = controller
+    model.getText.return_value = body_text
+
+    with patch("plugin.doc.visual_helpers.is_graphic_object", return_value=False), patch(
+        "plugin.writer.html_import._insert_mixed_or_plain_html"
+    ) as mock_insert:
+        insert_content_at_position(model, MagicMock(), "<p>hi</p>", "selection")
+
+    body_cursor.gotoEnd.assert_called_once_with(False)
+    mock_insert.assert_called_once()
+    assert mock_insert.call_args.args[2] is body_cursor
+    shape.setString.assert_not_called()
+
+
+def test_insert_content_at_position_empty_selection_uses_doc_end():
+    from unittest.mock import MagicMock, patch
+
+    from plugin.writer.format import insert_content_at_position
+
+    sel = MagicMock()
+    sel.getCount.return_value = 0
+
+    controller = MagicMock()
+    controller.getSelection.return_value = sel
+    controller.getViewCursor.side_effect = Exception("no view")
+
+    body_cursor = MagicMock()
+    body_text = MagicMock()
+    body_text.createTextCursor.return_value = body_cursor
+    model = MagicMock()
+    model.getCurrentController.return_value = controller
+    model.getText.return_value = body_text
+
+    with patch("plugin.doc.visual_helpers.is_graphic_object", return_value=False), patch(
+        "plugin.writer.html_import._insert_mixed_or_plain_html"
+    ) as mock_insert:
+        insert_content_at_position(model, MagicMock(), "<p>hi</p>", "selection")
+
+    body_cursor.gotoEnd.assert_called_once_with(False)
+    mock_insert.assert_called_once()
+
+
+
+
 def test_replace_preserving_format_atomic_when_split_author_false_even_in_undo_context():
     # Configurable coloring: split_author=False forces the SINGLE atomic setString (one author -> one
     # color) even INSIDE an open undo context, where split_author=True (the default) would use the
     # two-step delete+insert for split-author coloring. The two-step is gated on BOTH flags, so turning
-    # coloring off collapses every recorded replace -- surgical or whole-block -- to one color, still
+    # coloring off collapses every recorded replace — surgical or whole-block — to one color, still
     # all-or-nothing.
     from unittest.mock import patch
 
@@ -254,14 +326,14 @@ def test_document_to_content_full_timing_path_with_mocks():
     xhtml = '<html><body><p class="paragraph-Text_20_body">hello</p></body></html>'
     with (
         patch.object(html_export, "_export_xhtml", return_value=xhtml) as export_xhtml,
-        patch.object(html_export, "_autostyle_parents", return_value={}) as autostyle,
+        patch.object(html_export, "_autostyle_maps", return_value=({}, {})) as autostyle,
         patch.object(fmt.xhtml_post, "xhtml_to_semantic_html", return_value="<p>hello</p>") as post,
     ):
         out = fmt.document_to_content(object(), object(), None, scope="full")
 
     export_xhtml.assert_called_once()
     autostyle.assert_called_once()
-    post.assert_called_once_with(xhtml, {})
+    post.assert_called_once_with(xhtml, {}, {})
     assert out == "<p>hello</p>"
 
 
@@ -319,3 +391,373 @@ def test_resolve_style_name():
     assert fmt._resolve_style_name(model, "heading 1") == "Heading 1"
     # Fallback to input string on unknown style
     assert fmt._resolve_style_name(model, "UnknownStyle") == "UnknownStyle"
+
+
+# --- clear_direct: the paragraph half of Format > Clear Direct Formatting -----------------
+
+
+class _MultiStatesCursor:
+    """Range that supports XMultiPropertyStates (the normal LibreOffice text cursor)."""
+
+    def __init__(self):
+        self.cleared = None
+
+    def setPropertiesToDefault(self, names):
+        self.cleared = tuple(names)
+
+
+class _SingleStateCursor:
+    """Range without the multi variant — exercises the one-at-a-time fallback."""
+
+    def __init__(self, unsupported=()):
+        self.cleared = []
+        self._unsupported = set(unsupported)
+
+    def setPropertyToDefault(self, name):
+        if name in self._unsupported:
+            raise RuntimeError("unsupported property: %s" % name)
+        self.cleared.append(name)
+
+
+def test_clear_direct_paragraph_properties_uses_multi_variant():
+    from plugin.writer import format as fmt
+
+    cursor = _MultiStatesCursor()
+    cleared = fmt._reset_properties_to_default(cursor, fmt.CLEARABLE_PARA_PROPERTIES)
+
+    assert cursor.cleared == fmt.CLEARABLE_PARA_PROPERTIES
+    assert cleared == list(fmt.CLEARABLE_PARA_PROPERTIES)
+
+
+def test_clear_direct_paragraph_properties_falls_back_one_at_a_time():
+    from plugin.writer import format as fmt
+
+    cursor = _SingleStateCursor(unsupported={"ParaSplit"})
+    cleared = fmt._reset_properties_to_default(cursor, fmt.CLEARABLE_PARA_PROPERTIES)
+
+    assert "ParaLeftMargin" in cleared and "ParaFirstLineIndent" in cleared
+    assert "ParaSplit" not in cleared  # reported honestly as not cleared
+
+
+def test_clear_direct_never_touches_non_paragraph_properties():
+    """Deliberately narrower than setAllPropertiesToDefault: numbering, borders and language are
+    not the caller's to lose."""
+    from plugin.writer import format as fmt
+
+    assert all(name.startswith("Para") for name in fmt.CLEARABLE_PARA_PROPERTIES)
+    for unwanted in ("NumberingRules", "ParaStyleName", "CharLocale"):
+        assert unwanted not in fmt.CLEARABLE_PARA_PROPERTIES
+
+
+def test_clearable_para_properties_are_the_single_source_for_styles_schema():
+    """styles.py used to duplicate the name list (stale 'cycle' comment). format owns it."""
+    from plugin.writer import format as fmt
+    from plugin.writer import styles as st
+
+    assert tuple(st._KNOWN_PARAGRAPH_PROPERTIES) == fmt.CLEARABLE_PARA_PROPERTIES
+    assert set(st._PARA_PROPERTY_SCHEMA) == set(fmt.CLEARABLE_PARA_PROPERTIES)
+
+
+def test_summarize_char_overrides_is_json_safe_and_first_portion_wins():
+    from plugin.writer import format as fmt
+
+    overrides = [
+        (object(), {"CharFontName": "Times New Roman", "CharHeight": 12.0, "CharLocale": object()}),
+        (object(), {"CharFontName": "Courier"}),
+    ]
+    summary = fmt._summarize_char_overrides(overrides)
+
+    assert summary == {"CharFontName": "Times New Roman", "CharHeight": 12.0}
+    assert "CharLocale" not in summary  # UNO struct -> not serialisable, left out
+
+
+def test_summarize_char_overrides_reports_asian_complex():
+    """style_props clears Asian/Complex font slots; the report must say so (honest, not silent)."""
+    from plugin.writer import format as fmt
+
+    overrides = [(object(), {
+        "CharFontName": "Times New Roman",
+        "CharFontNameAsian": "SimSun",
+        "CharFontNameComplex": "Tahoma",
+        "CharHeight": 12.0,
+        "CharHeightAsian": 10.5,
+        "CharHeightComplex": 11.0,
+    })]
+    summary = fmt._summarize_char_overrides(overrides)
+
+    assert summary["CharFontNameAsian"] == "SimSun"
+    assert summary["CharFontNameComplex"] == "Tahoma"
+    assert summary["CharHeightAsian"] == 10.5
+    assert summary["CharHeightComplex"] == 11.0
+
+
+def test_reported_char_properties_cover_style_governed():
+    """Keep the clear-set and the report-set aligned: every slot style_props wipes is echoed."""
+    from plugin.writer import format as fmt
+
+    for name in fmt.STYLE_GOVERNED_CHAR_PROPERTIES:
+        assert name in fmt.REPORTED_CHAR_PROPERTIES
+
+
+def test_enum_hit_walk_cap_and_warning_are_honest():
+    from unittest.mock import MagicMock
+    from plugin.writer import format as fmt
+
+    more = MagicMock()
+    more.hasMoreElements.return_value = True
+    done = MagicMock()
+    done.hasMoreElements.return_value = False
+
+    assert fmt.enum_hit_walk_cap(50, 50, more) is True
+    assert fmt.enum_hit_walk_cap(49, 50, more) is False
+    assert fmt.enum_hit_walk_cap(50, 50, done) is False
+    dest = []
+    assert fmt.record_walk_cap(more, 50, 50, "text portions", dest) is True
+    assert dest and "cap 50" in dest[0]
+    assert "incomplete" in dest[0]
+    assert fmt.record_walk_cap(done, 50, 50, "text portions", dest) is False
+
+
+def test_apply_style_origin_limitation_still_value_compare() -> None:
+    """GHA 34683742049 canary FAIL was leftover reuse, not a product fix."""
+    from pathlib import Path
+
+    from plugin.writer import format as fmt
+
+    src = Path(fmt.__file__).read_text(encoding="utf-8")
+    assert "KNOWN LIMITATION: a direct override whose value equals the old style default" in src
+    assert "differs from the paragraph's current style default" in src
+
+
+def test_style_governed_char_properties_spare_bold_and_italic():
+    """style_props drops the font the style owns; hand-set emphasis is the user's, not the style's."""
+    from plugin.writer import format as fmt
+
+    assert "CharFontName" in fmt.STYLE_GOVERNED_CHAR_PROPERTIES
+    assert "CharHeight" in fmt.STYLE_GOVERNED_CHAR_PROPERTIES
+    assert "CharWeight" not in fmt.STYLE_GOVERNED_CHAR_PROPERTIES   # bold survives
+    assert "CharPosture" not in fmt.STYLE_GOVERNED_CHAR_PROPERTIES  # italic survives
+
+
+def test_report_lists_only_the_overrides_actually_removed():
+    """Under style_props, bold/italic are restored — listing them as removed would be wrong."""
+    from plugin.writer import format as fmt
+
+    found = {"CharFontName": "Times New Roman", "CharHeight": 12.0, "CharWeight": 150.0}
+    skip = set(fmt.STYLE_GOVERNED_CHAR_PROPERTIES)
+    removed = {k: v for k, v in found.items() if k in skip}
+
+    assert removed == {"CharFontName": "Times New Roman", "CharHeight": 12.0}
+    assert "CharWeight" not in removed
+
+
+def test_reset_properties_to_default_is_a_noop_on_empty_names():
+    from plugin.writer import format as fmt
+
+    cursor = _MultiStatesCursor()
+    assert fmt._reset_properties_to_default(cursor, ()) == []
+    assert cursor.cleared is None  # never call UNO with an empty set
+
+
+def test_reset_properties_to_default_takes_the_caller_s_names():
+    """The clear is scoped by the caller — style_props clears the font, all clears what was found."""
+    from plugin.writer import format as fmt
+
+    cursor = _MultiStatesCursor()
+    fmt._reset_properties_to_default(cursor, fmt.STYLE_GOVERNED_CHAR_PROPERTIES)
+
+    assert cursor.cleared == fmt.STYLE_GOVERNED_CHAR_PROPERTIES
+
+
+# --- range copy: carrying direct formatting into the temp document -------------------------
+
+
+def _enum(items):
+    from unittest.mock import MagicMock
+
+    e = MagicMock()
+    rest = list(items)
+    e.hasMoreElements.side_effect = lambda: True if rest else False
+    e.nextElement.side_effect = lambda: rest.pop(0)
+    return e
+
+
+def _text_portion(text, ptype="Text", **props):
+    from unittest.mock import MagicMock
+
+    p = MagicMock()
+    values = {"TextPortionType": ptype}
+    values.update(props)
+    p.getPropertyValue.side_effect = lambda n: values[n]
+    p.getString.return_value = text
+    return p
+
+
+def _para_of(portions):
+    from unittest.mock import MagicMock
+
+    para = MagicMock()
+    para.createEnumeration.side_effect = lambda: _enum(portions)
+    return para
+
+
+def test_visible_portions_skips_tracked_deletions():
+    """Shared walk with get_string_without_tracked_deletions — a divergence would paint one
+    run's formatting onto another run's characters."""
+    from plugin.writer import html_export as hx
+
+    para = _para_of([
+        _text_portion("kept "),
+        _text_portion("", "Redline", RedlineType="Delete"),
+        _text_portion("deleted"),
+        _text_portion("", "Redline", RedlineType="Delete"),
+        _text_portion(" tail"),
+    ])
+
+    assert "".join(chunk for _p, chunk in hx._visible_portions(para)) == "kept  tail"
+
+
+def test_visible_portions_ignores_non_delete_redlines():
+    from plugin.writer import html_export as hx
+
+    para = _para_of([
+        _text_portion("", "Redline", RedlineType="Insert"),
+        _text_portion("inserted text"),
+    ])
+
+    assert "".join(chunk for _p, chunk in hx._visible_portions(para)) == "inserted text"
+
+
+def test_visible_portions_warns_when_walk_hits_cap():
+    """Silent truncate hid later runs' Char*; the agent needs a warning that the paint is partial."""
+    from plugin.writer import html_export as hx
+
+    para = _para_of([_text_portion("a"), _text_portion("b"), _text_portion("c")])
+    truncated = []
+    chunks = [chunk for _p, chunk in hx._visible_portions(para, limit=2, truncated_out=truncated)]
+
+    assert chunks == ["a", "b"]
+    assert truncated
+    assert "cap 2" in truncated[0]
+    assert "incomplete" in truncated[0]
+
+
+def test_visible_portions_does_not_warn_when_enum_is_exhausted():
+    from plugin.writer import html_export as hx
+
+    para = _para_of([_text_portion("a"), _text_portion("b")])
+    truncated = []
+    chunks = [chunk for _p, chunk in hx._visible_portions(para, limit=2, truncated_out=truncated)]
+
+    assert chunks == ["a", "b"]
+    assert truncated == []
+
+
+def test_copy_properties_skips_values_the_style_already_gives():
+    """Copying an inherited value would make it a hand-set one on the copy, and the read would
+    then report margin-right:0cm on every paragraph as if the user had set it."""
+    from unittest.mock import MagicMock
+    from plugin.writer import html_export as hx
+
+    src, dst, style = MagicMock(), MagicMock(), MagicMock()
+    src.getPropertyValue.side_effect = {"ParaLeftMargin": 3251, "ParaRightMargin": 0}.get
+    style.getPropertyValue.side_effect = {"ParaLeftMargin": 0, "ParaRightMargin": 0}.get
+
+    hx._copy_properties(src, dst, ("ParaLeftMargin", "ParaRightMargin"), style)
+
+    dst.setPropertyValue.assert_called_once_with("ParaLeftMargin", 3251)
+
+
+def test_copy_properties_without_a_style_copies_everything_readable():
+    from unittest.mock import MagicMock
+    from plugin.writer import html_export as hx
+
+    src, dst = MagicMock(), MagicMock()
+    src.getPropertyValue.side_effect = {"CharWeight": 150.0}.get
+
+    hx._copy_properties(src, dst, ("CharWeight",))
+
+    dst.setPropertyValue.assert_called_once_with("CharWeight", 150.0)
+
+
+def test_copy_properties_continues_past_one_the_target_refuses():
+    """The temp document is a plain Writer doc and need not offer every source property."""
+    from unittest.mock import MagicMock
+    from plugin.writer import html_export as hx
+
+    src, dst = MagicMock(), MagicMock()
+    src.getPropertyValue.side_effect = {"CharPosture": 1, "CharWeight": 150.0}.get
+
+    def refuse_posture(name, _value):
+        if name == "CharPosture":
+            raise RuntimeError("unsupported")
+
+    dst.setPropertyValue.side_effect = refuse_posture
+
+    hx._copy_properties(src, dst, ("CharPosture", "CharWeight"))
+
+    assert [c.args[0] for c in dst.setPropertyValue.call_args_list] == ["CharPosture", "CharWeight"]
+
+
+def test_paint_direct_formatting_still_paints_char_when_para_copy_raises():
+    """A refused Para* must not skip the portion Char* loop — that paint is why the
+    temp-doc path exists (bold/colour on a range read)."""
+    from unittest.mock import MagicMock, patch
+    from plugin.writer import html_export as hx
+
+    portion = MagicMock()
+    para = MagicMock()
+    para_start = MagicMock(name="para_start")
+    para_cursor = MagicMock()
+    para_cursor.getStart.return_value = para_start
+    run = MagicMock()
+    temp_text = MagicMock()
+    temp_text.createTextCursor.return_value = para_cursor
+    temp_text.createTextCursorByRange.return_value = run
+
+    def copy_side_effect(src, dst, names, style=None):
+        if names is hx._COPIED_PARA_PROPERTIES:
+            raise RuntimeError("refused Para*")
+
+    with patch.object(hx, "_copy_properties", side_effect=copy_side_effect) as copy:
+        hx._paint_direct_formatting(para, [(portion, "bold")], temp_text, 0, 4)
+
+    names_seen = [c.args[2] for c in copy.call_args_list]
+    assert hx._COPIED_PARA_PROPERTIES in names_seen
+    assert hx._COPIED_CHAR_PROPERTIES in names_seen
+    char_call = next(c for c in copy.call_args_list if c.args[2] is hx._COPIED_CHAR_PROPERTIES)
+    assert char_call.args[0] is portion
+
+
+def test_source_style_is_cached_and_tolerates_a_missing_style():
+    from unittest.mock import MagicMock
+    from plugin.writer import html_export as hx
+
+    model = MagicMock()
+    families = model.getStyleFamilies.return_value.getByName.return_value
+    families.getByName.side_effect = lambda n: "STYLE" if n == "Standard" else (_ for _ in ()).throw(KeyError(n))
+
+    cache = {}
+    assert hx._source_style(model, "Standard", cache) == "STYLE"
+    assert hx._source_style(model, "Standard", cache) == "STYLE"
+    assert families.getByName.call_count == 1  # second read served from the cache
+    assert hx._source_style(model, "Nope", cache) is None
+    assert hx._source_style(model, "", cache) is None
+
+
+def test_format_uno_skips_windows_leftover_hidden_apply() -> None:
+    """GHA 34683742049 / 34685648395 / 35470191616: leftover Hidden and pool reuse."""
+    from pathlib import Path
+
+    src = Path(__file__).with_name("test_format_uno.py").read_text(encoding="utf-8")
+    assert "skip_windows_leftover_hidden_load" in src
+    assert "apply_document_content Hidden _default swriter" in src
+    assert "34683742049" in src
+    assert "format_uno Hidden _blank small_doc" in src
+    assert "34685648395" in src
+    assert "format_uno cross-paragraph color leftover reuse" in src
+    assert "non-linebreak" in src
+    assert "35466498641" in src
+    assert "skip_windows_pooled_writer_reuse" in src
+    assert "format_uno cross-paragraph color pooled reuse" in src
+    assert "35470191616" in src

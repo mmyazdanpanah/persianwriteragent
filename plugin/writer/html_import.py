@@ -6,6 +6,8 @@
 """HTML/StarWriter import, replace, and markup routing for Writer documents.
 
 Public entries are re-exported from ``plugin.writer.format``.
+Header/footer apply uses ``replace_xtext_with_html`` (same StarWriter
+insert as the body path, pointed at a region ``XText``).
 """
 
 import html as html_mod
@@ -15,7 +17,7 @@ from html.parser import HTMLParser
 
 from plugin.doc.text_helpers import normalize_linebreaks as _normalize
 from plugin.framework.errors import ToolExecutionError
-from plugin.framework.uno_context import get_desktop
+from plugin.framework.uno_context import get_desktop, uno_same
 from . import xhtml_style_postprocess as xhtml_post
 from . import format as format_mod
 from .math.html_math_segment import html_fragment_contains_mixed_math, segment_html_with_mixed_math
@@ -366,7 +368,20 @@ def insert_html_fragment_at_cursor(
     with format_mod._with_temp_buffer(prepared, config_svc) as (_path, file_url):
         filter_name, _unused = format_mod._get_format_props(config_svc)
         filter_props = (format_mod.create_property_value("FilterName", filter_name),)
-        cursor.insertDocumentFromURL(file_url, filter_props)
+        try:
+            cursor.insertDocumentFromURL(file_url, filter_props)
+        except Exception as e:
+            # Mid-script apply_document_content / insert_content paths used to bubble with no log.
+            log.error(
+                "insertDocumentFromURL failed: type=%s str=%r repr=%r filter=%r url=%r",
+                type(e).__name__,
+                str(e),
+                repr(e),
+                filter_name,
+                file_url,
+                exc_info=e,
+            )
+            raise
     if model is not None:
         _cursor_goto_document_end(model, cursor)
 
@@ -483,6 +498,47 @@ def insert_html_at_cursor(model, ctx, cursor, unescaped_content, config_svc=None
 
 
 
+
+def _uno_service_true(obj, service: str) -> bool:
+    """``supportsService`` may return True/1; ignore MagicMock without a side_effect."""
+    try:
+        val = obj.supportsService(service)
+    except Exception:
+        return False
+    if val is True or val == 1:
+        return True
+    if val is False or val == 0 or val is None:
+        return False
+    # unittest.mock.MagicMock is truthy but not a real UNO answer
+    if type(val).__module__.startswith("unittest.mock"):
+        return False
+    return bool(val)
+
+
+def _selection_is_draw_shape(obj) -> bool:
+    """True when the controller selection is a Draw/Writer shape, not a text range.
+
+    After ``create_shape`` / ``shape.upsert``, Writer selects the new shape so the
+    user can see handles. That selection is not an ``XTextCursor`` host:
+    ``insertDocumentFromURL`` then raises ``AttributeError: insertDocumentFromURL``
+    (opaque dialog: Failed to insert result: insertDocumentFromURL).
+    """
+    if obj is None:
+        return False
+    try:
+        from plugin.doc.visual_helpers import is_graphic_object
+
+        if is_graphic_object(obj):
+            return True
+    except Exception:
+        pass
+    if _uno_service_true(obj, "com.sun.star.drawing.Shape"):
+        return True
+    if _uno_service_true(obj, "com.sun.star.drawing.CustomShape"):
+        return True
+    return False
+
+
 def insert_content_at_position(model, ctx, content, position, config_svc=None):
     """Insert formatted content at *position* (``'beginning'``,
     ``'end'``, or ``'selection'``) using ``insertDocumentFromURL``.
@@ -497,28 +553,66 @@ def insert_content_at_position(model, ctx, content, position, config_svc=None):
     elif position == "end":
         cursor.gotoEnd(False)
     elif position == "selection":
-        # Resolve the target FIRST, in the selection's OWN text object: a selection inside a
-        # table cell / frame is a different XText, and gotoRange on a body cursor raises. The
-        # old blanket `except: cursor.gotoEnd(False)` meant a failure DELETED the selection and
-        # appended the content at the document end while reporting ok. Never fall back silently.
+        # Prefer a real text selection (table/frame-aware). Draw shape selections (post
+        # shape.upsert) and empty selections fall back to the view text cursor, then
+        # document end — RPS Universal Sample must not require the user to select text.
+        def _doc_end_cursor():
+            c = text.createTextCursor()
+            c.gotoEnd(False)
+            return c
+
+        controller = None
         try:
             controller = model.getCurrentController()
+        except Exception:
+            controller = None
+
+        rng = None
+        try:
             sel = controller.getSelection() if controller else None
-            rng = None
             if sel and hasattr(sel, "getCount"):
                 try:
                     if int(sel.getCount()) > 0:
                         rng = sel.getByIndex(0)
                 except Exception:
                     rng = None
-            if rng is None:
-                rng = controller.getViewCursor()
-            cursor = rng.getText().createTextCursorByRange(rng.getStart())
-            rng.setString("")  # clear the selection only AFTER the insert cursor is anchored
-        except Exception as e:
-            raise ToolExecutionError(
-                "Could not resolve the current selection (%s). Select text first, or use "
-                "target='search' with old_content, or call set_selection." % e)
+        except Exception:
+            rng = None
+
+        if rng is not None and _selection_is_draw_shape(rng):
+            log.debug(
+                "insert_content_at_position: selection is Draw/Writer shape; "
+                "falling back to view/document text cursor"
+            )
+            rng = None
+
+        if rng is None and controller is not None:
+            try:
+                vc = controller.getViewCursor()
+                if vc is not None and not _selection_is_draw_shape(vc):
+                    rng = vc
+            except Exception:
+                rng = None
+
+        if rng is None:
+            cursor = _doc_end_cursor()
+        else:
+            try:
+                cursor = rng.getText().createTextCursorByRange(rng.getStart())
+                if not hasattr(cursor, "insertDocumentFromURL"):
+                    raise AttributeError("insertDocumentFromURL")
+                # Clear only real text selections (never shapes).
+                if hasattr(rng, "setString") and not _selection_is_draw_shape(rng):
+                    from plugin.writer.specialized.tables import raise_if_range_hosts_nested_table
+
+                    raise_if_range_hosts_nested_table(rng)
+                    rng.setString("")
+            except Exception as e:
+                log.debug(
+                    "insert_content_at_position: text selection unusable (%s); using document end",
+                    e,
+                )
+                cursor = _doc_end_cursor()
     else:
         raise ToolExecutionError("Unknown position: %s" % position)
 
@@ -594,6 +688,10 @@ def replace_single_range_with_content(model, text_range, content, ctx, config_sv
             saved_style = None
 
     cursor = text_obj.createTextCursorByRange(text_range)
+    from plugin.writer.specialized.tables import raise_if_range_hosts_nested_table
+
+    # setString on a host cell wipes nested TextTables — same refuse as table_set_cell.
+    raise_if_range_hosts_nested_table(text_range)
     with format_mod._deletion_author():  # author the deletion distinctly (split by-author coloring)
         cursor.setString("")
 
@@ -637,6 +735,189 @@ def replace_single_range_with_content(model, text_range, content, ctx, config_sv
 
 
 
+# XHTML export of Writer fields (body and copied header XText) is a titled
+# span, e.g. ``<span title="page-number"/>``. StarWriter HTML import drops
+# those spans (probed: no TextField after insert). Swap in a token the
+# filter keeps, import, then replace the token with a real field.
+#
+# LO's XHTML filter (filter/source/xslt/odf2xhtml/export/xhtml/body.xsl)
+# sets ``title`` to ``local-name()`` of the ODF field element. Full list
+# LO can emit (kept here so widening the map is a one-place edit):
+#   author-initials, author-name, chapter, character-count, creation-date,
+#   creation-time, creator, date, description, editing-cycles,
+#   editing-duration, file-name, image-count, initial-creator, keywords,
+#   modification-date, modification-time, object-count, page-continuation,
+#   page-count, page-number, paragraph-count, print-date, print-time,
+#   printed-by, sender-city, sender-company, sender-country, sender-email,
+#   sender-fax, sender-firstname, sender-initials, sender-lastname,
+#   sender-phone-private, sender-phone-work, sender-position,
+#   sender-postal-code, sender-state-or-province, sender-street,
+#   sender-title, sheet-name, subject, table-count, time, title,
+#   user-defined, word-count
+#
+# Restore only a letterhead-useful subset for now (page/date plus chapter,
+# author, file name, doc title/subject). Extending ``_EXPORTED_FIELD_TITLES``
+# / ``_FIELD_TITLE_TO_SERVICE`` is intentional and easy when a real bug
+# arrives. GetReference / cross-ref is a separate loss class (different
+# markup, not this XSLT ``title=`` path).
+_FIELD_PLACEHOLDER_FMT = "[[WA-FIELD:%s]]"
+_EXPORTED_FIELD_TITLES = (
+    "page-number",
+    "page-count",
+    "time",
+    "date",
+    "chapter",
+    "author-name",
+    "author-initials",
+    "file-name",
+    "title",
+    "subject",
+)
+# Built from the tuple so the span regex and restore loop stay in sync.
+_FIELD_SPAN_RE = re.compile(
+    r'<span\b(?=[^>]*\btitle\s*=\s*["\'](%s)["\'])'
+    r'(?:[^>]*/>|[^>]*>.*?</span>)' % "|".join(_EXPORTED_FIELD_TITLES),
+    re.IGNORECASE | re.DOTALL,
+)
+_FIELD_TITLE_TO_SERVICE = {
+    "page-number": "com.sun.star.text.textfield.PageNumber",
+    "page-count": "com.sun.star.text.textfield.PageCount",
+    "time": "com.sun.star.text.textfield.DateTime",
+    "date": "com.sun.star.text.textfield.DateTime",
+    "chapter": "com.sun.star.text.textfield.Chapter",
+    "author-name": "com.sun.star.text.textfield.Author",
+    "author-initials": "com.sun.star.text.textfield.Author",
+    "file-name": "com.sun.star.text.textfield.FileName",
+    "title": "com.sun.star.text.textfield.docinfo.Title",
+    "subject": "com.sun.star.text.textfield.docinfo.Subject",
+}
+
+
+def rewrite_exported_field_spans(html):
+    """Replace XHTML field spans with placeholders the HTML import will keep."""
+    if not html or "title=" not in html:
+        return html
+
+    def _repl(match):
+        return _FIELD_PLACEHOLDER_FMT % match.group(1).lower()
+
+    return _FIELD_SPAN_RE.sub(_repl, html)
+
+
+def _insert_restored_field(model, text_range, title):
+    service = _FIELD_TITLE_TO_SERVICE.get(title)
+    if not service:
+        return False
+    try:
+        field = model.createInstance(service)
+    except Exception:
+        return False
+    if title == "page-number":
+        try:
+            from com.sun.star.text.PageNumberType import CURRENT
+
+            field.setPropertyValue("PageNumberType", CURRENT)
+        except Exception:
+            pass
+        try:
+            field.setPropertyValue("NumberingType", 4)  # Arabic
+        except Exception:
+            pass
+    elif title == "date":
+        try:
+            field.setPropertyValue("IsDate", True)
+        except Exception:
+            pass
+    elif title == "time":
+        try:
+            field.setPropertyValue("IsDate", False)
+        except Exception:
+            pass
+    elif title == "author-name":
+        # Same Author service as initials; FullName selects the display form.
+        try:
+            field.setPropertyValue("FullName", True)
+        except Exception:
+            pass
+    elif title == "author-initials":
+        try:
+            field.setPropertyValue("FullName", False)
+        except Exception:
+            pass
+    try:
+        text = text_range.getText()
+        cursor = text.createTextCursorByRange(text_range)
+        cursor.setString("")
+        text.insertTextContent(cursor, field, False)
+        return True
+    except Exception:
+        log.debug("_insert_restored_field failed title=%s", title, exc_info=True)
+        return False
+
+
+def _restore_field_placeholders(model, text_obj=None):
+    """Turn ``[[WA-FIELD:…]]`` tokens back into UNO fields.
+
+    Uses document ``findFirst`` (same reach as body search: headers included).
+    When *text_obj* is set, only matches in that ``XText`` are replaced.
+    """
+    if model is None or not hasattr(model, "createSearchDescriptor"):
+        return 0
+    restored = 0
+    for title in _EXPORTED_FIELD_TITLES:
+        needle = _FIELD_PLACEHOLDER_FMT % title
+        try:
+            sd = model.createSearchDescriptor()
+            sd.SearchString = needle
+            sd.SearchRegularExpression = False
+            found = model.findFirst(sd)
+        except Exception:
+            continue
+        while found is not None:
+            in_region = True
+            if text_obj is not None:
+                try:
+                    in_region = uno_same(found.getText(), text_obj)
+                except Exception:
+                    in_region = True
+            nxt = None
+            try:
+                nxt = model.findNext(found.getEnd(), sd)
+            except Exception:
+                nxt = None
+            if in_region and _insert_restored_field(model, found, title):
+                restored += 1
+            found = nxt
+    return restored
+
+
+def replace_xtext_with_html(text_obj, html, config_svc=None, model=None):
+    """Clear *text_obj* and import *html* via the shared StarWriter path.
+
+    Field spans from ``document_to_content`` / ``xtext_to_content`` are
+    restored as live fields after import. *model* is the owning document
+    (needed to create fields and to find placeholders). Do not pass it
+    through to ``insert_html_fragment_at_cursor`` — that helper would
+    then jump the cursor to the *body* end.
+    """
+    if text_obj is None:
+        raise ToolExecutionError("No text object to import into.")
+    expanded = html if isinstance(html, str) else ("" if html is None else str(html))
+    expanded = expanded.replace("\\n", "\n").replace("\\t", "\t")
+    rewritten = rewrite_exported_field_spans(expanded)
+    prepared = _ensure_html_linebreaks(rewritten)
+    cursor = text_obj.createTextCursor()
+    cursor.gotoStart(False)
+    cursor.gotoEnd(True)
+    cursor.setString("")
+    cursor.gotoStart(False)
+    insert_html_fragment_at_cursor(
+        cursor, prepared, wrap=False, config_svc=config_svc, model=None,
+    )
+    if model is not None:
+        _restore_field_placeholders(model, text_obj)
+
+
 def content_has_markup(content):
     """Return ``True`` if *content* appears to contain Markdown or HTML."""
     if not content or not isinstance(content, str):
@@ -665,6 +946,9 @@ def replace_preserving_format(model, target_range, new_text, ctx=None,
     ``XText`` that owns the range), not ``model.getText()``. The range must lie
     entirely within that text object.
 
+    Refuses a host cell that contains a nested TextTable (setString / whole-range
+    replace would delete it — use table_set_cell).
+
     When recording tracked changes, *split_author* selects the rendering:
     ``True`` (default) authors the deletion and insertion separately so
     LibreOffice's by-author coloring shows removed vs new text in two distinct
@@ -679,6 +963,9 @@ def replace_preserving_format(model, target_range, new_text, ctx=None,
     # createTextCursorByRange() raises "End of content node doesn't have the proper
     # start node". target_range.getText() resolves to the cell (or body) correctly,
     # matching the markup path which already uses found.getText().
+    from plugin.writer.specialized.tables import raise_if_range_hosts_nested_table
+
+    raise_if_range_hosts_nested_table(target_range)
     text = target_range.getText()
     old_text = _normalize(target_range.getString())
     new_text = _normalize(new_text)

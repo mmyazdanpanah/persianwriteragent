@@ -9,6 +9,7 @@
 # Pure pytest unit tests (no LibreOffice) for the XHTML style post-process pipeline.
 # Fixtures mirror the real "XHTML Writer File" output captured from LibreOffice.
 from plugin.writer.xhtml_style_postprocess import (
+    extract_autostyle_overrides_from_fodt,
     compact_lo_style_name,
     decode_lo_css_class_suffix,
     extract_autostyle_parents_from_fodt,
@@ -159,17 +160,97 @@ def test_autostyle_ambiguous_match_omitted():
     assert "paragraph-" not in out, out
 
 
-# --- Issue 1 characterization: whole-paragraph direct overrides are dropped ---
+# --- Issue 1: whole-paragraph direct overrides are REPORTED (read-only), not applied ---
 
-def test_whole_paragraph_direct_override_is_dropped():
-    """KNOWN LIMITATION: a Standard paragraph with whole-paragraph center+colour (autostyle P2,
-    a superset of the body style) is emitted WITHOUT a token and WITHOUT the override CSS.
-    Alignment/whole-paragraph colour do not round-trip in v1 (documented for the maintainer)."""
-    out = xhtml_to_semantic_html(REFERENCE_XHTML)
+_FODT_OVERRIDES = """<office:document>
+ <style:style style:name="P1" style:family="paragraph" style:parent-style-name="Standard">
+  <style:text-properties fo:font-size="12pt" style:font-name="Times New Roman"/>
+ </style:style>
+ <style:style style:name="P2" style:family="paragraph" style:parent-style-name="Standard">
+  <style:paragraph-properties fo:margin-left="3.25cm" fo:text-indent="0cm" fo:text-align="start"/>
+ </style:style>
+ <style:style style:name="Standard" style:family="paragraph">
+  <style:paragraph-properties fo:margin-left="0cm"/>
+ </style:style>
+</office:document>"""
+
+
+def test_extract_autostyle_overrides_reads_only_the_direct_values():
+    """A flat-ODF automatic style lists exactly what was set on top of its parent."""
+    out = extract_autostyle_overrides_from_fodt(_FODT_OVERRIDES)
+    assert out["P2"] == "margin-left:3.25cm; text-indent:0cm; text-align:left"  # ODF 'start' -> CSS
+    assert out["P1"] == "font-family:Times New Roman; font-size:12pt"
+    assert "Standard" not in out  # named styles are not overrides
+
+
+def test_whole_paragraph_override_is_reported_from_the_fodt_map():
+    """The paragraph geometry AND its hand-set font reach the agent as read-only data-lo-para --
+    without it an indented block quote is indistinguishable from body text."""
+    out = xhtml_to_semantic_html(REFERENCE_XHTML, None, extract_autostyle_overrides_from_fodt(_FODT_OVERRIDES))
     line = next(ln for ln in out.splitlines() if "centered red whole paragraph" in ln)
-    assert "data-lo-style" not in line, line          # base style not recoverable -> omitted
-    assert "text-align" not in line and "center" not in line.replace("centered", ""), line
-    assert "ff0000" not in line.lower() and "color" not in line, line  # the override is dropped
+    assert 'data-lo-para="margin-left:3.25cm; text-indent:0cm; text-align:left"' in line, line
+    body = next(ln for ln in out.splitlines() if "normal " in ln and "BOLD" in ln)
+    assert 'data-lo-para="font-family:Times New Roman; font-size:12pt"' in body, body
+
+
+def test_no_para_override_reported_without_the_fodt_map():
+    """The XHTML rule for an autostyle is FLATTENED (base + override merged, and no rule is emitted
+    for the base at all), so with no sidecar nothing is reported rather than a guess."""
+    out = xhtml_to_semantic_html(REFERENCE_XHTML)
+    assert "data-lo-para" not in out, out
+
+
+# Issue-1-style FODT: P2 is center + red (matches REFERENCE_XHTML's "centered red" paragraph).
+_FODT_CENTER_RED = """<office:document>
+ <style:style style:name="P2" style:family="paragraph" style:parent-style-name="Standard">
+  <style:paragraph-properties fo:text-align="center"/>
+  <style:text-properties fo:color="#ff0000"/>
+ </style:style>
+</office:document>"""
+
+
+def test_fodt_fo_color_appears_in_data_lo_para():
+    """fo:color was missing from the override map, so paragraph-level red never appeared in
+    data-lo-para (char spans could still show colour). Map it so Issue-1 center+red is honest."""
+    overrides = extract_autostyle_overrides_from_fodt(_FODT_CENTER_RED)
+    assert overrides["P2"] == "text-align:center; color:#ff0000"
+    out = xhtml_to_semantic_html(REFERENCE_XHTML, None, overrides)
+    line = next(ln for ln in out.splitlines() if "centered red whole paragraph" in ln)
+    assert 'data-lo-para="text-align:center; color:#ff0000"' in line, line
+
+
+_FODT_QUOTED_FONT = """<office:document>
+ <style:style style:name="P1" style:family="paragraph" style:parent-style-name="Standard">
+  <style:text-properties style:font-name="Times &quot;Special&quot;"/>
+ </style:style>
+</office:document>"""
+
+
+def test_quoted_font_name_emits_well_formed_data_lo_para():
+    """ODF unescapes a font name containing \"; emit must html.escape(..., quote=True) or the
+    quoted attribute closes early and the tag is not well-formed."""
+    from html.parser import HTMLParser
+
+    overrides = extract_autostyle_overrides_from_fodt(_FODT_QUOTED_FONT)
+    assert overrides["P1"] == 'font-family:Times "Special"'
+    out = xhtml_to_semantic_html(REFERENCE_XHTML, None, overrides)
+    line = next(ln for ln in out.splitlines() if "normal " in ln and "BOLD" in ln)
+    assert "font-family:Times &quot;Special&quot;" in line, line
+
+    class _AttrCatcher(HTMLParser):
+        def __init__(self):
+            super().__init__()
+            self.para = None
+
+        def handle_starttag(self, tag, attrs):
+            if tag == "p" and self.para is None:
+                for key, value in attrs:
+                    if key == "data-lo-para":
+                        self.para = value
+
+    parser = _AttrCatcher()
+    parser.feed(line)
+    assert parser.para == 'font-family:Times "Special"', parser.para
 
 
 # --- Issue 2: token collision (two styles compacting to the same token) -------
@@ -243,3 +324,41 @@ def test_fodt_parent_recovers_name_when_fingerprint_fails():
 def test_fodt_parent_encoded_name_is_decoded_and_compacted():
     out = xhtml_to_semantic_html(_AUTOSTYLE_NO_NAMED_MATCH_XHTML, {"P1": "Text_20_body"})
     assert 'data-lo-style="Textbody"' in out, out  # decode _20_ -> space, then compact
+
+
+def test_xhtml_hot_sinks_off_cover_all() -> None:
+    """cover-all 35546602462: xhtml_style_postprocess ~18m; HTML/CSS sinks stay out of cover_fqns."""
+    from pathlib import Path
+
+    from tests.strip_bundle import skip_if_release_build
+
+    skip_if_release_build("scripts/ not in stripped release tree")
+    from scripts.crosshair_stream import cover_fqns_for_module
+
+    fqns = cover_fqns_for_module(Path("plugin/writer/xhtml_style_postprocess.py"))
+    assert not any(f.endswith(".decode_lo_css_class_suffix") for f in fqns), 'decode_lo_css_class_suffix'
+    assert not any(f.endswith(".compact_lo_style_name") for f in fqns), 'compact_lo_style_name'
+    assert not any(f.endswith(".extract_autostyle_parents_from_fodt") for f in fqns), 'extract_autostyle_parents_from_fodt'
+    assert not any(f.endswith("._clean_decl_ordered") for f in fqns), '_clean_decl_ordered'
+    assert not any(f.endswith("._normalize_decl") for f in fqns), '_normalize_decl'
+    assert not any(f.endswith("._fodt_override_css") for f in fqns), '_fodt_override_css'
+    assert not any(f.endswith(".extract_autostyle_overrides_from_fodt") for f in fqns), 'extract_autostyle_overrides_from_fodt'
+    assert not any(f.endswith(".parse_style_block") for f in fqns), 'parse_style_block'
+    assert not any(f.endswith("._strip_body") for f in fqns), '_strip_body'
+    assert not any(f.endswith("._drop_trailing_empty_paragraphs") for f in fqns), '_drop_trailing_empty_paragraphs'
+    assert not any(f.endswith("._inject_attr") for f in fqns), '_inject_attr'
+    assert not any(f.endswith("._attr_value") for f in fqns), '_attr_value'
+    assert not any(f.endswith("._SemanticTransformer.__init__") for f in fqns), '_SemanticTransformer.__init__'
+    assert not any(f.endswith("._SemanticTransformer._paragraph_token") for f in fqns), '_SemanticTransformer._paragraph_token'
+    assert not any(f.endswith("._SemanticTransformer._rewrite_block") for f in fqns), '_SemanticTransformer._rewrite_block'
+    assert not any(f.endswith("._SemanticTransformer._rewrite_span") for f in fqns), '_SemanticTransformer._rewrite_span'
+    assert not any(f.endswith("._SemanticTransformer.handle_starttag") for f in fqns), '_SemanticTransformer.handle_starttag'
+    assert not any(f.endswith("._SemanticTransformer.handle_startendtag") for f in fqns), '_SemanticTransformer.handle_startendtag'
+    assert not any(f.endswith("._SemanticTransformer.handle_endtag") for f in fqns), '_SemanticTransformer.handle_endtag'
+    assert not any(f.endswith("._SemanticTransformer.handle_data") for f in fqns), '_SemanticTransformer.handle_data'
+    assert not any(f.endswith("._SemanticTransformer.handle_entityref") for f in fqns), '_SemanticTransformer.handle_entityref'
+    assert not any(f.endswith("._SemanticTransformer.handle_charref") for f in fqns), '_SemanticTransformer.handle_charref'
+    assert not any(f.endswith("._SemanticTransformer.handle_comment") for f in fqns), '_SemanticTransformer.handle_comment'
+    assert not any(f.endswith("._SemanticTransformer.result") for f in fqns), '_SemanticTransformer.result'
+    assert not any(f.endswith("._strip_class_names") for f in fqns), '_strip_class_names'
+    assert not any(f.endswith(".xhtml_to_semantic_html") for f in fqns), 'xhtml_to_semantic_html'

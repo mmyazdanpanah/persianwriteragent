@@ -8,22 +8,27 @@ from io import BytesIO
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 import json
+import logging
 import os
 import queue
+import threading
 import pytest
 
 from plugin.contrib.lsp.json_rpc_framing import read_exactly
 from plugin.writer.locale.harper import (
+    HARPER_SLOW_RESULT_MS,
     HarperLSClient,
     HarperRuntimeState,
     _harper_lsp_settings,
     _pump_grammar_status_ui,
+    harper_runtime_is_ready,
     harper_try_lint,
     lsp_range_to_offset,
     maybe_start_harper_async,
     run_harper_check,
     run_harper_lint,
     shutdown_harper_runtime,
+    warn_if_harper_result_slow,
 )
 from plugin.writer.locale.harper_binary import (
     HarperReleaseAsset,
@@ -32,6 +37,7 @@ from plugin.writer.locale.harper_binary import (
 )
 import plugin.writer.locale.harper as harper_module
 import plugin.writer.locale.harper_binary as harper_binary_module
+from tests.strip_bundle import module_source_contains
 
 
 @pytest.fixture(autouse=True)
@@ -986,6 +992,20 @@ def test_run_harper_check_heartbeat_skips_empty_message() -> None:
     assert mock_pump.call_count == 1
 
 
+def test_run_harper_check_does_not_pass_ctx_to_lint() -> None:
+    """Grammar-queue lint stays on the drain thread; PE2I wait is doProofreading only."""
+    ctx = MagicMock()
+    with (
+        patch("plugin.writer.locale.grammar_obs.emit_harper_worker_status"),
+        patch("plugin.writer.locale.harper._pump_grammar_status_ui"),
+        patch("plugin.writer.locale.harper.run_harper_lint", return_value={"errors": []}) as mock_lint,
+        patch("plugin.framework.uno_context.wait_while_pumping") as mock_wait,
+    ):
+        run_harper_check(ctx, "Hi.", "/tmp/cfg")
+    assert "ctx" not in mock_lint.call_args.kwargs
+    mock_wait.assert_not_called()
+
+
 def test_normalize_spaces_1to1() -> None:
     from plugin.writer.locale.harper import normalize_spaces_1to1
 
@@ -1062,15 +1082,17 @@ def test_harper_try_lint_ready_returns_errors(mock_bg: MagicMock) -> None:
 
 
 @patch("plugin.framework.worker_pool.run_in_background")
-def test_harper_try_lint_dead_process_kicks_ensure(mock_bg: MagicMock) -> None:
+def test_harper_try_lint_dead_process_kicks_ensure(mock_bg: MagicMock, caplog: pytest.LogCaptureFixture) -> None:
     mock_client = MagicMock()
     mock_client.is_alive.return_value = False
     harper_module._HARPER_CLIENT_CACHE["/bin/harper-ls"] = mock_client
     harper_module._set_state(HarperRuntimeState.READY)
 
+    caplog.set_level(logging.ERROR, logger="writeragent.grammar")
     assert harper_try_lint("Hello.", "/tmp") is None
     assert mock_bg.call_count == 1
     assert harper_module._HARPER_STATE is HarperRuntimeState.RESOLVING
+    assert any("harper-ls process is dead" in r.message for r in caplog.records)
 
 
 @patch("plugin.framework.worker_pool.run_in_background")
@@ -1174,12 +1196,193 @@ def test_harper_ensure_ready_body_schedules_proofread_again() -> None:
     assert harper_module._HARPER_STATE is HarperRuntimeState.READY
 
 
+def test_harper_runtime_is_ready_requires_alive_client() -> None:
+    assert harper_runtime_is_ready() is False
+    harper_module._set_state(HarperRuntimeState.READY)
+    assert harper_runtime_is_ready() is False
+    mock_client = MagicMock()
+    mock_client.is_alive.return_value = True
+    harper_module._HARPER_CLIENT_CACHE["/bin/harper-ls"] = mock_client
+    assert harper_runtime_is_ready() is True
+    mock_client.is_alive.return_value = False
+    assert harper_runtime_is_ready() is False
+
+
+def test_ensure_ready_empty_listeners_recovers_on_first_attach() -> None:
+    """READY + PROOFREAD_AGAIN with no listeners must still re-walk once a listener hooks."""
+    from plugin.writer.locale.ai_grammar_proofreader import WriterAgentAiGrammarProofreader
+
+    ctx = MagicMock()
+    with (
+        patch("plugin.framework.logging.init_logging"),
+        patch("plugin.writer.locale.grammar_persistence.grammar_registry.register_live_proofreader"),
+    ):
+        pr = WriterAgentAiGrammarProofreader(ctx)
+    pr._provider = "harper"
+    from plugin.writer.locale.grammar_persistence import grammar_registry
+
+    grammar_registry.register_live_proofreader(pr)
+    mock_client = MagicMock()
+    mock_client.is_alive.return_value = True
+    listener = MagicMock()
+    try:
+        with (
+            patch("plugin.writer.locale.harper._get_harper_binary", return_value="/bin/harper-ls"),
+            patch("plugin.writer.locale.harper._get_or_create_client", return_value=mock_client),
+            patch("plugin.framework.queue_executor.post_to_main_thread", side_effect=lambda fn, *a, **k: fn(*a, **k)),
+            patch("plugin.writer.locale.grammar_obs.emit_harper_worker_status"),
+        ):
+            harper_module._harper_ensure_ready_body("/tmp", "en-US")
+            assert pr._pending_proofread_again is True
+            listener.processLinguServiceEvent.assert_not_called()
+            pr.addLinguServiceEventListener(listener)
+        listener.processLinguServiceEvent.assert_called_once()
+        assert listener.processLinguServiceEvent.call_args[0][0].nEvent == 8
+    finally:
+        grammar_registry.live_proofreaders.discard(pr)
+
+
 
 @patch("plugin.framework.worker_pool.run_in_background")
-def test_harper_try_lint_empty_config_dir_does_not_ensure(mock_bg: MagicMock) -> None:
+def test_harper_try_lint_empty_config_dir_does_not_ensure(mock_bg: MagicMock, caplog: pytest.LogCaptureFixture) -> None:
+    caplog.set_level(logging.ERROR, logger="writeragent.grammar")
     assert harper_try_lint("Hello.", "") is None
     mock_bg.assert_not_called()
     assert harper_module._HARPER_STATE is HarperRuntimeState.IDLE
+    assert any("empty user config dir" in r.message for r in caplog.records)
+
+
+@patch("plugin.framework.worker_pool.run_in_background")
+def test_harper_try_lint_logs_error_on_lint_exception(mock_bg: MagicMock, caplog: pytest.LogCaptureFixture) -> None:
+    mock_client = MagicMock()
+    mock_client.is_alive.return_value = True
+    mock_client.lint.side_effect = RuntimeError("broken pipe")
+    harper_module._HARPER_CLIENT_CACHE["/bin/harper-ls"] = mock_client
+    harper_module._set_state(HarperRuntimeState.READY)
+
+    caplog.set_level(logging.ERROR, logger="writeragent.grammar")
+    assert harper_try_lint("He go to the store.", "/tmp") is None
+    assert any("lint failed on ready client" in r.message for r in caplog.records)
+    assert mock_bg.call_count == 1
+
+
+def _ready_harper_client(lint_side_effect: object) -> MagicMock:
+    mock_client = MagicMock()
+    mock_client.is_alive.return_value = True
+    mock_client.lint.side_effect = lint_side_effect
+    harper_module._HARPER_CLIENT_CACHE["/bin/harper-ls"] = mock_client
+    harper_module._set_state(HarperRuntimeState.READY)
+    return mock_client
+
+
+def test_harper_try_lint_pumps_events_while_lint_outstanding() -> None:
+    """Linguistic wait loop must PE2I while a slow lint is still on the worker."""
+    lint_started = threading.Event()
+    release_lint = threading.Event()
+
+    def _slow_lint(*_a: object, **_k: object) -> list:
+        lint_started.set()
+        release_lint.wait(timeout=2.0)
+        return []
+
+    _ready_harper_client(_slow_lint)
+    pumps: list[bool] = []
+
+    def _pe2i(_ctx: object, rounds: int = 1, force: bool = False) -> bool:
+        pumps.append(force)
+        if lint_started.is_set():
+            release_lint.set()
+        return True
+
+    ctx = MagicMock()
+    with patch("plugin.framework.uno_context.process_events_to_idle", side_effect=_pe2i):
+        res = harper_try_lint("Hello.", "/tmp", ctx=ctx)
+
+    assert res == {"errors": []}
+    assert pumps
+    assert all(force is False for force in pumps)
+
+
+def test_harper_try_lint_linguistic_thread_posts_pe2i() -> None:
+    """doProofreading is Dummy-*; in-loop PE2I there is a UNO thread violation."""
+    lint_started = threading.Event()
+    release_lint = threading.Event()
+
+    def _slow_lint(*_a: object, **_k: object) -> list:
+        lint_started.set()
+        release_lint.wait(timeout=2.0)
+        return []
+
+    _ready_harper_client(_slow_lint)
+    pe2i_threads: list[str] = []
+    posts = {"n": 0}
+    box: dict[str, object] = {}
+
+    def _pe2i(_ctx: object, rounds: int = 1, force: bool = False) -> bool:
+        del rounds, force
+        pe2i_threads.append(threading.current_thread().name)
+        return True
+
+    def _post(fn: object, *args: object, **kwargs: object) -> None:
+        del fn, args, kwargs
+        posts["n"] += 1
+        if lint_started.is_set():
+            release_lint.set()
+
+    def _run() -> None:
+        with (
+            patch("plugin.framework.uno_context.process_events_to_idle", side_effect=_pe2i),
+            patch("plugin.framework.queue_executor.post_to_main_thread", side_effect=_post),
+        ):
+            box["res"] = harper_try_lint("Hello.", "/tmp", ctx=MagicMock())
+
+    worker = threading.Thread(target=_run, name="Dummy-21")
+    worker.start()
+    worker.join(timeout=3.0)
+    assert box.get("res") == {"errors": []}
+    assert posts["n"] >= 1
+    assert pe2i_threads == []
+
+
+def test_harper_try_lint_reenter_during_wait_logs_and_returns_none(caplog: pytest.LogCaptureFixture) -> None:
+    """Nested try_lint while a wait is active fail-softs and logs harper_wait_reenter once."""
+    lint_started = threading.Event()
+    release_lint = threading.Event()
+    nested: dict[str, object] = {}
+
+    def _slow_lint(*_a: object, **_k: object) -> list:
+        lint_started.set()
+        release_lint.wait(timeout=2.0)
+        return []
+
+    def _pe2i(_ctx: object, rounds: int = 1, force: bool = False) -> bool:
+        # One nest per wait (not every later PE2I tick) — matches field logging.
+        if "res" not in nested:
+            nested["res"] = harper_try_lint("Other sentence.", "/tmp", ctx=_ctx)
+        if lint_started.is_set():
+            release_lint.set()
+        return True
+
+    _ready_harper_client(_slow_lint)
+    caplog.set_level(logging.DEBUG, logger="writeragent.grammar")
+    ctx = MagicMock()
+    with patch("plugin.framework.uno_context.process_events_to_idle", side_effect=_pe2i):
+        res = harper_try_lint("Hello.", "/tmp", ctx=ctx)
+
+    assert res == {"errors": []}
+    assert nested.get("res") is None
+    warn_recs = [r for r in caplog.records if r.levelno == logging.WARNING and "harper_wait_reenter" in r.message]
+    assert len(warn_recs) == 1
+    assert "wait_age_ms=" in warn_recs[0].message
+    assert "provider=" in warn_recs[0].message
+    # Bugfix: in stripped release bundles, scripts/strip_code.py strips out grammar_obs(...)
+    # call sites from plugin code, so the grammar_obs debug record is not emitted.
+    # We only assert on the debug record when running against unstripped source.
+    if module_source_contains(harper_module, "grammar_obs("):
+        assert any(
+            r.levelno == logging.DEBUG and "harper_wait_reenter" in r.message
+            for r in caplog.records
+        )
 
 
 def test_harper_close_does_not_block_on_stuck_stdin() -> None:
@@ -1212,3 +1415,50 @@ def test_shutdown_harper_runtime_closes_cached_clients() -> None:
     mock_client.close.assert_called_once()
     assert harper_module._HARPER_CLIENT_CACHE == {}
     assert harper_module._HARPER_STATE is HarperRuntimeState.IDLE
+
+
+def test_warn_if_harper_result_slow_silent_at_and_below_threshold(caplog: pytest.LogCaptureFixture) -> None:
+    caplog.set_level(logging.WARNING, logger="writeragent.grammar")
+    assert HARPER_SLOW_RESULT_MS == 500
+    assert warn_if_harper_result_slow(500, text_len=40, error_count=2) is False
+    assert warn_if_harper_result_slow(0, text_len=40, error_count=0) is False
+    assert not any("slow result" in r.message for r in caplog.records)
+
+
+def test_warn_if_harper_result_slow_warns_above_threshold(caplog: pytest.LogCaptureFixture) -> None:
+    caplog.set_level(logging.WARNING, logger="writeragent.grammar")
+    assert warn_if_harper_result_slow(501, text_len=87, error_count=3, cache="miss") is True
+    records = [r for r in caplog.records if "slow result" in r.message]
+    assert len(records) == 1
+    assert records[0].levelno == logging.WARNING
+    assert "elapsed_ms=501" in records[0].message
+    assert "text_len=87" in records[0].message
+    assert "errors=3" in records[0].message
+    assert "cache=miss" in records[0].message
+
+
+def test_lint_with_client_warns_when_lint_exceeds_threshold(caplog: pytest.LogCaptureFixture) -> None:
+    mock_client = MagicMock()
+    mock_client.lint.return_value = []
+    caplog.set_level(logging.WARNING, logger="writeragent.grammar")
+    times = iter((10.0, 10.75))
+    with patch("plugin.writer.locale.harper.time.monotonic", side_effect=lambda: next(times)):
+        out = harper_module._lint_with_client(mock_client, "Hello world.", "en-US")
+    assert out == {"errors": []}
+    records = [r for r in caplog.records if "slow result" in r.message]
+    assert len(records) == 1
+    assert records[0].levelno == logging.WARNING
+    assert "elapsed_ms=750" in records[0].message
+    assert "text_len=12" in records[0].message
+    assert "errors=0" in records[0].message
+    assert "cache=miss" in records[0].message
+
+
+def test_lint_with_client_silent_when_lint_is_fast(caplog: pytest.LogCaptureFixture) -> None:
+    mock_client = MagicMock()
+    mock_client.lint.return_value = []
+    caplog.set_level(logging.WARNING, logger="writeragent.grammar")
+    times = iter((10.0, 10.1))
+    with patch("plugin.writer.locale.harper.time.monotonic", side_effect=lambda: next(times)):
+        harper_module._lint_with_client(mock_client, "Hello world.", "en-US")
+    assert not any("slow result" in r.message for r in caplog.records)

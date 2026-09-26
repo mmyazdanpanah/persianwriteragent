@@ -25,7 +25,6 @@ from plugin.chatbot.sidebar_state import SidebarCompositeState
 from plugin.chatbot.sidebar_test_hooks import (
     approval_active,
     audio_status,
-    handle_debug_sidebar_command,
     chat_dialog_controls,
     control_enabled,
     debug_hooks_available,
@@ -60,6 +59,14 @@ from plugin.chatbot.sidebar_test_hooks import (
     transcript_text,
     wait_controls_send_finished,
     wait_idle,
+    adopt_chat_sidebar,
+    close_component,
+    component_is_calc,
+    find_calc_component,
+    handle_debug_sidebar_command,
+    inflate_sidebar_history,
+    open_calc_document,
+    send_listener_for_uid,
 )
 from tests.chatbot.mock_llm_harness import mock_config
 
@@ -434,6 +441,186 @@ def test_stub_recorder_child_hang_ready(fake_listener: _FakeListener) -> None:
         clear_stub_recorder_control()
 
 
+def test_handle_debug_sidebar_inflate_history(fake_listener: _FakeListener, monkeypatch) -> None:
+    from plugin.chatbot.sidebar_test_hooks import debug_sidebar_snapshot_path
+
+    class _Session:
+        def __init__(self) -> None:
+            self.messages = [{"role": "system", "content": "sys"}]
+            self.compaction = None
+
+    fake_listener.session = _Session()
+    fake_listener._last_compact_reason = None
+    monkeypatch.setattr("plugin.chatbot.sidebar_test_hooks.adopt_runtime_send_listeners", lambda: 0)
+    monkeypatch.setattr("plugin.chatbot.sidebar_test_hooks._listener_for_current_doc", lambda: fake_listener)
+    monkeypatch.setattr("plugin.chatbot.sidebar_test_hooks.send_listener", lambda frame=None: fake_listener)
+    handle_debug_sidebar_command("chatbot.debug_sidebar.INFLATE_HISTORY")
+    path = debug_sidebar_snapshot_path()
+    assert os.path.isfile(path)
+    with open(path, encoding="utf-8") as handle:
+        data = json.load(handle)
+    os.remove(path)
+    assert data["session_n_messages"] >= 5
+    assert data["has_compaction"] is False
+    assert sum(data["session_content_chars"]) >= 20000
+
+
+def test_inflate_sidebar_history_in_process(fake_listener: _FakeListener, monkeypatch) -> None:
+    from plugin.chatbot.compaction import estimate_tokens
+
+    class _Session:
+        def __init__(self) -> None:
+            self.messages = [{"role": "system", "content": "sys"}]
+            self.compaction = None
+
+    fake_listener.session = _Session()
+    monkeypatch.setattr("plugin.chatbot.sidebar_test_hooks.send_listener", lambda frame=None: fake_listener)
+    snap = inflate_sidebar_history()
+    assert snap["session_n_messages"] >= 5
+    assert int(snap.get("inflate_pairs") or 0) >= 1
+    # Mock catalog window is 32768; proactive compact fires at 75%.
+    assert estimate_tokens(fake_listener.session.messages) >= int(32768 * 0.75)
+    assert fake_listener.session.messages[0]["role"] == "system"
+    assert fake_listener.session.messages[-1]["role"] == "assistant"
+
+
+def test_sidebar_panel_prefers_current_doc_not_weakset_first(monkeypatch) -> None:
+    """Packet K: leftover Calc must not win inflate / send_listener()."""
+    from plugin.chatbot import sidebar_test_hooks as hooks
+
+    class _Session:
+        def __init__(self, name: str) -> None:
+            self.messages = [{"role": "system", "content": name}]
+            self.compaction = None
+
+    writer_frame = object()
+    calc_frame = object()
+    writer_sl = SimpleNamespace(session=_Session("writer"), slash_popup=None, name="writer")
+    calc_sl = SimpleNamespace(session=_Session("calc"), slash_popup="stolen", name="calc")
+    writer = SimpleNamespace(xFrame=writer_frame, Frame=writer_frame, send_listener=writer_sl)
+    calc = SimpleNamespace(xFrame=calc_frame, Frame=calc_frame, send_listener=calc_sl)
+    monkeypatch.setattr(hooks, "iter_live_chat_panels", lambda: [calc, writer])
+    monkeypatch.setattr(hooks, "_current_frame", lambda: writer_frame)
+    assert hooks.sidebar_panel() is writer
+    assert hooks.sidebar_panel(writer_frame) is writer
+    assert hooks.sidebar_panel(calc_frame) is calc
+    assert hooks.send_listener() is writer_sl
+    assert hooks.send_listener() is not calc_sl
+
+
+def test_inflate_history_pads_current_doc_not_leftover_calc(
+    fake_listener: _FakeListener, monkeypatch
+) -> None:
+    """INFLATE_HISTORY must grow the current Writer session, not WeakSet[0]."""
+    from plugin.chatbot import sidebar_test_hooks as hooks
+    from plugin.chatbot.sidebar_test_hooks import debug_sidebar_snapshot_path
+
+    class _Session:
+        def __init__(self, name: str) -> None:
+            self.messages = [{"role": "system", "content": name}]
+            self.compaction = None
+
+    writer_frame = object()
+    calc_frame = object()
+    writer_session = _Session("writer")
+    calc_session = _Session("calc")
+    writer_sl = fake_listener
+    writer_sl.session = writer_session
+    writer_sl.model_selector = None
+    writer_sl._last_compact_reason = None
+    calc_sl = _FakeListener()
+    calc_sl.session = calc_session
+    calc_sl.slash_popup = "leftover"
+    calc_sl.model_selector = None
+    writer = SimpleNamespace(xFrame=writer_frame, Frame=writer_frame, send_listener=writer_sl)
+    calc = SimpleNamespace(xFrame=calc_frame, Frame=calc_frame, send_listener=calc_sl)
+    monkeypatch.setattr(hooks, "adopt_runtime_send_listeners", lambda: 0)
+    monkeypatch.setattr(hooks, "iter_live_chat_panels", lambda: [calc, writer])
+    monkeypatch.setattr(hooks, "_current_frame", lambda: writer_frame)
+    monkeypatch.setattr(hooks, "_HOOK_CTX", object())
+    monkeypatch.setattr(hooks, "current_component", lambda ctx: SimpleNamespace(_frame=writer_frame))
+    monkeypatch.setattr(
+        hooks,
+        "send_listener_for_doc",
+        lambda doc: writer_sl if getattr(doc, "_frame", None) is writer_frame else calc_sl,
+    )
+    handle_debug_sidebar_command("chatbot.debug_sidebar.INFLATE_HISTORY")
+    path = debug_sidebar_snapshot_path()
+    assert os.path.isfile(path)
+    os.remove(path)
+    assert sum(len(str(m.get("content") or "")) for m in writer_session.messages) >= 20000
+    assert calc_session.messages == [{"role": "system", "content": "calc"}]
+
+
+def test_parse_debug_sidebar_command_strips_uid() -> None:
+    from plugin.chatbot.sidebar_test_hooks import (
+        _debug_sidebar_query,
+        _parse_debug_sidebar_command,
+    )
+
+    parse_op = _parse_debug_sidebar_command
+    assert parse_op("chatbot.debug_sidebar.INFLATE_HISTORY") == ("INFLATE_HISTORY", "")
+    assert parse_op("chatbot.debug_sidebar?INFLATE_HISTORY&uid=34") == ("INFLATE_HISTORY", "34")
+    assert parse_op("chatbot.debug_sidebar.SNAPSHOT&uid=writer-uid") == ("SNAPSHOT", "writer-uid")
+    assert parse_op("chatbot.debug_sidebar.OPEN_CALC") == ("OPEN_CALC", "")
+    assert _debug_sidebar_query("INFLATE_HISTORY", "34") == "INFLATE_HISTORY&uid=34"
+    assert _debug_sidebar_query("SNAPSHOT", "") == "SNAPSHOT"
+
+
+def test_inflate_history_uid_pads_writer_when_soffice_current_is_calc(
+    fake_listener: _FakeListener, monkeypatch
+) -> None:
+    """URP ``&uid=`` must win over leftover Calc as soffice current component.
+
+    #802 bound INFLATE to getCurrentComponent(); CI K1 still saw hello
+    n_messages=2 because soffice current stayed on leftover Calc after P/E12
+    while URP Send clicked Writer.
+    """
+    from plugin.chatbot import sidebar_test_hooks as hooks
+    from plugin.chatbot.sidebar_test_hooks import debug_sidebar_snapshot_path
+    from plugin.doc.live_panels import register_live_panel, reset_live_panels
+
+    class _Session:
+        def __init__(self, name: str) -> None:
+            self.messages = [{"role": "system", "content": name}]
+            self.compaction = None
+
+    class _Panel:
+        # live_panels is a WeakValueDictionary — SimpleNamespace is not weakref-able.
+        def __init__(self, sl) -> None:
+            self.send_listener = sl
+
+    writer_session = _Session("writer")
+    calc_session = _Session("calc")
+    writer_sl = fake_listener
+    writer_sl.session = writer_session
+    writer_sl.model_selector = None
+    writer_sl._last_compact_reason = None
+    calc_sl = _FakeListener()
+    calc_sl.session = calc_session
+    calc_sl.slash_popup = "leftover"
+    calc_sl.model_selector = None
+    writer = _Panel(writer_sl)
+    reset_live_panels()
+    register_live_panel("writer-uid", writer)
+    monkeypatch.setattr(hooks, "adopt_runtime_send_listeners", lambda: 0)
+    # Soffice current is leftover Calc — the #802 path would pad this session.
+    monkeypatch.setattr(hooks, "_listener_for_current_doc", lambda: calc_sl)
+    monkeypatch.setattr(hooks, "send_listener", lambda frame=None: calc_sl)
+    monkeypatch.setattr(hooks, "_listener_with_slash_popup", lambda sl: sl)
+    try:
+        handle_debug_sidebar_command("chatbot.debug_sidebar.INFLATE_HISTORY&uid=writer-uid")
+        path = debug_sidebar_snapshot_path()
+        assert os.path.isfile(path)
+        os.remove(path)
+        assert sum(len(str(m.get("content") or "")) for m in writer_session.messages) >= 20000
+        assert calc_session.messages == [{"role": "system", "content": "calc"}]
+        assert send_listener_for_uid("writer-uid") is writer_sl
+        assert send_listener_for_uid("missing") is None
+    finally:
+        reset_live_panels()
+
+
 def test_clear_sidebar_chat_resets_session_and_widget(fake_listener: _FakeListener) -> None:
     """Packet G must wipe leftover E/F transcript before canned-string asserts."""
     cleared: list[str] = []
@@ -772,3 +959,187 @@ def test_wait_controls_send_finished_wait_for_ignores_prior_turns(monkeypatch) -
         before=prior,
     )
     assert ok is False
+
+
+def test_component_is_calc_uses_supports_service() -> None:
+    calc = SimpleNamespace(
+        supportsService=lambda name: name == "com.sun.star.sheet.SpreadsheetDocument"
+    )
+    writer = SimpleNamespace(supportsService=lambda name: False)
+    assert component_is_calc(calc) is True
+    assert component_is_calc(writer) is False
+    assert component_is_calc(None) is False
+
+
+def test_find_calc_component_scans_desktop(monkeypatch) -> None:
+    calc = SimpleNamespace(
+        supportsService=lambda name: name == "com.sun.star.sheet.SpreadsheetDocument"
+    )
+    writer = SimpleNamespace(supportsService=lambda name: False)
+    monkeypatch.setattr(
+        "plugin.chatbot.sidebar_test_hooks.iter_desktop_components",
+        lambda _ctx: [writer, calc],
+    )
+    assert find_calc_component(object()) is calc
+
+
+def test_open_calc_document_reuses_existing(monkeypatch) -> None:
+    calc = SimpleNamespace(
+        supportsService=lambda name: name == "com.sun.star.sheet.SpreadsheetDocument"
+    )
+    dispatched: list[str] = []
+    monkeypatch.setattr(
+        "plugin.chatbot.sidebar_test_hooks.find_calc_component", lambda _ctx: calc
+    )
+    monkeypatch.setattr(
+        "plugin.chatbot.sidebar_test_hooks.execute_debug_sidebar_op",
+        lambda op, ctx=None: dispatched.append(op),
+    )
+    assert open_calc_document(object()) is calc
+    assert dispatched == []
+
+
+def test_open_calc_document_posts_open_calc_and_polls(monkeypatch) -> None:
+    calc = SimpleNamespace(
+        supportsService=lambda name: name == "com.sun.star.sheet.SpreadsheetDocument"
+    )
+    calls = {"n": 0, "ops": []}
+
+    def fake_find(_ctx):
+        calls["n"] += 1
+        return calc if calls["n"] >= 2 else None
+
+    monkeypatch.setattr("plugin.chatbot.sidebar_test_hooks.find_calc_component", fake_find)
+    monkeypatch.setattr(
+        "plugin.chatbot.sidebar_test_hooks.execute_debug_sidebar_op",
+        lambda op, ctx=None: calls["ops"].append(op),
+    )
+    monkeypatch.setattr("plugin.chatbot.sidebar_test_hooks.time.sleep", lambda _s: None)
+    assert open_calc_document(object(), timeout=5.0) is calc
+    assert calls["ops"] == ["OPEN_CALC"]
+
+
+def test_open_calc_document_times_out(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "plugin.chatbot.sidebar_test_hooks.find_calc_component", lambda _ctx: None
+    )
+    monkeypatch.setattr(
+        "plugin.chatbot.sidebar_test_hooks.execute_debug_sidebar_op",
+        lambda op, ctx=None: {},
+    )
+    monkeypatch.setattr("plugin.chatbot.sidebar_test_hooks.time.sleep", lambda _s: None)
+    times = iter([0.0, 0.0, 10.0])
+    monkeypatch.setattr(
+        "plugin.chatbot.sidebar_test_hooks.time.monotonic",
+        lambda: next(times),
+    )
+    with pytest.raises(RuntimeError, match="OPEN_CALC"):
+        open_calc_document(object(), timeout=1.0)
+
+
+def test_handle_debug_sidebar_open_calc_posts_to_queue(fake_listener, monkeypatch) -> None:
+    posted: list = []
+    fake_listener.queue_executor = SimpleNamespace(post=lambda fn, *a, **k: posted.append(fn))
+    loaded: list[bool] = []
+    monkeypatch.setattr("plugin.chatbot.sidebar_test_hooks.adopt_runtime_send_listeners", lambda: 0)
+    monkeypatch.setattr(
+        "plugin.chatbot.sidebar_test_hooks.send_listener", lambda frame=None: fake_listener
+    )
+    monkeypatch.setattr(
+        "plugin.chatbot.sidebar_test_hooks._load_visible_calc_factory",
+        lambda: loaded.append(True),
+    )
+    monkeypatch.setattr(
+        "plugin.chatbot.sidebar_test_hooks._write_debug_snapshot", lambda sl: {}
+    )
+    handle_debug_sidebar_command("chatbot.debug_sidebar.OPEN_CALC")
+    assert posted
+    posted[0]()
+    assert loaded == [True]
+
+
+def test_handle_debug_sidebar_open_calc_accepts_query_form(fake_listener, monkeypatch) -> None:
+    """LO often delivers Path as ``chatbot.debug_sidebar?OPEN_CALC`` (Query empty)."""
+    posted: list = []
+    fake_listener.queue_executor = SimpleNamespace(post=lambda fn, *a, **k: posted.append(fn))
+    loaded: list[bool] = []
+    monkeypatch.setattr("plugin.chatbot.sidebar_test_hooks.adopt_runtime_send_listeners", lambda: 0)
+    monkeypatch.setattr(
+        "plugin.chatbot.sidebar_test_hooks.send_listener", lambda frame=None: fake_listener
+    )
+    monkeypatch.setattr(
+        "plugin.chatbot.sidebar_test_hooks._load_visible_calc_factory",
+        lambda: loaded.append(True),
+    )
+    monkeypatch.setattr(
+        "plugin.chatbot.sidebar_test_hooks._write_debug_snapshot", lambda sl: {}
+    )
+    handle_debug_sidebar_command("chatbot.debug_sidebar?OPEN_CALC")
+    assert posted
+    posted[0]()
+    assert loaded == [True]
+
+
+def test_post_to_soffice_vcl_inits_async_callback(monkeypatch) -> None:
+    inited: list[bool] = []
+    posted: list = []
+    qe = SimpleNamespace(
+        _get_async_callback=lambda: inited.append(True),
+        post=lambda fn, *a, **k: posted.append(fn),
+    )
+    sl = SimpleNamespace(queue_executor=qe)
+    from plugin.chatbot.sidebar_test_hooks import _post_to_soffice_vcl
+
+    _post_to_soffice_vcl(lambda: None, sl=sl)
+    assert inited == [True]
+    assert posted
+
+
+def test_adopt_chat_sidebar_shows_deck_on_doc(monkeypatch) -> None:
+    doc = SimpleNamespace(
+        getCurrentController=lambda: SimpleNamespace(getFrame=lambda: "calc-frame")
+    )
+    shown: list = []
+    monkeypatch.setattr(
+        "plugin.chatbot.sidebar_test_hooks.wait_for_chat_dialog_controls",
+        lambda ctx, timeout=20.0, doc=None: shown.append(doc) or {"query": 1, "send": 1},
+    )
+    monkeypatch.setattr("plugin.chatbot.sidebar_test_hooks.adopt_runtime_send_listeners", lambda: 0)
+    monkeypatch.setattr(
+        "plugin.chatbot.sidebar_test_hooks.send_listener",
+        lambda frame=None: "sl-%s" % frame,
+    )
+    controls, sl = adopt_chat_sidebar(object(), doc)
+    assert shown == [doc]
+    assert controls == {"query": 1, "send": 1}
+    assert sl == "sl-calc-frame"
+
+
+def test_load_visible_calc_factory_uses_blank_target(monkeypatch) -> None:
+    """Dual-peer needs Writer to stay open — factory load must use ``_blank``."""
+    calls: list[tuple] = []
+
+    class _Desktop:
+        def loadComponentFromURL(self, url, target, _flags, _props):
+            calls.append((url, target))
+            return "calc"
+
+    monkeypatch.setattr(
+        "plugin.framework.uno_context.get_ctx", lambda: object()
+    )
+    monkeypatch.setattr(
+        "plugin.framework.uno_context.get_desktop", lambda _ctx: _Desktop()
+    )
+    from plugin.chatbot.sidebar_test_hooks import _load_visible_calc_factory
+
+    _load_visible_calc_factory()
+    assert calls == [("private:factory/scalc", "_blank")]
+
+
+def test_close_component_swallows_errors() -> None:
+    class _Boom:
+        def close(self, _unused: bool) -> None:
+            raise RuntimeError("disposed")
+
+    close_component(None)
+    close_component(_Boom())

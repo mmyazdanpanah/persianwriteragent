@@ -5,7 +5,7 @@
 """Persian Hazm normalization with exact-range change extraction — v0.2.
 
 Experimental module that extracts mechanically safe Persian normalizations:
-1. ZWNJ word joins (v0.1) - space -> ZWNJ between word parts
+1. ZWNJ edits - insertions and removals of zero-width non-joiners
 2. Arabic character normalization - ي -> ی, ك -> ک
 3. Whitespace normalization - multiple spaces/tabs -> single space (preserve newlines)
 4. Tatweel/Kashida removal - مـــوزه -> موزه
@@ -21,6 +21,7 @@ already-authorized modules (hazm, stdlib).
 from __future__ import annotations
 
 import re
+from difflib import SequenceMatcher
 
 try:
     from hazm import Normalizer
@@ -383,71 +384,99 @@ def find_ellipsis_changes(original: str, normalized: str) -> list[tuple[str, str
     return changes
 
 
-def extract_hazm_changes(text: str) -> dict[str, list[list[str]]]:
-    """Main entry point: extract safe Persian normalization changes from text.
+def find_hazm_zwnj_changes(
+    original: str, normalized: str
+) -> list[tuple[str, str]]:
+    """Extract exact word-level replacements caused by Hazm ZWNJ edits.
 
-    v0.2: Implements mechanically safe normalizations:
-    1. ZWNJ word joins (v0.1)
-    2. Arabic character normalization (ي -> ی, ك -> ک)
-    3. Whitespace normalization (multiple spaces/tabs -> single space)
-    4. Tatweel/Kashida removal
-    4. Ellipsis normalization (... -> …)
+    Hazm may insert or remove a zero-width non-joiner (ZWNJ). Character-level
+    replacements are unsafe for the current tracked-replacement contract,
+    because each [old, new] pair is applied to every matching occurrence.
+    We therefore expand each ZWNJ-related diff to its surrounding Persian
+    word span before returning it.
 
-    All with protection for URLs, emails, version numbers, code.
-
-    Args:
-        text: Input Persian text (typically the Writer selection)
-
-    Returns:
-        Dict with "changes" key containing list of [old_text, new_text] pairs
+    Handles both directions:
+    - ``می کردند`` -> ``می‌کردند`` (ZWNJ insertion)
+    - ``جنگ‌ جهانی`` -> ``جنگ جهانی`` (ZWNJ removal)
     """
+    changes: list[tuple[str, str]] = []
+    word_char = re.compile(r"[^\W\d_]|" + re.escape(ZWNJ), re.UNICODE)
+
+    def expand(text: str, start: int, end: int) -> tuple[int, int]:
+        """Expand a changed range to the surrounding Persian word span."""
+        while start > 0 and word_char.fullmatch(text[start - 1]):
+            start -= 1
+        while end < len(text) and word_char.fullmatch(text[end]):
+            end += 1
+        return start, end
+
+    matcher = SequenceMatcher(None, original, normalized, autojunk=False)
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag == "equal":
+            continue
+        old_fragment = original[i1:i2]
+        new_fragment = normalized[j1:j2]
+        if ZWNJ not in old_fragment and ZWNJ not in new_fragment:
+            continue
+
+        old_start, old_end = expand(original, i1, i2)
+        new_start, new_end = expand(normalized, j1, j2)
+        old_text = original[old_start:old_end]
+        new_text = normalized[new_start:new_end]
+        if old_text and new_text and old_text != new_text:
+            changes.append((old_text, new_text))
+
+    unique: list[tuple[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for change in changes:
+        if change not in seen:
+            seen.add(change)
+            unique.append(change)
+    return unique
+
+def extract_hazm_changes(text: str) -> dict[str, list[list[str]]]:
+    """Extract exact replacements from full Hazm normalization plus mechanical cleanup."""
     if not text or not text.strip():
         return {"changes": []}
 
-    # Step 1: Protect sensitive regions
     protector = ProtectedText(text)
     protected_text = protector.protect()
 
-    # Step 2: Apply Hazm for ZWNJ joins only
+    # Hazm is the full Persian linguistic normalization engine.
     hazm_normalized = normalize_with_hazm(protected_text)
 
-    # Step 3: Apply safe normalizations on the protected text
-    safe_normalized = apply_safe_normalizations(hazm_normalized)
+    # Mechanical normalization is deliberately separate and deterministic.
+    mechanical_normalized = apply_safe_normalizations(hazm_normalized)
 
-    # Step 4: Restore protected regions
-    final_normalized = protector.restore(safe_normalized)
+    final_normalized = protector.restore(mechanical_normalized)
 
     if final_normalized == text:
         return {"changes": []}
 
-    # Step 5: Extract changes by comparing original with normalized
-    all_changes = []
+    all_changes: list[tuple[str, str]] = []
 
-    # 1. ZWNJ joins (use Hazm's result for this)
-    all_changes.extend(find_joined_word_changes(text, final_normalized))
+    # Hazm linguistic changes: extract ZWNJ insertions and removals.
+    all_changes.extend(
+        find_hazm_zwnj_changes(protected_text, hazm_normalized)
+    )
 
-    # 2. Arabic character changes
+    # Mechanical changes use the existing exact extractors.
     all_changes.extend(find_arabic_char_changes(text, final_normalized))
-
-    # 3. Whitespace changes
     all_changes.extend(find_whitespace_changes(text, final_normalized))
-
-    # 4. Tatweel changes
     all_changes.extend(find_tatweel_changes(text, final_normalized))
-
-    # 5. Ellipsis changes
     all_changes.extend(find_ellipsis_changes(text, final_normalized))
 
-    # Deduplicate while preserving order
-    seen = set()
-    unique_changes = []
+    # Deduplicate while preserving order.
+    seen: set[tuple[str, str]] = set()
+    unique_changes: list[list[str]] = []
+
     for old, new in all_changes:
         key = (old, new)
-        if key not in seen:
+        if old and new and old != new and key not in seen:
             seen.add(key)
-            unique_changes.append((old, new))
+            unique_changes.append([old, new])
 
-    return {"changes": [[old, new] for old, new in unique_changes]}
+    return {"changes": unique_changes}
 
 
 # For direct execution as a Python Script

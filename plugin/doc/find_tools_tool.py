@@ -71,8 +71,9 @@ def get_domain_guidance(domain: str, *, agent_label: str | None = "Writer", ctx:
         return ("When creating or editing a chart in Writer or Draw/Impress, you MUST "
                 "specify both the `headers` and `rows` parameters.")
     if domain == "images":
-        return ("Discover local image files with image_list_nearby_files before image_insert "
-                "when the user refers to a photo in the folder.")
+        from plugin.framework.prompts import images_specialized_sub_agent_hint
+
+        return images_specialized_sub_agent_hint().strip()
     if domain == "python":
         if agent_label is None:
             return ("run_venv_python_script: in Calc, pass `data_range` (an A1 address) to inject "
@@ -164,7 +165,11 @@ class FindTools(ToolBase):
 
         doc = getattr(ctx, "doc", None)
         agent_label = _agent_label_for_doc_type(getattr(ctx, "doc_type", None)) if doc is not None else None
-        catalog = get_specialized_domain_catalog(agent_label=agent_label, ctx=getattr(ctx, "ctx", None))
+        # for_discovery: this catalog is what a direct_discovery client uses to find tools, so it
+        # must cover everything the flat tool list exposes. Exclusions that only shape a chat
+        # prompt would otherwise make a listed, callable tool impossible to discover.
+        catalog = get_specialized_domain_catalog(agent_label=agent_label, ctx=getattr(ctx, "ctx", None),
+                                                 for_discovery=True)
 
         if not domain:
             out: dict[str, Any] = {

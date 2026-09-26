@@ -105,5 +105,35 @@ class TestTreeServiceSearch(unittest.TestCase):
         res = self.tree_svc._find_heading_by_text(self.doc, "   ")
         self.assertIsNone(res)
 
+    def test_invalidate_by_key_does_not_call_doc_key(self):
+        self.tree_svc._tree_cache["uid:1"] = {"text": "stale"}
+        self.doc_svc.doc_key.side_effect = RuntimeError("must not touch the model")
+        self.tree_svc._on_cache_invalidated(key="uid:1")
+        self.assertNotIn("uid:1", self.tree_svc._tree_cache)
+
+    def test_invalidate_doc_none_clears_all(self):
+        self.tree_svc._tree_cache["uid:1"] = {"text": "a"}
+        self.tree_svc._tree_cache["uid:2"] = {"text": "b"}
+        self.tree_svc._on_cache_invalidated(doc=None)
+        self.assertEqual(self.tree_svc._tree_cache, {})
+
+    def test_unknown_key_is_not_stored(self):
+        from plugin.doc.document_helpers import UNKNOWN_DOC_KEY
+
+        self.doc_svc.doc_key.return_value = UNKNOWN_DOC_KEY
+        root = self.tree_svc.build_heading_tree(self.doc)
+        self.assertEqual(root["children"][0]["text"], "Introduction")
+        self.assertEqual(self.tree_svc._tree_cache, {})
+
+    def test_fingerprint_change_rebuilds_without_invalidate_event(self):
+        """GHA 35466498641: Windows modify listener can miss insertString."""
+        self.doc.CharacterCount = 10
+        first = self.tree_svc.build_heading_tree(self.doc)
+        cached = self.tree_svc.build_heading_tree(self.doc)
+        self.assertIs(cached, first)
+        self.doc.CharacterCount = 16
+        second = self.tree_svc.build_heading_tree(self.doc)
+        self.assertIsNot(second, first)
+
 if __name__ == "__main__":
     unittest.main()

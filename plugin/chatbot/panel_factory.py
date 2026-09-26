@@ -161,6 +161,23 @@ def _get_arg(args, name):
     return None
 
 
+def _run_on_main_thread(fn, *args, **kwargs):
+    """Run *fn* on the VCL thread.
+
+    URP dispatch of WriterAgentDeck calls ``ChatPanelElement.getRealInterface``
+    off the VCL thread (Dummy-N). ``get_extension_url`` (PackageInformationProvider)
+    is ``@main_thread_only``; without this hop, thread_guard aborts ChatPanel
+    create. QA used to set ``WRITERAGENT_UNO_THREAD_GUARD=0``; this marshal is
+    the product fix so the panel opens with the guard on.
+    """
+    from plugin.framework.queue_executor import execute_on_main_thread
+    from plugin.framework.thread_guard import on_main_thread
+
+    if on_main_thread():
+        return fn(*args, **kwargs)
+    return execute_on_main_thread(fn, *args, **kwargs)
+
+
 _paths_initialized = False
 
 
@@ -170,27 +187,36 @@ def _initialize_extension_paths(ctx):
     if _paths_initialized:
         return
 
-    try:
-        ext_path = get_extension_path(ctx)
-        if ext_path and ext_path not in sys.path:
-            sys.path.insert(0, ext_path)
-
-        contrib_dir = os.path.join(ext_path, "contrib")
-        if contrib_dir not in sys.path:
-            sys.path.insert(0, contrib_dir)
-
-        init_logging(ctx)
-        log.info("Initialized extension paths for session: %s" % ext_path)
+    def _impl():
+        global _paths_initialized
+        if _paths_initialized:
+            return
         try:
-            from plugin.writer.locale.ai_grammar_proofreader import ensure_writeragent_proofreader_configured
+            ext_path = get_extension_path(ctx)
+            if ext_path and ext_path not in sys.path:
+                sys.path.insert(0, ext_path)
 
-            ensure_writeragent_proofreader_configured(ctx)
-        except Exception as e:
-            log.warning("[grammar] sidebar init: could not load or run grammar proofreader bootstrap: %s", e, exc_info=True)
-        _paths_initialized = True
-    except Exception:
-        init_logging(ctx)
-        log.exception("_initialize_extension_paths failed")
+            contrib_dir = os.path.join(ext_path, "contrib")
+            if contrib_dir not in sys.path:
+                sys.path.insert(0, contrib_dir)
+
+            init_logging(ctx)
+            log.info("Initialized extension paths for session: %s" % ext_path)
+            try:
+                from plugin.writer.locale.ai_grammar_proofreader import ensure_writeragent_proofreader_configured
+
+                ensure_writeragent_proofreader_configured(ctx)
+            except Exception as e:
+                log.warning("[grammar] sidebar init: could not load or run grammar proofreader bootstrap: %s", e, exc_info=True)
+            _paths_initialized = True
+        except Exception:
+            init_logging(ctx)
+            log.exception("_initialize_extension_paths failed")
+
+    # Hop the body, not this function: WRITERAGENT_TESTING=1 inlines
+    # execute_on_main_thread on Dummy-N, and a self-call would recurse.
+    # get_extension_path → get_extension_url (PIP) is @main_thread_only.
+    _run_on_main_thread(_impl)
 
 
 # ---------------------------------------------------------------------------
@@ -322,13 +348,18 @@ class ChatPanelElement(unohelper.Base, XUIElement):
         log.debug("[RICH-LIFECYCLE] ChatPanelElement.getRealInterface called (toolpanel already exists=%s)", bool(self.toolpanel))
         if not self.toolpanel:
             try:
-                # Ensure extension on path early so _wireControls imports work
-                _initialize_extension_paths(self.ctx)
-                root_window = self._getOrCreatePanelRootWindow()
-                log.info("[RICH-LIFECYCLE] root_window created: %s", bool(root_window))
-                self.toolpanel = ChatToolPanel(root_window, self.xParentWindow, self.ctx)
-                wire_chatpanel_controls(self, root_window, HAS_RECORDING, _initialize_extension_paths)
-                log.info("[RICH-LIFECYCLE] getRealInterface completed successfully (rich_text wiring done)")
+                # Dummy-N URP getRealInterface: hop path init + window/wiring
+                # (get_extension_url and later @main_thread_only getters) to VCL.
+                def _create_panel():
+                    # Ensure extension on path early so _wireControls imports work
+                    _initialize_extension_paths(self.ctx)
+                    root_window = self._getOrCreatePanelRootWindow()
+                    log.info("[RICH-LIFECYCLE] root_window created: %s", bool(root_window))
+                    self.toolpanel = ChatToolPanel(root_window, self.xParentWindow, self.ctx)
+                    wire_chatpanel_controls(self, root_window, HAS_RECORDING, _initialize_extension_paths)
+                    log.info("[RICH-LIFECYCLE] getRealInterface completed successfully (rich_text wiring done)")
+
+                _run_on_main_thread(_create_panel)
             except Exception as e:
                 log.exception("getRealInterface failed [resource_url=%s]", self.ResourceURL)
                 raise UnoObjectError("Failed to create ChatPanel UI element", details={"resource": self.ResourceURL}) from e
@@ -404,6 +435,15 @@ class ChatPanelElement(unohelper.Base, XUIElement):
                  id(Source) if Source else None,
                  hasattr(self, "send_listener") and bool(self.send_listener))
         unregister_debug_live_panel(self)
+        try:
+            from plugin.doc.live_panels import unregister_live_panel
+            from plugin.framework.uno_context import get_document_from_frame, get_runtime_uid
+
+            model = get_document_from_frame(self.xFrame) if getattr(self, "xFrame", None) else None
+            if model is not None:
+                unregister_live_panel(get_runtime_uid(model))
+        except Exception as e:
+            log.debug("live panel unregister on dispose: %s", e)
         try:
             if hasattr(self, "send_listener") and self.send_listener:
                 self.send_listener.disposing(None)
@@ -684,7 +724,9 @@ class ChatPanelElement(unohelper.Base, XUIElement):
         from plugin.chatbot.chat_sidebar_mode import CHAT_MODE_LIBRARIAN, is_image_mode, librarian_default_mode, mark_librarian_invoked, populate_mode_selector_with_flags, set_selector_mode_with_flags
 
         if aspect_ratio_selector:
-            aspect_ratio_selector.addItems(("Square", "Landscape (16:9)", "Portrait (9:16)", "Landscape (3:2)", "Portrait (2:3)"), 0)
+            from plugin.chatbot.settings_dialog import IMAGE_ASPECT_RATIO_LABELS
+
+            aspect_ratio_selector.addItems(IMAGE_ASPECT_RATIO_LABELS, 0)
             aspect_ratio_selector.setText(get_config("image_default_aspect") or "Square")
 
         if base_size_input:
@@ -964,6 +1006,10 @@ class ChatPanelElement(unohelper.Base, XUIElement):
             # Save it to the instance so panel_wiring can use it for QueryTextListener
             self.send_listener = send_listener
             register_debug_live_panel(self)
+            from plugin.doc.live_panels import register_live_panel
+            from plugin.framework.uno_context import get_runtime_uid
+
+            register_live_panel(get_runtime_uid(model), self)
 
 
 

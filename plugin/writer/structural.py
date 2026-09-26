@@ -18,10 +18,71 @@
 
 (Index refresh, field refresh, and bookmark list/cleanup live in specialized domains.)"""
 
+from plugin.doc.text_helpers import clone_text_range
 from plugin.framework.prompts import PARAGRAPH_INDEX_DIRECTIVE
 from plugin.framework.tool import ToolBase, ToolBaseDummy
 
 from .specialized_base import ToolWriterStructuralBase
+
+
+def _at_page_anchor_page(obj):
+    """Physical page if *obj* is AT_PAGE with AnchorPageNo; else None.
+
+    AnchorPageNo is only valid for AT_PAGE (text.Shape / TextFrame /
+    TextGraphicObject). AT_PARAGRAPH objects report 0 — that is not a page
+    index. Tables have no page property. Any other range is view-cursor
+    getPage() only (no UNO page-of-range API).
+    """
+    try:
+        from com.sun.star.text.TextContentAnchorType import AT_PAGE
+
+        if obj.getPropertyValue("AnchorType") != AT_PAGE:
+            return None
+        return obj.getPropertyValue("AnchorPageNo")
+    except Exception:
+        return None
+
+
+def _with_left_body_locked(doc, vc, scan_fn):
+    """Leave nested XText, lock for the scan, unlock before restore.
+
+    Why leave first: lockControllers while the view cursor sits in a table
+    cell makes gotoRange/getPage fail silently (Cneg: tables=[]). jumpToPage
+    is a no-op on the same page (the cell). Unlocked hop to
+    doc.getText().getStart() first.
+
+    Why lock after leave: headed visarea — never-lock C hits Y=37017 on
+    page-2 hops; leave+lock A does not. Flicker needs lock during the
+    multi-object scan.
+
+    Why unlock before restore: gotoRange into a nested cell fails while
+    locked. Save/restore uses clone_text_range (vc.getText()), not body
+    XText. If the leave hop fails, scan unlocked — empty page is valid.
+    """
+    saved = None
+    try:
+        # Nested XText (table cell / frame): body getText() cannot clone this range.
+        saved = clone_text_range(vc)
+    except Exception:
+        pass
+    in_body = False
+    try:
+        vc.gotoRange(doc.getText().getStart(), False)
+        in_body = True
+    except Exception:
+        pass
+    if in_body:
+        doc.lockControllers()
+    try:
+        return scan_fn()
+    finally:
+        if in_body:
+            doc.unlockControllers()
+        if saved is not None:
+            try:
+                vc.gotoRange(saved, False)
+            except Exception:
+                pass
 
 
 class SectionList(ToolWriterStructuralBase):
@@ -98,20 +159,41 @@ class GetPageObjects(ToolBase):
 
         controller = doc.getCurrentController()
         vc = controller.getViewCursor()
-        saved = None
-        try:
-            saved = doc.getText().createTextCursorByRange(vc.getStart())
-        except Exception:
-            pass
-
-        doc.lockControllers()
-        try:
-            objects = self._scan_page(ctx, doc, vc, page)
-        finally:
-            if saved is not None:
-                vc.gotoRange(saved, False)
-            doc.unlockControllers()
+        objects = _with_left_body_locked(doc, vc, lambda: self._scan_page(ctx, doc, vc, page))
         return {"status": "ok", "page": page, **objects}
+
+    def _page_at_range(self, doc, vc, rng, retry_if_zero=False):
+        """View-cursor page of *rng*. Pages are 1-based.
+
+        After leave-then-lock, getPage() is fine at body text. A locked
+        gotoRange to a table/frame (and some graphic) getAnchor() leaves
+        getPage() at 0 — stale layout, not an empty page (the cursor does
+        not enter the table; TextTable stays empty). Unlock, hop again,
+        relock when retry_if_zero is True.
+
+        Ordinary paragraph/body ranges: getPage()==0 means not on a page;
+        skip without unlock churn.
+        """
+        vc.gotoRange(rng, False)
+        page_no = vc.getPage()
+        if page_no != 0 or not retry_if_zero:
+            return page_no
+        has_locked = getattr(doc, "hasControllersLocked", None)
+        if has_locked is None or not has_locked():
+            return page_no
+        doc.unlockControllers()
+        try:
+            vc.gotoRange(rng, False)
+            return vc.getPage()
+        finally:
+            doc.lockControllers()
+
+    def _content_page(self, doc, vc, obj, retry_if_zero):
+        """Page of a graphic/frame/table: AT_PAGE via AnchorPageNo, else view hop."""
+        page_no = _at_page_anchor_page(obj)
+        if page_no is not None:
+            return page_no
+        return self._page_at_range(doc, vc, obj.getAnchor(), retry_if_zero=retry_if_zero)
 
     def _scan_page(self, ctx, doc, vc, page):
         images = []
@@ -119,8 +201,7 @@ class GetPageObjects(ToolBase):
             for name in doc.getGraphicObjects().getElementNames():
                 try:
                     g = doc.getGraphicObjects().getByName(name)
-                    vc.gotoRange(g.getAnchor(), False)
-                    if vc.getPage() == page:
+                    if self._content_page(doc, vc, g, retry_if_zero=True) == page:
                         size = g.getPropertyValue("Size")
                         images.append({"name": name, "width_mm": size.Width // 100, "height_mm": size.Height // 100, "title": g.getPropertyValue("Title")})
                 except Exception:
@@ -131,8 +212,7 @@ class GetPageObjects(ToolBase):
             for name in doc.getTextTables().getElementNames():
                 try:
                     t = doc.getTextTables().getByName(name)
-                    vc.gotoRange(t.getAnchor(), False)
-                    if vc.getPage() == page:
+                    if self._content_page(doc, vc, t, retry_if_zero=True) == page:
                         tables.append({"name": name, "rows": t.getRows().getCount(), "cols": t.getColumns().getCount()})
                 except Exception:
                     pass
@@ -142,61 +222,47 @@ class GetPageObjects(ToolBase):
             for fname in doc.getTextFrames().getElementNames():
                 try:
                     fr = doc.getTextFrames().getByName(fname)
-                    vc.gotoRange(fr.getAnchor(), False)
-                    if vc.getPage() == page:
+                    if self._content_page(doc, vc, fr, retry_if_zero=True) == page:
                         size = fr.getPropertyValue("Size")
                         frames.append({"name": fname, "width_mm": size.Width // 100, "height_mm": size.Height // 100})
                 except Exception:
                     pass
 
+        # Do not jumpToEndOfPage + body createTextCursorByRange: end-of-page often sits in a
+        # table/frame, and the body XText then raises RuntimeException ("End of content node
+        # doesn't have the proper start node"). Same view-cursor page check as tables/images.
+        # AT_PAGE shapes use AnchorPageNo — never _page_at_range (no view hop).
         shapes = []
         if hasattr(doc, "getDrawPage"):
             draw_page = doc.getDrawPage()
-            from com.sun.star.text.TextContentAnchorType import AT_PAGE, AT_PARAGRAPH, AT_CHARACTER, AS_CHARACTER
+            from com.sun.star.text.TextContentAnchorType import AT_PARAGRAPH, AT_CHARACTER, AS_CHARACTER
 
-            doc_svc = ctx.services.document
-            para_ranges = doc_svc.get_paragraph_ranges(doc)
-            text_obj = doc.getText()
-
-            # Find starting and ending paragraphs for the physical page
-            if vc.jumpToPage(page):
-                vc.jumpToStartOfPage()
-                page_start = text_obj.createTextCursorByRange(vc.getStart())
-                vc.jumpToEndOfPage()
-                page_end = text_obj.createTextCursorByRange(vc.getEnd())
-
-                start_idx = doc_svc.find_paragraph_for_range(page_start.getStart(), para_ranges, text_obj)
-                end_idx = doc_svc.find_paragraph_for_range(page_end.getEnd(), para_ranges, text_obj)
-
-                for i in range(draw_page.getCount()):
-                    shape = draw_page.getByIndex(i)
-                    include_shape = False
-                    anchor = shape.getAnchor()
-
-                    try:
+            for i in range(draw_page.getCount()):
+                shape = draw_page.getByIndex(i)
+                include_shape = False
+                try:
+                    page_no = _at_page_anchor_page(shape)
+                    if page_no is not None:
+                        include_shape = page_no == page
+                    else:
                         anchor_type = shape.getPropertyValue("AnchorType")
+                        if anchor_type in (AT_PARAGRAPH, AT_CHARACTER, AS_CHARACTER):
+                            anchor = shape.getAnchor()
+                            if anchor and self._page_at_range(doc, vc, anchor, retry_if_zero=False) == page:
+                                include_shape = True
+                except Exception:
+                    pass
 
-                        if anchor_type == AT_PAGE:
-                            shape_page_no = shape.getPropertyValue("AnchorPageNo")
-                            if shape_page_no == page:
-                                include_shape = True
-                        elif anchor_type in (AT_PARAGRAPH, AT_CHARACTER, AS_CHARACTER) and anchor:
-                            shape_para_idx = doc_svc.find_paragraph_for_range(anchor.getStart(), para_ranges, text_obj)
-                            if start_idx <= shape_para_idx <= end_idx:
-                                include_shape = True
+                if include_shape:
+                    shape_type = shape.getShapeType().replace("com.sun.star.drawing.", "")
+                    shape_info = {"type": shape_type, "name": getattr(shape, "Name", ""), "text": shape.getString().strip() if hasattr(shape, "getString") else ""}
+                    try:
+                        pos = shape.getPosition()
+                        size = shape.getSize()
+                        shape_info["geometry"] = {"x": pos.X, "y": pos.Y, "width": size.Width, "height": size.Height}
                     except Exception:
                         pass
-
-                    if include_shape:
-                        shape_type = shape.getShapeType().replace("com.sun.star.drawing.", "")
-                        shape_info = {"type": shape_type, "name": getattr(shape, "Name", ""), "text": shape.getString().strip() if hasattr(shape, "getString") else ""}
-                        try:
-                            pos = shape.getPosition()
-                            size = shape.getSize()
-                            shape_info["geometry"] = {"x": pos.X, "y": pos.Y, "width": size.Width, "height": size.Height}
-                        except Exception:
-                            pass
-                        shapes.append(shape_info)
+                    shapes.append(shape_info)
 
         return {"images": images, "tables": tables, "frames": frames, "shapes": shapes}
 

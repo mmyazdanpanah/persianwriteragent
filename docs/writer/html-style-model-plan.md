@@ -230,13 +230,47 @@ StarWriter HTML import does not understand `data-lo-style`. Write path:
 
 ---
 
+## Direct formatting on read
+
+An autostyle's XHTML rule is flattened — base style and override merged, with no rule emitted for
+the base at all — so the XHTML alone cannot say which values were hand-set. The flat-ODF sidecar
+already exported for the `Pn -> parent` map holds the automatic style's **own** properties, which
+are exactly the direct overrides. `extract_autostyle_overrides_from_fodt()` reads them from that
+same export (no extra `storeToURL`) and `_rewrite_block` emits them as `data-lo-para`, e.g.
+`<p data-lo-style="Standard" data-lo-para="margin-left:3.25cm; font-size:12pt">`.
+
+Geometry (margins, indent, alignment, line height), the paragraph-level font, and paragraph
+colour (`fo:color` → `color`) are reported: a `.docx` reused as a model carries its font as a
+whole-paragraph override, which is what makes an applied style look like it did nothing.
+Run colour also appears on spans as inline `style`. Nothing is reported when the sidecar is
+unavailable, rather than guessing from the flattened CSS.
+
+The range read reports it too. `_range_to_content_via_temp_doc` used to copy plain text plus the
+paragraph style name, so every override — `data-lo-para` and character runs alike — was already
+gone before the export. It now carries the source paragraph's direct `Para*` and paints each text
+portion's direct `Char*` onto the copy, skipping anything the paragraph style already provides so
+an inherited value is not reported as hand-set. A range slice that crosses a bold run therefore
+reads back with the bold in place.
+
+`data-lo-para` is **read-only**: the write path still cannot restore `Para*` when applying a named
+style, which is why it is not emitted as `style=""` — that would round-trip back and be swallowed.
+To make a style win over hand-set values, `apply_style` takes `clear_direct`
+(`none` | `style_props` | `all`). **Default is `style_props`**: house font name + size win
+(via `STYLE_GOVERNED_CHAR_PROPERTIES` + `_reset_properties_to_default`), bold/italic/colour stay,
+and `CLEARABLE_PARA_PROPERTIES` (indents/alignment) are cleared so the style shows. `none` is an
+explicit opt-in that keeps a hand-set font (historical “masking Times” behaviour). `all` is
+Ctrl+M-ish and is refused on `target='full_document'` (that would flatten emphasis across the
+whole document). With `clear_direct='none'` the result still echoes `preserved_char_overrides`.
+**Re-applying a style does not keep a quote indent** — LibreOffice drops direct `Para*`
+(margins/alignment) when `ParaStyleName` is set, even on `none`.
+
 ## v1 limitations (shipped)
 
 These are intentional trade-offs in v1. Tests document the behavior ([`test_xhtml_style_postprocess.py`](../../tests/writer/test_xhtml_style_postprocess.py), [`test_content_style_model_uno.py`](../../tests/writer/test_content_style_model_uno.py)).
 
 | Limitation | v1 behavior | Workaround for agents/users | Post-v1 direction |
 |------------|-------------|----------------------------|-------------------|
-| **Whole-paragraph direct overrides** (center, para colour, margins baked into autostyle CSS) | Read omits token and drops override CSS; FODT recovers the **base style name** only | Prefer named styles; use inline `style` on **spans** for char exceptions | UNO index + optional Para* snapshot; or dedicated `get_paragraph_metadata` for debugging |
+| **Whole-paragraph direct overrides** (margins, indent, alignment, line-height, paragraph-level font, para colour) | Do not round-trip on **write**. **Read** reports them as read-only `data-lo-para` from the FODT automatic style, including `color:` when `fo:color` is set (see [Direct formatting on read](#direct-formatting-on-read)). Run colour also appears on spans. | DO: read `data-lo-para` to tell an indented or coloured quote from body text. `apply_style` defaults to `clear_direct='style_props'` so house font/size and style indents show (bold/italic stay). Pass `clear_direct='none'` only to keep a hand-set font. Re-applying a style does **not** keep a quote indent — LO drops direct `Para*` | Make `data-lo-para` writable |
 | **Table cell paragraph styles** | `paragraph-*` stripped inside `<table>`; no `data-lo-style` on cell blocks | `apply_style` on cell text; don't rely on agent HTML for table styling | Table-aware style index or cell-level tokens |
 | **Partial edits** (`end` / `search` / `selection` / `beginning`) | Content inserted; `data-lo-style` **not** applied (would restyle merged adjacent text) | `target='full_document'` for styled rewrites; `apply_style` to restyle existing text | Apply only to genuinely new paragraphs after import |
 | **Dual export cost** | Every full read (and range read via temp doc) runs XHTML + FODT `storeToURL` | `scope=range`, `get_document_tree`, `search_in_document` before full reads | Cached UNO paragraph-style index; drop FODT on `scope=full` |

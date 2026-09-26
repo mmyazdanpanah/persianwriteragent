@@ -35,8 +35,13 @@ document model safe from any thread — wrap document access with
 
 import logging
 import os
+import sys
+import time
 from contextlib import contextmanager
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
+
+if TYPE_CHECKING:
+    import threading
 
 from plugin.framework.constants import (
     EXTENSION_ID_LIBREHARPER,
@@ -59,6 +64,73 @@ _KNOWN_EXTENSION_IDS = (
 )
 
 _is_libreharper_cache: bool | None = None
+
+# uno.bin / unopkg register helpers have no VCL. Creating Desktop there SEGVs
+# (issue #768). pythonloader often rewrites sys.argv, so also read /proc.
+_UNO_HELPER_BASENAMES = frozenset({
+    "uno",
+    "uno.bin",
+    "uno.exe",
+    "unopkg",
+    "unopkg.bin",
+    "unopkg.com",
+    "unopkg.exe",
+})
+
+
+def _basename_is_uno_helper(name: str) -> bool:
+    return os.path.basename(name).strip().lower() in _UNO_HELPER_BASENAMES
+
+
+def _tokens_have_singleaccept(tokens: list[str]) -> bool:
+    return any(token == "--singleaccept" or token.startswith("--singleaccept=") for token in tokens)
+
+
+def _linux_process_tokens() -> list[str]:
+    """Real process image and args. pythonloader may rewrite ``sys.argv`` (#768)."""
+    tokens: list[str] = []
+    try:
+        tokens.append(os.readlink("/proc/self/exe"))
+    except OSError:
+        pass
+    try:
+        with open("/proc/self/comm", encoding="utf-8") as comm_file:
+            comm = comm_file.read().strip()
+        if comm:
+            tokens.append(comm)
+    except OSError:
+        pass
+    try:
+        with open("/proc/self/cmdline", "rb") as cmdline_file:
+            raw = cmdline_file.read().split(b"\0")
+        tokens.extend(part.decode("utf-8", "replace") for part in raw if part)
+    except OSError:
+        pass
+    return tokens
+
+
+def desktop_create_is_unsafe() -> bool:
+    """True in uno.bin / unopkg helpers that have no VCL.
+
+    ``createInstanceWithContext("com.sun.star.frame.Desktop")`` and
+    ``getValueByName(theDesktop)`` on that ctx take SolarMutexGuard →
+    GetYieldMutex and SEGV (issue #768). GUI soffice already has Desktop.
+
+    Do not trust ``sys.argv`` alone: pythonloader inside
+    ``uno.bin --singleaccept`` often leaves argv as ``['']`` or a .py path.
+    """
+    argv = [str(arg) for arg in sys.argv]
+    if argv and _basename_is_uno_helper(argv[0]):
+        return True
+    if _tokens_have_singleaccept(argv):
+        return True
+    exe = getattr(sys, "executable", "") or ""
+    if exe and _basename_is_uno_helper(exe):
+        return True
+    proc_tokens = _linux_process_tokens()
+    if any(_basename_is_uno_helper(token) for token in proc_tokens):
+        return True
+    return _tokens_have_singleaccept(proc_tokens)
 
 
 def is_libreharper() -> bool:
@@ -181,8 +253,16 @@ def get_service_manager(ctx: Any) -> Any | None:
 
 
 @main_thread_only
-def get_desktop(ctx=None):
-    """Return the UNO Desktop instance."""
+def get_desktop(ctx=None) -> Any:
+    """Return the UNO Desktop instance, or None when creating it would SEGV.
+
+    uno.bin / unopkg register helpers have no VCL. ``createInstance(Desktop)``
+    takes SolarMutexGuard → GetYieldMutex and crashes (issue #768). GUI
+    soffice keeps the existing create path.
+    """
+    if desktop_create_is_unsafe():
+        log.debug("get_desktop skipped: no-VCL helper process (issue #768)")
+        return None
     ctx = ctx or get_ctx()
     assert ctx is not None
     ctx_any = cast("Any", ctx)
@@ -197,6 +277,8 @@ def get_active_document(ctx=None):
     """Return the currently active document model."""
     try:
         desktop = get_desktop(ctx)
+        if desktop is None:
+            return None
         check_disposed(desktop, "Desktop")
         doc = safe_call(desktop.getCurrentComponent, "Desktop component resolution")
         return _wrap_uno(doc)
@@ -351,11 +433,12 @@ def restore_query_if_user_still_there() -> None:
 
 def _current_document_controller(ctx):
     try:
-        smgr = getattr(ctx, "ServiceManager", None)
-        if smgr is None:
+        # Same no-VCL fail-soft as get_desktop (issue #768). Do not create
+        # Desktop via ServiceManager here — that bypassed the choke point.
+        desktop = get_desktop(ctx)
+        if desktop is None:
             return None
-        desktop = smgr.createInstanceWithContext("com.sun.star.frame.Desktop", ctx)
-        comp = desktop.getCurrentComponent() if desktop is not None else None
+        comp = desktop.getCurrentComponent()
         if comp is None:
             return None
         return comp.getCurrentController()
@@ -535,7 +618,8 @@ def process_events_to_idle(ctx, rounds: int = 1, force: bool = False) -> bool:
     notebook import) cannot nest ``processEventsToIdle`` inside the drain loop.
     Pass force=True (e.g. for RichTextControl caret reveal) to pump VCL even when
     under a drain owner.
-    Returns True if at least one VCL pump ran.
+    Returns True if at least one VCL pump ran. Blocking secondary waits should
+    use :func:`wait_while_pumping` rather than a local PE2I loop.
     """
     from plugin.framework.queue_executor import _note_suppressed_vcl_pump, _pump_vcl_events, get_drain_owner
 
@@ -556,6 +640,65 @@ def process_events_to_idle(ctx, rounds: int = 1, force: bool = False) -> bool:
         except Exception:
             log.debug("process_events_to_idle failed", exc_info=True)
     return pumped
+
+
+def _post_secondary_idle(ctx: Any) -> None:
+    """Enqueue one PE2I tick on the VCL thread. Must not run PE2I on the waiter."""
+    from plugin.framework.queue_executor import post_to_main_thread
+
+    def _pump() -> None:
+        # QueueExecutor.post can fall back onto the caller when AsyncCallback
+        # is missing. process_events_to_idle is @main_thread_only — skip.
+        if not on_main_thread():
+            return
+        process_events_to_idle(ctx, force=False)
+
+    post_to_main_thread(_pump)
+
+
+def wait_while_pumping(
+    done: "threading.Event",
+    ctx: Any,
+    *,
+    timeout: float,
+    poll_sec: float = 0.075,
+) -> bool:
+    """Wait for *done* while pumping VCL as a secondary caller.
+
+    On the LibreOffice main thread, each tick calls :func:`process_events_to_idle`
+    with ``force=False`` so a chat/MCP drain owner suppresses nested VCL.
+    Off the main thread (Writer ``doProofreading`` linguistic workers are
+    ``Dummy-*``, not VCL) PE2I is **posted** to the main thread — never called
+    on the waiter. Calling PE2I on Dummy-21 popped a UNO thread-violation
+    dialog every poll tick (the wait loop from #778). Drain-owner wait loops
+    must keep using :func:`~plugin.framework.queue_executor.pump_ui_idle` /
+    ``run_blocking_in_thread``, not this helper.
+
+    Default *poll_sec* is 75ms (stay inside 50–100ms; same band as the
+    linguistic PE2I-in-proofread wait). Returns True if *done* was set, False
+    if *timeout* elapsed first. Post/PE2I failures are swallowed so a pump
+    miss cannot abort the wait.
+    """
+    pump_on_caller = on_main_thread()
+    deadline = time.monotonic() + max(0.0, timeout)
+    while not done.is_set():
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        try:
+            if pump_on_caller:
+                process_events_to_idle(ctx, force=False)
+            else:
+                _post_secondary_idle(ctx)
+        except Exception:
+            log.debug("wait_while_pumping process_events_to_idle failed", exc_info=True)
+        if done.is_set():
+            return True
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        done.wait(timeout=min(poll_sec, remaining))
+    return True
 
 
 def normalize_doc_url(url):
@@ -600,6 +743,59 @@ def get_runtime_uid(model):
         except Exception:
             continue
     return ""
+
+
+def uno_same(a: Any, b: Any) -> bool:
+    """True when *a* and *b* are the same underlying UNO object.
+
+    PyUNO often hands out **distinct Python wrappers** for one UNO identity.
+    Bare ``is`` / ``==`` / ``!=`` can then miss that a draw shape's
+    ``shape.getAnchor().getText()`` is the same header ``XText`` as
+    ``style.getPropertyValue("HeaderText")``. That false miss hid logos from
+    ``_scan_region_content`` (get/metadata wrong; historically a wipe could
+    look "safe").
+
+    This is **not** a requirement of the debug viral UNO thread proxy
+    (``_UnoThreadGuardProxy`` in ``thread_guard.py``). That proxy is a
+    separate GUARD_ON tool; release OXTs stub it off. The flaky identity is a
+    LibreOffice / PyUNO wrapper issue and exists with the proxy stripped.
+
+    It still works when proxying is on: ``_UnoThreadGuardProxy.__eq__``
+    unwraps ``_target`` and compares ``self._target == _unwrap_uno(other)``
+    (see ``thread_guard.py``), so step 2 (``==``) succeeds for
+    proxy↔unwrapped. ``uno.isSame`` is a UNO/C++ identity test and must see
+    real PyUNO objects, so step 3 unwraps via ``_unwrap_uno`` first.
+
+    Ladder (a false miss is still wrong for get/metadata, and was the
+    disaster when wipe used this scan as a refuse gate):
+
+    1. ``a is b``
+    2. try ``a == b`` (covers viral-proxy ``__eq__`` unwrap when GUARD_ON)
+    3. try ``uno.isSame`` on unwrapped objects when the function exists
+       (not all LibreOffice Python-UNO builds ship it; same fallback as
+       ``_page_index_for`` historically)
+    4. else False
+    """
+    if a is b:
+        return True
+    try:
+        if a == b:
+            return True
+    except Exception:
+        pass
+    try:
+        import uno
+
+        is_same = getattr(uno, "isSame", None)
+        if not callable(is_same):
+            return False
+        from plugin.framework.thread_guard import _unwrap_uno
+
+        # ``is True``: mocked ``uno.isSame`` (unit tests) returns a MagicMock,
+        # which is truthy. Real PyUNO returns a bool.
+        return is_same(_unwrap_uno(a), _unwrap_uno(b)) is True
+    except Exception:
+        return False
 
 
 @main_thread_only

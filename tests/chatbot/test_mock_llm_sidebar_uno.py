@@ -2,7 +2,7 @@
 # Copyright (c) 2026 KeithCu
 #
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""Native Packet F (HTTP/SSE), B (Stop/Send FSM), C (empty/truncated), D (reasoning), E (tools/HITL), and G (mocked audio) on a live chat sidebar.
+"""Native Packet F (HTTP/SSE), B (Stop/Send FSM), C (empty/truncated), D (reasoning), E (tools/HITL), G (mocked audio), and K (compaction) on a live chat sidebar.
 
 Run via ``make test-mock-sidebar`` (visible soffice, LibreOffice user profile).
 Subset: ``make test-mock-sidebar FILTER=C`` (packet), ``FILTER=c1`` (case), or a ``test_*`` name.
@@ -98,6 +98,11 @@ def _setup_mock(ctx):
             "(View → Sidebar must be on). decks=%s" % (names,)
         )
     ensure_sidebar_chat_mode(controls)
+    if controls and "model_selector" in controls:
+        from plugin.chatbot.dialogs import set_control_text
+        from scripts.mock_llm_server import MOCK_MODEL_ID
+
+        set_control_text(controls["model_selector"], MOCK_MODEL_ID)
     _session.controls = controls
     _session.listener = sl
     _set_writer_body(ctx, WELCOME_BODY)
@@ -521,6 +526,7 @@ def _reset_mock_runtime() -> None:
 
     _session.config.transcript = DEFAULT_TRANSCRIPT
     _session.config.scenario = "none"
+    _session.config.overflow_once_seen = 0
     from scripts.mock_llm_server import clear_captures
 
     clear_captures(_session.config)
@@ -1607,13 +1613,88 @@ def test_e11_filler_then_comment_two_sends(ctx):
     _hello_ok()
 
 
+def _adopt_calc_sidebar(ctx, calc):
+    """Bind the Calc WriterAgent deck after :func:`open_calc_document`."""
+    from plugin.chatbot.sidebar_test_hooks import (
+        adopt_chat_sidebar,
+        ensure_sidebar_chat_mode,
+    )
+
+    controls, sl = adopt_chat_sidebar(ctx, calc)
+    if sl is None and controls is None:
+        raise AssertionError("Calc WriterAgent chat sidebar not wired after OPEN_CALC")
+    ensure_sidebar_chat_mode(controls, doc_type="calc")
+    assert _session is not None
+    _session.controls = controls
+    _session.listener = sl
+
+
+def _restore_writer_after_calc(ctx, writer, calc, saved_controls, saved_listener) -> None:
+    """Close the E12/G17 Calc window and point the shared session back at Writer.
+
+    Closing Calc leaves ``desktop.getCurrentComponent()`` None even while Writer
+    remains open (box UNO proof). Re-activate Writer like peer ``_focus_doc`` so
+    e13+ ``_set_writer_body`` / Packet G ``execute_debug_sidebar_op`` still see a
+    current document and frame.
+    """
+    from plugin.chatbot.sidebar_test_hooks import (
+        adopt_runtime_send_listeners,
+        close_component,
+        current_component,
+        desktop_from_ctx,
+        wait_for_chat_dialog_controls,
+    )
+
+    close_component(calc)
+    if writer is not None:
+        try:
+            frame = writer.getCurrentController().getFrame()
+            try:
+                frame.getContainerWindow().toFront()
+            except Exception:
+                pass
+            desktop_from_ctx(ctx).setActiveFrame(frame)
+        except Exception:
+            pass
+        wait_for_chat_dialog_controls(ctx, timeout=15.0, doc=writer)
+        assert current_component(ctx) is not None, (
+            "after closing Calc, Writer was not re-activated as current component"
+        )
+    adopt_runtime_send_listeners()
+    if _session is not None:
+        _session.controls = saved_controls
+        _session.listener = saved_listener
+
+
 @native_test
 def test_e12_calc_list_sheets(ctx):
-    # Isolated FILTER=e12 still hangs (2026-08-30): after setup's Writer deck,
-    # desktop.loadComponentFromURL("private:factory/scalc", "_default", …) never
-    # returns over URP (120s timeout; last mock log was GET /v1/models). Not a
-    # "two GUI windows" bug — File→New Spreadsheet by hand is a different path.
-    raise unittest.SkipTest("E12 URP hang on factory/scalc after Writer deck; isolate later")
+    from plugin.chatbot.sidebar_test_hooks import current_component, open_calc_document
+
+    _reset_mock_runtime()
+    writer = current_component(ctx)
+    saved_controls = getattr(_session, "controls", None)
+    saved_listener = getattr(_session, "listener", None)
+    calc = None
+    try:
+        calc = open_calc_document(ctx)
+        _adopt_calc_sidebar(ctx, calc)
+        _send_and_wait("list sheets", timeout=60.0)
+        snaps = _captures()
+        decided: list[str] = []
+        advertised: list[str] = []
+        for row in snaps:
+            decided.extend(row.get("decided_tools") or [])
+            advertised.extend(row.get("advertised_tools") or [])
+        assert "write_formula_range" in advertised or "get_sheet_summary" in advertised, (
+            "E12 expected Calc-deck tools, advertised=%r" % advertised
+        )
+        # list_sheets is specialized-tier; main Calc chat uses get_sheet_summary.
+        assert "list_sheets" in decided or "get_sheet_summary" in decided, (
+            "E12 expected a Calc list tool, decided=%r snaps=%r" % (decided, snaps[-5:])
+        )
+        _hello_ok()
+    finally:
+        _restore_writer_after_calc(ctx, writer, calc, saved_controls, saved_listener)
 
 
 @native_test
@@ -2141,8 +2222,30 @@ def test_g16_second_take_replaces_audio(ctx):
 
 
 @native_test
-def test_g17_calc_deck_skipped(ctx):
-    raise unittest.SkipTest("G17 Calc deck: isolate like E12; do not open Calc from Packet G")
+def test_g17_calc_deck_native_audio(ctx):
+    from plugin.chatbot.sidebar_test_hooks import audio_status, current_component, open_calc_document
+
+    writer = current_component(ctx)
+    saved_controls = getattr(_session, "controls", None)
+    saved_listener = getattr(_session, "listener", None)
+    calc = None
+    try:
+        calc = open_calc_document(ctx)
+        _adopt_calc_sidebar(ctx, calc)
+        sl = _g_prep()
+        _g_record_and_stop(sl, _WAV_1S)
+        body = _transcript().lower()
+        assert "mock microphone" in body or "mock transcript" in body, (
+            "G17 expected canned transcript on Calc deck: %r" % _transcript()[-500:]
+        )
+        snaps = _captures()
+        assert any(row.get("has_input_audio") for row in snaps), (
+            "G17 expected input_audio on chat POST, snaps=%r" % snaps[-5:]
+        )
+        assert audio_status(listener=sl)["has_audio"] is False
+        _hello_ok()
+    finally:
+        _restore_writer_after_calc(ctx, writer, calc, saved_controls, saved_listener)
 
 
 @native_test
@@ -2443,4 +2546,229 @@ def test_slash_popup_mock_records_lru(ctx):
     assert ranked["visible"], ranked
     assert ranked["items"][0] == "mock-bravo", ranked
     _slash_type("", sl)
+
+
+def _clear_chat() -> None:
+    from plugin.chatbot.sidebar_test_hooks import clear_sidebar_chat
+
+    sl = getattr(_session, "listener", None)
+    clear_sidebar_chat(listener=sl)
+
+
+def _ensure_compaction_enabled(enabled: bool) -> None:
+    """Toggle ``chat_compaction_enabled`` and wait for the OXT config cache."""
+    from plugin.framework.config import get_config_bool, set_config
+
+    if bool(get_config_bool("chat_compaction_enabled")) == bool(enabled):
+        return
+    set_config("chat_compaction_enabled", enabled)
+    if os.environ.get("WRITERAGENT_UNO_USER_PROFILE") == "1":
+        time.sleep(2.1)
+
+
+def _prepare_k_sidebar(ctx: Any) -> None:
+    """Re-bind Packet K to the live Writer deck (not a leftover Calc panel).
+
+    Packet P / E12 leave extra ChatPanelElements in the soffice WeakSet.
+    Inflate used to pad WeakSet[0] while URP Send clicked Writer — hello
+    POSTs were n_messages=2 with no summarizer. Re-adopt Writer and pin
+    ``writeragent-mock`` on the same controls ``_send_and_wait`` uses so
+    ``sync_sidebar_text_model`` cannot restore a slash-LRU id (no_window).
+    """
+    from plugin.chatbot.dialogs import set_control_text
+    from plugin.chatbot.sidebar_test_hooks import (
+        ensure_sidebar_chat_mode,
+        wait_for_chat_dialog_controls,
+    )
+    from plugin.framework.client.model_fetcher import set_text_model
+    from scripts.mock_llm_server import MOCK_MODEL_ID
+
+    _ensure_writer_doc(ctx)
+    controls = wait_for_chat_dialog_controls(ctx, timeout=15.0)
+    ensure_sidebar_chat_mode(controls)
+    if controls and "model_selector" in controls:
+        set_control_text(controls["model_selector"], MOCK_MODEL_ID)
+    set_text_model(MOCK_MODEL_ID, update_lru=False)
+    if _session is not None:
+        _session.controls = controls
+
+
+def _k_reset(ctx: Any = None) -> None:
+    _reset_mock_runtime()
+    assert _session is not None
+    _session.config.delay_ms = 0
+    if ctx is not None:
+        _prepare_k_sidebar(ctx)
+    _clear_chat()
+
+
+def _summarizer_rows(rows: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
+    return [row for row in (rows if rows is not None else _captures()) if row.get("is_summarizer")]
+
+
+def _overflow_rows(rows: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
+    out = []
+    for row in rows if rows is not None else _captures():
+        msg = str(row.get("http_error_message") or "")
+        if row.get("http_error") == 400 and "prompt is too long" in msg:
+            out.append(row)
+    return out
+
+
+def _view_stream_rows(rows: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
+    return [
+        row
+        for row in (rows if rows is not None else _captures())
+        if row.get("stream") and row.get("has_conversation_summary") and not row.get("is_summarizer")
+    ]
+
+
+def _inflate_history(ctx: Any = None) -> dict[str, Any]:
+    """Grow ChatSession in soffice past the mock 32768×75% gate (no 24k HTML stream)."""
+    from plugin.chatbot.sidebar_test_hooks import (
+        chat_dialog_controls,
+        current_component,
+        inflate_sidebar_history,
+    )
+    from plugin.chatbot.dialogs import set_control_text
+    from plugin.framework.client.model_fetcher import set_text_model
+    from scripts.mock_llm_server import MOCK_MODEL_ID
+
+    set_text_model(MOCK_MODEL_ID, update_lru=False)
+    if ctx is not None:
+        ctrls = chat_dialog_controls(ctx, current_component(ctx)) or {}
+        if "model_selector" in ctrls:
+            set_control_text(ctrls["model_selector"], MOCK_MODEL_ID)
+    snap = inflate_sidebar_history(ctx=ctx)
+    n = int(snap.get("session_n_messages") or 0)
+    chars = snap.get("session_content_chars") or []
+    assert n >= 5, "K inflate did not grow ChatSession: %r" % snap
+    assert sum(int(c) for c in chars) >= 20000, "K inflate pads missing: %r" % snap
+    return snap
+
+
+@native_test
+def test_k1_proactive_compact_then_hello(ctx):
+    _ensure_compaction_enabled(True)
+    _k_reset(ctx)
+    _inflate_history(ctx)
+    from scripts.mock_llm_server import clear_captures
+
+    clear_captures(_session.config)
+    _send_and_wait("hello", timeout=90.0)
+    rows = _captures()
+    assert _summarizer_rows(rows), "K1 expected non-stream summarizer POST: %r" % rows
+    assert _view_stream_rows(rows), "K1 expected a stream that is not raw full history: %r" % rows
+    hello_rows = [row for row in rows if (row.get("current_query") or "").strip().lower() == "hello"]
+    assert hello_rows, "K1 hello never reached the mock"
+    assert any(row.get("stream") and not row.get("http_error") for row in hello_rows), hello_rows
+    _hello_ok()
+
+
+@native_test
+def test_k1b_update_compaction_second_turn(ctx):
+    _ensure_compaction_enabled(True)
+    _k_reset(ctx)
+    _inflate_history(ctx)
+    from scripts.mock_llm_server import clear_captures
+
+    clear_captures(_session.config)
+    _send_and_wait("hello", timeout=90.0)
+    rows1 = _captures()
+    assert _summarizer_rows(rows1), "K1b first turn expected summarizer POST: %r" % rows1
+
+    # Inflate history a second time so tokens cross the 75% gate again on turn 2
+    _inflate_history(ctx)
+    clear_captures(_session.config)
+    _send_and_wait("hello again", timeout=90.0)
+    rows2 = _captures()
+    summarizer_rows = _summarizer_rows(rows2)
+    assert summarizer_rows, "K1b second turn expected UPDATE summarizer POST: %r" % rows2
+    assert any("<previous-summary>" in str(row.get("user_text") or "") for row in summarizer_rows), (
+        "K1b expected <previous-summary> in update summarizer prompt: %r" % summarizer_rows
+    )
+    _hello_ok()
+
+
+
+@native_test
+def test_k2_overflow_once_retries_then_hello(ctx):
+    _ensure_compaction_enabled(True)
+    _k_reset(ctx)
+    _inflate_history(ctx)
+    from scripts.mock_llm_server import clear_captures
+
+    clear_captures(_session.config)
+    _session.config.overflow_once_seen = 0
+    before = _transcript()
+    _send_and_wait("overflow once", timeout=90.0)
+    rows = _captures()
+    assert _overflow_rows(rows), "K2 expected one prompt-too-large error: %r" % rows
+    overflow_streams = [
+        row
+        for row in rows
+        if row.get("stream") and "overflow once" in (row.get("current_query") or "").lower()
+    ]
+    assert 2 <= len(overflow_streams) <= 3, "K2 expected respawn ≤3, got %d: %r" % (
+        len(overflow_streams),
+        overflow_streams,
+    )
+    suffix = _suffix(before)
+    assert "assistant:" in suffix.lower() or "mock" in suffix.lower(), (
+        "K2 expected a successful retry stream, got %r" % suffix[-400:]
+    )
+    assert "[API error:" not in suffix or _view_stream_rows(rows) or any(
+        row.get("stream") and not row.get("http_error") for row in overflow_streams
+    ), "K2 retry did not succeed: %r captures=%r" % (suffix[-400:], rows)
+    _hello_ok()
+
+
+@native_test
+def test_k3_kill_switch_overflow_no_retry(ctx):
+    _k_reset(ctx)
+    _ensure_compaction_enabled(False)
+    try:
+        from scripts.mock_llm_server import clear_captures
+
+        clear_captures(_session.config)
+        _session.config.overflow_once_seen = 0
+        _send_and_wait("overflow once", timeout=60.0, wait_for="API error")
+        rows = _captures()
+        assert _overflow_rows(rows), "K3 expected overflow error: %r" % rows
+        assert not _summarizer_rows(rows), "K3 kill switch must not call the summarizer: %r" % rows
+        overflow_streams = [
+            row
+            for row in rows
+            if row.get("stream") and "overflow once" in (row.get("current_query") or "").lower()
+        ]
+        assert len(overflow_streams) == 1, "K3 must not respawn: %r" % overflow_streams
+        body = _transcript()
+        assert "[API error:" in body or "prompt is too long" in body.lower(), (
+            "K3 expected today's overflow sentence, got %r" % body[-500:]
+        )
+    finally:
+        _ensure_compaction_enabled(True)
+    _hello_ok()
+
+
+@native_test
+def test_k4_process_death_does_not_compact_retry(ctx):
+    _ensure_compaction_enabled(True)
+    _k_reset(ctx)
+    from scripts.mock_llm_server import clear_captures
+
+    clear_captures(_session.config)
+    _send_and_wait("llama process died", timeout=60.0)
+    rows = _captures()
+    assert not _summarizer_rows(rows), "K4 death must not enter compact retry: %r" % rows
+    death_streams = [
+        row
+        for row in rows
+        if "llama process died" in (row.get("current_query") or "").lower() and not row.get("is_summarizer")
+    ]
+    assert len(death_streams) == 1, "K4 must not respawn: %r" % death_streams
+    assert death_streams[0].get("http_error") == 400, death_streams
+    body = _transcript()
+    _assert_errorish(body, "API error", "llama-server", "overflowed", "terminated")
+    _hello_ok()
 

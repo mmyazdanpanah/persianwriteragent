@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import logging
 import os
+import sys
 from typing import TYPE_CHECKING, Any, Literal, TypedDict
 
 import uno
@@ -108,9 +109,15 @@ def guess_doc_type_from_path(path: str) -> DocTypeGuess:
     return _EXTENSION_DOC_TYPE.get(ext, "unknown")
 
 
-def get_document_research_workflow_hint(ctx=None) -> str:
-    """Outer document_research sub-agent workflow text."""
+def get_document_research_workflow_hint(ctx=None, doc=None) -> str:
+    """Outer document_research sub-agent workflow text.
+
+    The peer-choice suffix calls ``list_v1_peers`` (RuntimeUID / desktop).
+    Specialized execute gathers this on the main thread; the suffix also
+    marshals if invoked off-main.
+    """
     from plugin.framework.constants import folder_search_enabled
+    from plugin.framework.prompts import get_peer_inner_choice_block
 
     common = (
         "\n\nDocument research workflow:\n"
@@ -136,9 +143,11 @@ def get_document_research_workflow_hint(ctx=None) -> str:
         "or topic with search_in_document — do not rely on para_index or character offsets as exact LO coordinates.\n"
         "If search_nearby_files returns status indexing, retry after the background index finishes.\n"
     )
-    if folder_search_enabled():
-        return common + index_hint
-    return common + grep_hint
+    hint = common + (index_hint if folder_search_enabled() else grep_hint)
+    peer = get_peer_inner_choice_block(ctx, doc)
+    if peer:
+        hint = hint + "\n" + peer
+    return hint
 
 
 def filter_document_research_discovery_tools(tools: list[ToolBase], ctx) -> list[ToolBase]:
@@ -274,8 +283,21 @@ def _office_model_from_desktop_element(elem: Any) -> Any | None:
     if elem is None:
         return None
     model = elem
-    if hasattr(elem, "getController") and elem.getController():
-        model = elem.getController().getModel()
+    try:
+        if hasattr(elem, "getController") and elem.getController():
+            model = elem.getController().getModel()
+    except Exception as exc:
+        # GHA 34593327841: leftover HTML-paste Writers (close skipped
+        # pasted=True) stay on the desktop. getController/getModel on those
+        # can raise, including PyUNO "Couldn't convert traceback … getTypes".
+        # An uncaught raise aborted list_nearby_files. Skip this component.
+        # Do not log exc_info: formatting a UNO exception can raise the same
+        # traceback-conversion RuntimeException.
+        log.debug(
+            "_office_model_from_desktop_element: skip component (%s)",
+            type(exc).__name__,
+        )
+        return None
     if model is None:
         return None
     from plugin.framework.thread_guard import guard_uno
@@ -300,25 +322,50 @@ def _collect_open_file_urls(
         if not comps:
             return out
         enum = comps.createEnumeration()
-        while enum and enum.hasMoreElements():
-            elem = enum.nextElement()
-            model = _office_model_from_desktop_element(elem)
-            if model is None or not hasattr(model, "getURL"):
+        # Same MagicMock / leftover-component guard as get_open_documents:
+        # a truthy mock or one broken paste Writer must not abort the walk.
+        while enum is not None:
+            try:
+                more = enum.hasMoreElements()
+            except Exception:
+                break
+            if more is not True and more != 1:
+                break
+            try:
+                elem = enum.nextElement()
+            except Exception:
+                break
+            try:
+                model = _office_model_from_desktop_element(elem)
+                if model is None or not hasattr(model, "getURL"):
+                    continue
+                url = model.getURL()
+                if not url or not str(url).startswith("file://"):
+                    continue
+                path = _system_path_from_url(str(url))
+                if not path:
+                    continue
+                if exclude_norm and _normalize_path(path) == exclude_norm:
+                    continue
+                ext = os.path.splitext(path)[1].lower()
+                if ext not in extensions:
+                    continue
+                out[_normalize_path(path)] = str(url)
+            except Exception as exc:
+                # GHA 34593327841: one leftover/broken component raised
+                # through getURL and aborted the whole nearby listing.
+                log.debug(
+                    "_collect_open_file_urls: skip component (%s)",
+                    type(exc).__name__,
+                )
                 continue
-            url = model.getURL()
-            if not url or not str(url).startswith("file://"):
-                continue
-            path = _system_path_from_url(str(url))
-            if not path:
-                continue
-            if exclude_norm and _normalize_path(path) == exclude_norm:
-                continue
-            ext = os.path.splitext(path)[1].lower()
-            if ext not in extensions:
-                continue
-            out[_normalize_path(path)] = str(url)
     except Exception:
-        log.exception("_collect_open_file_urls failed")
+        try:
+            log.exception("_collect_open_file_urls failed")
+        except Exception:
+            # PyUNO: logging a UNO exception can raise
+            # "Couldn't convert traceback … getTypes" (GHA 34593327841).
+            pass
     return out
 
 
@@ -525,6 +572,34 @@ def resolve_path_or_name(
     return None, f"No file matching {raw!r}"
 
 
+# Same CREATE|GLOBAL as rich_html._wa_calc_html (8|55). Named target with
+# flags 0 can search instead of creating.
+_HIDDEN_READONLY_SEARCH_FLAGS = 8 | 55
+_WINDOWS_HIDDEN_READONLY_TARGET = "_wa_doc_research"
+
+
+def _hidden_readonly_load_args() -> tuple[str, int]:
+    """Target + FrameSearchFlag for Hidden+ReadOnly sibling open.
+
+    What was wrong: GHA 34636251918 stored Budget via the pooled Calc
+    (``store budget via active`` OK; ``test_list_nearby_excludes_active``
+    OK). ``open_document_for_read`` then ``loadComponentFromURL`` of that
+    file with ``_default`` flags=0 raised ``Could not create system
+    bitmap!`` The next sibling open hung 30s at the same call.
+
+    How: leftover Hidden ``_wa_calc_html`` paste Writers (uids 26/27)
+    poison ``_default`` / ``_blank`` — same family as leftover Hidden
+    factory (34597506651 / 34599838644) and leftover notebook detect
+    (34619751330). ``rich_html.py`` already avoids those names.
+
+    Why this: one CREATE|GLOBAL name. Hidden+ReadOnly and the reuse /
+    close-flag contract stay the same. POSIX keeps ``_default``.
+    """
+    if sys.platform == "win32":
+        return _WINDOWS_HIDDEN_READONLY_TARGET, _HIDDEN_READONLY_SEARCH_FLAGS
+    return "_default", 0
+
+
 def open_document_for_read(ctx: Any, path_or_url: str) -> tuple[Any | None, str | None, str | None, bool]:
     """Open or reuse a document hidden+read-only.
 
@@ -560,7 +635,8 @@ def open_document_for_read(ctx: Any, path_or_url: str) -> tuple[Any | None, str 
             create_property_value("Hidden", True),
             create_property_value("ReadOnly", True),
         )
-        model = desktop.loadComponentFromURL(url, "_default", 0, load_props)
+        target, flags = _hidden_readonly_load_args()
+        model = desktop.loadComponentFromURL(url, target, flags, load_props)
         if model is None:
             return None, None, f"Failed to open {path}", False
         doc_type = doc_type_label_for_enum(get_document_type(model), impress_as_draw=True)
@@ -638,7 +714,17 @@ def get_open_documents(uno_ctx: Any, active_model: Any = None) -> list[dict[str,
         return []
     enum = comps.createEnumeration()
     docs = []
-    while enum and enum.hasMoreElements():
+    # Real UNO hasMoreElements() is bool. unittest MagicMock is always truthy
+    # and never becomes False, so `while enum.hasMoreElements()` spun forever.
+    # That wedged unit pytest at ~99% after peer send tools started calling
+    # this from list_v1_peers / chat prompts with ctx=MagicMock().
+    while enum is not None:
+        try:
+            more = enum.hasMoreElements()
+        except Exception:
+            break
+        if more is not True and more != 1:
+            break
         elem = enum.nextElement()
         model = _office_model_from_desktop_element(elem)
         if model is None or not hasattr(model, "getURL"):

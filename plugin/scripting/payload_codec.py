@@ -38,6 +38,7 @@ from plugin.framework.deal_shim import (
     DEAL_MAX_SHAPE_RANK,
     DEAL_MAX_SOURCE,
     DEAL_MAX_TOKEN,
+    UNDER_CROSSHAIR,
     ascii_bounded,
     deal,
     inverse_ensure,
@@ -83,6 +84,9 @@ log = logging.getLogger(__name__)
 
 _CYTHON_ACCELERATOR_DISABLED = False
 _CYTHON_ACCELERATOR_LOCATION: str | None = None
+# Set only after a load attempt fails. None means "not attempted yet" so
+# report-only status stays "Inactive (Pure Python)" until the host loads.
+_CYTHON_ACCELERATOR_INACTIVE_REASON: str | None = None
 
 fast_flatten_grid_2d: Any = None
 fast_flatten_grid_1d: Any = None
@@ -134,9 +138,16 @@ def _verify_accelerator(fn2d: Any, fn1d: Any) -> bool:
 
 
 def load_cython_accelerator() -> None:
-    """Attempt to load the Cython accelerator and verify it via a runtime canary test."""
+    """Attempt to load the Cython accelerator and verify it via a runtime canary test.
+
+    Host-only: the HTTP compute service calls this at startup to log Active/Inactive.
+    Desktop host pack also calls it from ``host_pack_data``. Compute workers unpack
+    via ``frombuffer`` / pack ndarrays via ``tobytes`` and must not call this
+    (importing unpack helpers is not a load).
+    """
     # crosshair: off  # sys.path/import sniffs (cover-all 33355986432: payload_codec in-flight 6h, no flushed COVER TIMING). Engine-hostile; keep off.
-    global fast_flatten_grid_2d, fast_flatten_grid_1d, _CYTHON_ACCELERATOR_DISABLED, _CYTHON_ACCELERATOR_LOCATION
+    global fast_flatten_grid_2d, fast_flatten_grid_1d
+    global _CYTHON_ACCELERATOR_DISABLED, _CYTHON_ACCELERATOR_LOCATION, _CYTHON_ACCELERATOR_INACTIVE_REASON
     if fast_flatten_grid_2d is not None or _CYTHON_ACCELERATOR_DISABLED:
         return
 
@@ -209,14 +220,17 @@ def load_cython_accelerator() -> None:
             fast_flatten_grid_1d = fn1d
             _CYTHON_ACCELERATOR_LOCATION = loc
             _CYTHON_ACCELERATOR_DISABLED = False
+            _CYTHON_ACCELERATOR_INACTIVE_REASON = None
             log.debug("payload_codec: Cython accelerator (%s) verified and loaded", loc)
         else:
             _CYTHON_ACCELERATOR_DISABLED = True
             _CYTHON_ACCELERATOR_LOCATION = None
+            _CYTHON_ACCELERATOR_INACTIVE_REASON = "canary failed"
             log.warning("payload_codec: Cython accelerator found at %s but failed canary check; using pure Python", loc)
     else:
         _CYTHON_ACCELERATOR_DISABLED = True
         _CYTHON_ACCELERATOR_LOCATION = None
+        _CYTHON_ACCELERATOR_INACTIVE_REASON = "not found"
         log.debug("payload_codec: Cython accelerator not found, using pure Python")
 
 
@@ -228,11 +242,13 @@ def invalidate_host_cython_accelerator() -> None:
     the next load binds the new file instead of calling into a stale mapping.
     """
     # crosshair: off  # sys.modules sniffs (cover-all 33355986432: payload_codec in-flight 6h, no flushed COVER TIMING). Engine-hostile; keep off.
-    global fast_flatten_grid_2d, fast_flatten_grid_1d, _CYTHON_ACCELERATOR_DISABLED, _CYTHON_ACCELERATOR_LOCATION
+    global fast_flatten_grid_2d, fast_flatten_grid_1d
+    global _CYTHON_ACCELERATOR_DISABLED, _CYTHON_ACCELERATOR_LOCATION, _CYTHON_ACCELERATOR_INACTIVE_REASON
     fast_flatten_grid_2d = None
     fast_flatten_grid_1d = None
     _CYTHON_ACCELERATOR_DISABLED = False
     _CYTHON_ACCELERATOR_LOCATION = None
+    _CYTHON_ACCELERATOR_INACTIVE_REASON = None
     for key in list(sys.modules):
         if key in ("writeragent_vec", "contrib.vec_pack", "vec_pack", "plugin.contrib.vec_pack") or key.startswith(
             ("writeragent_vec.", "contrib.vec_pack.", "vec_pack.", "plugin.contrib.vec_pack.")
@@ -254,6 +270,8 @@ def get_cython_status_info() -> tuple[bool, str | None, str]:
         if loc and loc != "active":
             return True, loc, f"Cython Accelerator: Active (Optimized, source: {loc})"
         return True, loc, "Cython Accelerator: Active (Optimized)"
+    if _CYTHON_ACCELERATOR_INACTIVE_REASON:
+        return False, None, f"Cython Accelerator: Inactive (Pure Python; {_CYTHON_ACCELERATOR_INACTIVE_REASON})"
     return False, None, "Cython Accelerator: Inactive (Pure Python)"
 
 
@@ -268,8 +286,9 @@ def host_cython_status_line(*, reload: bool = False) -> str:
     return get_cython_status_info()[2]
 
 
-# Initial load attempt
-load_cython_accelerator()
+# Do not load at import. Compute workers import unpack helpers from this
+# module; eager load would make every formula child pay for / claim Cython.
+# Host paths call load_cython_accelerator() (HTTP startup, host_pack_data).
 
 # --- Wire kind (JSON-safe dict tag) -----------------------------------------------
 
@@ -761,20 +780,31 @@ def describe_wire_value(obj: Any, *, sample: int = 3) -> str:
     return f"{type(obj).__name__}={repr(obj)[:120]}"
 
 
-def _deal_shape_ok(shape: object) -> bool:
-    """True iff *shape* is a rank-bounded tuple of Calc-sized dims.
-
-    Unbounded rank or dims let CrossHair deep multiply forever in ``cell_count``.
-    Dims follow ``DEAL_MAX_ROW_INDEX`` (CrossHair 20; pytest/debug full Calc rows),
-    not ``DEAL_MAX_SHAPE_DIM`` (256) — Gemini AFC hit PreContractError on (300, 1)
-    in ``should_use_binary_envelope`` after grid/wire-dict fixes.
-    """
+def _deal_shape_ok_pytest(shape: object) -> bool:
+    """Wide Calc-sized shape domain for pytest / production deal checks."""
     max_dim = DEAL_MAX_ROW_INDEX + 1
     return (
         isinstance(shape, tuple)
         and len(shape) <= DEAL_MAX_SHAPE_RANK
         and all(isinstance(d, int) and 0 <= d <= max_dim for d in shape)
     )
+
+
+def _deal_shape_ok_crosshair(shape: object) -> bool:
+    """Tiny shape domain for CrossHair.
+
+    cover-all 35546602462 spent ~29m on ``should_use_binary_envelope`` /
+    ``cell_count`` despite ``DEAL_MAX_ROW_INDEX=20``. Keep the FQNs on with a
+    2×{0..4} grid instead of off.
+    """
+    return (
+        isinstance(shape, tuple)
+        and len(shape) <= 2
+        and all(isinstance(d, int) and 0 <= d <= 4 for d in shape)
+    )
+
+
+_deal_shape_ok = _deal_shape_ok_crosshair if UNDER_CROSSHAIR else _deal_shape_ok_pytest
 
 
 @deal.pre(lambda shape: _deal_shape_ok(shape))
@@ -1287,6 +1317,10 @@ def host_pack_data(
 ) -> Any:
     """Pack ``data`` for worker request field (list or split_grid dict)."""
     # crosshair: off
+    # First host pack loads Cython (desktop =PY(), compute HTTP host). Workers
+    # use child_unpack / child_pack_split_grid and never reach this function
+    # on the hot path, so they stay Inactive.
+    load_cython_accelerator()
     try:
         if grid:
             if force == "always":
@@ -1700,13 +1734,16 @@ def child_pack_split_grid(arr: Any) -> dict[str, Any]:
 def _container_has_packable_nested(obj: Any) -> bool:
     """True when *obj* contains ndarray/dict containers that need per-element packing."""
     # crosshair: off  # recursive Any (cover-all 33355986432: payload_codec in-flight 6h with sandbox_cache, no flushed COVER TIMING). Doable later with _deal_envelope_value_ok.
-    import numpy as np
+    try:
+        import numpy as np
+    except ImportError:
+        np = None
 
-    if isinstance(obj, (dict, np.ndarray)):
+    if isinstance(obj, dict) or (np is not None and isinstance(obj, np.ndarray)):
         return True
     if isinstance(obj, (list, tuple)):
         for item in obj:
-            if isinstance(item, (dict, np.ndarray)):
+            if isinstance(item, dict) or (np is not None and isinstance(item, np.ndarray)):
                 return True
             if isinstance(item, (list, tuple)) and _container_has_packable_nested(item):
                 return True
@@ -1716,14 +1753,17 @@ def _container_has_packable_nested(obj: Any) -> bool:
 def _needs_elementwise_pack(obj: Any) -> bool:
     """True when a list/tuple should be packed element-wise instead of as one grid."""
     # crosshair: off  # recursive Any (cover-all 33355986432: payload_codec in-flight 6h with sandbox_cache, no flushed COVER TIMING). Doable later with _deal_envelope_value_ok.
-    import numpy as np
+    try:
+        import numpy as np
+    except ImportError:
+        np = None
 
     if isinstance(obj, dict):
         return True
     if not isinstance(obj, (list, tuple)) or not obj:
         return False
     for item in obj:
-        if isinstance(item, (dict, np.ndarray)):
+        if isinstance(item, dict) or (np is not None and isinstance(item, np.ndarray)):
             return True
         if isinstance(item, (list, tuple)) and _container_has_packable_nested(item):
             return True
@@ -1741,10 +1781,13 @@ def child_pack_result(
 ) -> Any:
     """JSON-safe worker result: scalar/list as-is, ndarray as list or split_grid."""
     # crosshair: off
-    import numpy as np
+    try:
+        import numpy as np
+    except ImportError:
+        np = None
 
     try:
-        if isinstance(result, np.ndarray):
+        if np is not None and isinstance(result, np.ndarray):
             shape = tuple(int(x) for x in result.shape)
             if should_use_binary_envelope(shape, min_cells=min_cells, force=force):
                 return child_pack_split_grid(result)
@@ -1753,11 +1796,11 @@ def child_pack_result(
                 shape,
             )
     
-        if isinstance(result, (np.integer,)):
+        if np is not None and isinstance(result, (np.integer,)):
             return int(result)
-        if isinstance(result, (np.floating,)):
+        if np is not None and isinstance(result, (np.floating,)):
             return float(result)
-        if isinstance(result, np.bool_):
+        if np is not None and isinstance(result, np.bool_):
             return bool(result)
         if isinstance(result, dict):
             return {str(k): child_pack_result(v, min_cells=min_cells, force=force) for k, v in result.items()}

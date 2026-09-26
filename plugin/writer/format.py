@@ -209,17 +209,148 @@ def _strip_html_boilerplate(html_string):  # pyright: ignore[reportUnusedFunctio
 #   plugin/writer/format.py   — replace_single_range_with_content style restore (~595)
 #   plugin/notebook/writer_importer.py — resolved paragraph style on import (~621)
 #   plugin/notebook/notebook_runner.py — output cell paragraph style (~177)
-def apply_paragraph_style_preserving_direct_char(doc, cursor, style_name):
-    """Set *cursor*'s ParaStyleName to *style_name* without wiping direct Char* formatting.
+# Char properties a paragraph style is expected to govern. apply_style defaults to
+# clear_direct="style_props": these are the ONLY captured overrides not restored after the style
+# is applied, so the house font and size show while hand-set bold/italic/colour survive.
+# See CLEARABLE_PARA_PROPERTIES for the paragraph half (indents/alignment).
+#
+# Future idea — not now: clear whatever the *target style* actually defines (PropertyState /
+# inheritance), instead of this fixed list. Hard because a Normal weight or an inherited default
+# looks the same as "the style does not set this", so it is easy to wipe emphasis the style
+# never claimed.
+STYLE_GOVERNED_CHAR_PROPERTIES = (
+    "CharFontName", "CharFontNameAsian", "CharFontNameComplex",
+    "CharHeight", "CharHeightAsian", "CharHeightComplex",
+)
 
-    LibreOffice resets hand-set Char* properties to the new paragraph style's defaults
-    when ParaStyleName is set — across the WHOLE paragraph, even for a sub-range cursor.
+# Whole-paragraph direct overrides cleared by clear_direct. This module owns the name list;
+# styles.py imports it for the inspect/schema set so the two cannot drift. (styles already
+# imports from format — there is no cycle to avoid.) Deliberately NOT setAllPropertiesToDefault
+# — that also wipes numbering, borders and language, which no caller asked to lose.
+CLEARABLE_PARA_PROPERTIES = (
+    "ParaTopMargin", "ParaBottomMargin", "ParaLeftMargin", "ParaRightMargin",
+    "ParaFirstLineIndent", "ParaAdjust", "ParaBackColor", "ParaKeepTogether", "ParaSplit",
+)
+
+# Scalar, JSON-safe subset reported back to the agent. Includes the Asian/Complex font/size
+# slots because style_props clears those too — omitting them made a CJK house-font apply look
+# like it only touched the Latin slot. The capture itself still covers every Char*; only the
+# report is narrowed (CharLocale and friends are UNO structs).
+REPORTED_CHAR_PROPERTIES = (
+    "CharFontName", "CharFontNameAsian", "CharFontNameComplex",
+    "CharHeight", "CharHeightAsian", "CharHeightComplex",
+    "CharWeight", "CharPosture", "CharColor",
+)
+
+# Walk caps for the capture in apply_paragraph_style_preserving_direct_char. A UNO enumeration
+# that misbehaves otherwise spins forever; hitting the cap means later runs were not read.
+_CAPTURE_PARA_LIMIT = 200000
+_CAPTURE_PORTION_LIMIT = 50000
+
+
+def enum_hit_walk_cap(seen, limit, enum):
+    """True when a walk stopped because of *limit*, not because *enum* was exhausted."""
+    if seen < limit or enum is None:
+        return False
+    try:
+        return enum.hasMoreElements() is True
+    except Exception:
+        return False
+
+
+def walk_cap_warning(kind, seen, limit):
+    """Agent-facing note when a text walk stopped at a hard cap.
+
+    The walk still returns what it collected; anything after the cap was not read, so
+    formatting (or a header scan) may be incomplete. DO: treat the result as partial and
+    re-read a smaller range rather than assuming the rest is unformatted.
+    """
+    return (
+        "Walk stopped after %d %s (cap %d). Later content was not read, so formatting "
+        "may be incomplete. Read a smaller range (or split the target) rather than "
+        "treating this result as the whole picture." % (seen, kind, limit)
+    )
+
+
+def record_walk_cap(enum, seen, limit, kind, dest=None):
+    """Log (and optionally collect) a walk-cap warning. Returns True when the cap was hit."""
+    if not enum_hit_walk_cap(seen, limit, enum):
+        return False
+    msg = walk_cap_warning(kind, seen, limit)
+    log.warning("%s", msg)
+    if dest is not None:
+        dest.append(msg)
+    return True
+
+
+def _reset_properties_to_default(cursor, names):
+    """Drop *names* as direct attributes on *cursor* so they fall back to the paragraph style.
+
+    This is Format > Clear Direct Formatting, narrowed to the names the caller asks for. It is the
+    only reliable way to remove an override: re-applying a paragraph's existing style leaves its
+    direct Char* standing (LibreOffice 26.2), so imposing a house font on a document whose
+    paragraphs are all already 'Standard' silently keeps the old font without this.
+
+    Returns the names actually cleared.
+    """
+    names = tuple(names)
+    if not names:
+        return []
+    try:
+        cursor.setPropertiesToDefault(names)
+        return list(names)
+    except Exception:
+        pass  # no XMultiPropertyStates on this range — fall back to one at a time
+    cleared = []
+    for name in names:
+        try:
+            cursor.setPropertyToDefault(name)
+            cleared.append(name)
+        except Exception:
+            continue
+    return cleared
+
+
+def _summarize_char_overrides(overrides):
+    """Flat, JSON-safe {prop: value} of the captured direct Char* overrides (first portion wins)."""
+    summary = {}
+    for _pc, props in overrides:
+        for name in REPORTED_CHAR_PROPERTIES:
+            if name in props and name not in summary:
+                val = props[name]
+                if isinstance(val, (str, int, float, bool)):
+                    summary[name] = val
+    return summary
+
+
+def apply_paragraph_style_preserving_direct_char(doc, cursor, style_name, clear_direct="none"):
+    """Set *cursor*'s ParaStyleName to *style_name*, deciding what happens to direct formatting.
+
+    Setting ParaStyleName to a DIFFERENT style resets hand-set Char* properties to that style's
+    defaults — across the WHOLE paragraph, even for a sub-range cursor — which is what the capture
+    below exists to undo. Re-applying the style a paragraph already has does not reset Char*
+    (LibreOffice 26.2). It *does* drop the paragraph's direct Para* (margins, alignment, first-line
+    indent) — so re-applying Standard does not keep a hand-set quote indent. Clearing a Char*
+    override is never a side effect to rely on; see _reset_properties_to_default.
     ``getPropertyState`` is unreliable at the text-portion level, so overrides are
     detected by VALUE (Char* differs from the paragraph's current style default).
+
+    *clear_direct* decides what happens to those captured overrides. The helper default is
+    ``"none"`` so HTML import / style-restore callers keep inline fonts; ``apply_style``
+    defaults to ``"style_props"`` so a house-font update is visible without a retry:
+      ``"style_props"`` restores everything except STYLE_GOVERNED_CHAR_PROPERTIES and clears
+      CLEARABLE_PARA_PROPERTIES, so font/size/indent obey the style and bold/italic/colour survive;
+      ``"none"`` restores all captured Char* — keeps a hand-set font (the style can look like a
+      no-op). Does not restore Para*; LibreOffice already dropped those when ParaStyleName was set;
+      ``"all"`` restores nothing and clears the paragraph properties too (Ctrl+M semantics).
+
+    Returns a report dict so callers can tell the agent what actually happened.
 
     KNOWN LIMITATION: a direct override whose value equals the old style default is not
     captured; applying a style with a different default can change that property visibly.
     """
+
+    walk_notes: list[str] = []
 
     def _expand_to_full_paragraphs(cur):
         try:
@@ -249,7 +380,7 @@ def apply_paragraph_style_preserving_direct_char(doc, cursor, style_name):
         except Exception:
             return overrides
         _paras = 0
-        while para_enum.hasMoreElements() is True and _paras < 200000:
+        while para_enum.hasMoreElements() is True and _paras < _CAPTURE_PARA_LIMIT:
             _paras += 1
             try:
                 para = para_enum.nextElement()
@@ -270,7 +401,7 @@ def apply_paragraph_style_preserving_direct_char(doc, cursor, style_name):
             except Exception:
                 continue
             _portions = 0
-            while portion_enum.hasMoreElements() is True and _portions < 50000:
+            while portion_enum.hasMoreElements() is True and _portions < _CAPTURE_PORTION_LIMIT:
                 _portions += 1
                 try:
                     portion = portion_enum.nextElement()
@@ -303,17 +434,55 @@ def apply_paragraph_style_preserving_direct_char(doc, cursor, style_name):
                         overrides.append((pc, props))
                     except Exception:
                         continue
+            record_walk_cap(portion_enum, _portions, _CAPTURE_PORTION_LIMIT, "text portions", walk_notes)
+        record_walk_cap(para_enum, _paras, _CAPTURE_PARA_LIMIT, "paragraphs", walk_notes)
         return overrides
 
     capture_cursor = _expand_to_full_paragraphs(cursor) or cursor
     overrides = _capture_direct_char_overrides(capture_cursor)
+    found = _summarize_char_overrides(overrides)
     cursor.setPropertyValue("ParaStyleName", style_name)
-    for pc, props in overrides:
-        for name, val in props.items():
-            try:
-                pc.setPropertyValue(name, val)
-            except Exception:
-                pass
+
+    if clear_direct == "all":
+        skip = None  # restore nothing
+    elif clear_direct == "style_props":
+        skip = set(STYLE_GOVERNED_CHAR_PROPERTIES)
+    else:
+        skip = set()  # historical behaviour: restore everything
+
+    if skip is not None:
+        for pc, props in overrides:
+            for name, val in props.items():
+                if name in skip:
+                    continue
+                try:
+                    pc.setPropertyValue(name, val)
+                except Exception:
+                    pass
+
+    report: dict[str, Any] = {"direct_formatting": "preserved" if clear_direct == "none" else "cleared",
+                              "clear_direct": clear_direct}
+    if clear_direct == "none":
+        # What the caller can act on: these overrode the style and are the reason it looks like
+        # the apply did nothing.
+        if found:
+            report["preserved_char_overrides"] = found
+    else:
+        # Only what was really dropped — under "style_props" bold and italic were restored, and
+        # listing them as removed would send the caller chasing a change that never happened.
+        removed = found if skip is None else {k: v for k, v in found.items() if k in skip}
+        if removed:
+            report["removed_char_overrides"] = removed
+        # Clear explicitly rather than leaning on the ParaStyleName side effect, which leaves
+        # direct Char* on the text portions standing. "all" targets exactly the overrides that
+        # were found, so nothing unrelated is touched.
+        char_targets = (STYLE_GOVERNED_CHAR_PROPERTIES if clear_direct == "style_props"
+                        else sorted({n for _pc, props in overrides for n in props}))
+        report["cleared_char_properties"] = _reset_properties_to_default(capture_cursor, char_targets)
+        report["cleared_paragraph_properties"] = _reset_properties_to_default(capture_cursor, CLEARABLE_PARA_PROPERTIES)
+    if walk_notes:
+        report["warning"] = " ".join(walk_notes)
+    return report
 
 
 # ---------------------------------------------------------------------------
@@ -371,9 +540,14 @@ def _apply_image_export_options(content: str, *, include_images: bool) -> str:  
     return impl(content, include_images=include_images)
 
 
-def document_to_content(model, ctx, services, max_chars=None, scope="full", range_start=None, range_end=None, *, include_images=False):
+def document_to_content(model, ctx, services, max_chars=None, scope="full", range_start=None, range_end=None, *, include_images=False, walk_warnings=None):
     from .html_export import document_to_content as impl
-    return impl(model, ctx, services, max_chars, scope, range_start, range_end, include_images=include_images)
+    return impl(model, ctx, services, max_chars, scope, range_start, range_end, include_images=include_images, walk_warnings=walk_warnings)
+
+
+def xtext_to_content(text_obj, model, ctx, services=None, *, include_images=True, max_chars=None):
+    from .html_export import xtext_to_content as impl
+    return impl(text_obj, model, ctx, services, include_images=include_images, max_chars=max_chars)
 
 
 def _ensure_html_linebreaks(content):  # pyright: ignore[reportUnusedFunction]
@@ -424,6 +598,16 @@ def replace_full_document(model, ctx, content, config_svc=None):
 def replace_single_range_with_content(model, text_range, content, ctx, config_svc=None):
     from .html_import import replace_single_range_with_content as impl
     return impl(model, text_range, content, ctx, config_svc)
+
+
+def replace_xtext_with_html(text_obj, html, config_svc=None, model=None):
+    from .html_import import replace_xtext_with_html as impl
+    return impl(text_obj, html, config_svc, model)
+
+
+def rewrite_exported_field_spans(html):
+    from .html_import import rewrite_exported_field_spans as impl
+    return impl(html)
 
 
 def content_has_markup(content):

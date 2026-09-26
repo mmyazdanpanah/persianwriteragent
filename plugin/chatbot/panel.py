@@ -79,6 +79,10 @@ class ChatSession:
         self.active_specialized_domain = None
         self.python_tool_domain = None
         self.tool_streamed_texts = {}
+        # Cached compact view (CompactionState). Duck-typed by compaction.py;
+        # never persisted. New chat / clear() must drop it or the next send
+        # would keep summarizing against a stale first_kept_index.
+        self.compaction = None
 
         if session_id:
             try:
@@ -156,6 +160,7 @@ class ChatSession:
         """Reset to just the system prompt."""
         self.messages = []
         self.document_context = ""
+        self.compaction = None
         if self.db:
             self.db.clear()
             
@@ -215,14 +220,21 @@ class QueryTextListener(BaseTextListener):
             callable(on_text),
             (raw[:40] if isinstance(raw, str) else raw),
         )
+        from plugin.chatbot.slash_commands import slash_typed_prefix
+        from plugin.chatbot.slash_popup import ENABLE_SLASH
         if callable(on_text):
+            owner = getattr(on_text, "__self__", None)
+            log.info(
+                "[SLASH-OV] query_text invoking on_query_text ENABLE_SLASH=%s id=%s",
+                bool(ENABLE_SLASH),
+                id(owner) if owner is not None else None,
+            )
             try:
                 on_text(raw)
             except Exception:
                 log.exception("[SLASH-OV] query_text on_query_text raised")
+            log.info("[SLASH-OV] query_text on_query_text returned")
         # UpdateUI after creating/mapping a TOP overlay deadlocks VCL.
-        from plugin.chatbot.slash_commands import slash_typed_prefix
-        from plugin.chatbot.slash_popup import ENABLE_SLASH
         if ENABLE_SLASH and slash_typed_prefix(raw) is not None:
             log.info("[SLASH-OV] query_text skip TEXT_UPDATED slash prefix")
             return
@@ -360,6 +372,8 @@ class SendButtonListener(SendHandlersMixin, ToolCallingMixin, BaseActionListener
         self._approval_ui_backup = None
         self._approval_query_for_engine = None
         self._dispatch_reenter: list[Any] | None = None
+        self._extracted_peer_query = ""
+        self._extracted_peer_already_appended = False
         self.slash_popup = None
         self.clear_listener = None
         self.rich_text_widget = None
@@ -928,6 +942,9 @@ class SendButtonListener(SendHandlersMixin, ToolCallingMixin, BaseActionListener
                 if scope is not None:
                     scope.cancel()
                 self._stop_requested_fallback = True
+                from plugin.doc.peer_message import drop_listener_queue
+
+                drop_listener_queue(self)
 
             case _:
                 log.debug("SendButtonListener: unhandled effect type %s", type(effect).__name__)
@@ -981,6 +998,9 @@ class SendButtonListener(SendHandlersMixin, ToolCallingMixin, BaseActionListener
                 self.dispatch(SendEvent(SendEventKind.SEND_COMPLETED))
                 if self._terminal_status:
                     self._set_status(_(self._terminal_status))
+            from plugin.doc.peer_message import kick_pending_peer_starts
+
+            kick_pending_peer_starts()
 
     def _get_doc_type_str(self, model):
         from plugin.doc.doc_type import doc_type_title_for_label
@@ -1164,6 +1184,104 @@ class SendButtonListener(SendHandlersMixin, ToolCallingMixin, BaseActionListener
         # Cast to Any to satisfy ty since SendButtonListener mixes in multiple protocol hosts
         getattr(self, "_do_send_chat_with_tools")(query_text, model, doc_type_label)
 
+    def start_extracted_peer_send(self, query_text: str, *, already_appended: bool) -> bool:
+        """Start a peer-injected turn. Caller must not hold a drain owner.
+
+        Does not read/clear Ask, setFocus, or route librarian/image.
+        """
+        from plugin.framework.async_drain_guard import get_drain_owner
+
+        if get_drain_owner() is not None:
+            return False
+        if self.sidebar_state.send.is_busy:
+            return False
+        self._extracted_peer_query = query_text
+        self._extracted_peer_already_appended = already_appended
+        self.dispatch(SendEvent(SendEventKind.EXTRACTED_SEND))
+        if not self.sidebar_state.send.is_busy:
+            return False
+        self._run_extracted_peer_drain()
+        return True
+
+    def _run_extracted_peer_drain(self) -> None:
+        """Same completion FSM as ``_run_send_drain``, without Ask-box ``_do_send``."""
+        from plugin.framework.i18n import _
+        from plugin.framework.queue_executor import SendCancellation, agent_session
+        from plugin.doc.peer_message import kick_pending_peer_starts
+
+        query_text = getattr(self, "_extracted_peer_query", "") or ""
+        already_appended = bool(getattr(self, "_extracted_peer_already_appended", True))
+        self._stop_requested_fallback = False
+        self._terminal_status = "Ready"
+        try:
+            scope = SendCancellation()
+            self._send_cancellation = scope
+            with agent_session(scope) as cancel_scope:
+                cancel_scope.bind_executor(self.queue_executor)
+                self._send_cancellation = cancel_scope
+                try:
+                    if cancel_scope.is_cancelled() or self._stop_requested_fallback:
+                        return
+                    self._do_send_extracted_peer(query_text, already_appended=already_appended)
+                finally:
+                    self._send_cancellation = None
+        except Exception as e:
+            doc_type_for_log = getattr(self, "initial_doc_type", "unknown")
+            log.exception("Extracted peer send unhandled exception [doc: %s]", doc_type_for_log)
+            self._append_response("\n\n[Error: %s]\n" % str(e))
+            self._terminal_status = "Error"
+        finally:
+            update_activity_state("")
+            if self._terminal_status == "Error":
+                self.dispatch(SendEvent(SendEventKind.ERROR_OCCURRED))
+            else:
+                # Extracted send only uses Ready or Error (unlike _do_send, which
+                # may leave ""). Always set Ready here so ty does not treat a
+                # nonempty-string check as a redundant condition.
+                self.dispatch(SendEvent(SendEventKind.SEND_COMPLETED))
+                self._set_status(_("Ready"))
+            kick_pending_peer_starts()
+
+    def _do_send_extracted_peer(self, query_text: str, *, already_appended: bool) -> None:
+        """Force chat-with-tools. No Ask read/clear, no setFocus, no librarian/image."""
+        from plugin.framework.i18n import _
+        from plugin.framework.html_stripper import StreamingHTMLStripper
+        from plugin.chatbot.chat_sidebar_mode import (
+            CHAT_MODE_CHAT,
+            mode_from_selector_with_flags,
+            sidebar_mode_flags_for_doc_type,
+        )
+
+        self._plain_text_stripper = StreamingHTMLStripper()
+        self._set_status(_("Starting..."))
+        update_activity_state("do_send")
+        if self.ensure_path_fn:
+            self.ensure_path_fn(self.ctx)
+        model = self._get_document_model()
+        if not model:
+            self._append_response("\n" + _("[No compatible LibreOffice document (Writer, Calc, or Draw) found in the active window.]") + "\n")
+            self._terminal_status = "Error"
+            return
+        doc_type_label = getattr(self, "cached_doc_type", None)
+        if not doc_type_label or doc_type_label == "unknown":
+            self._append_response("\n[Internal Error: Could not identify document type.]\n")
+            self._terminal_status = "Error"
+            return
+        flags = getattr(self, "sidebar_mode_flags", None) or sidebar_mode_flags_for_doc_type(doc_type_label or "writer")
+        sidebar_mode = mode_from_selector_with_flags(self.chat_mode_selector, flags)
+        if sidebar_mode != CHAT_MODE_CHAT:
+            self._append_response(
+                "\n" + _("[Peer send requires Chat mode on this sidebar.]") + "\n"
+            )
+            self._terminal_status = "Error"
+            return
+        if not already_appended:
+            self.session.add_user_message(query_text)
+            self._append_response(query_text, role="user")
+        getattr(self, "_do_send_chat_with_tools")(
+            query_text, model, doc_type_label, skip_append_user=True
+        )
+
     # _do_send_direct_image is provided by SendHandlersMixin.
 
     # _do_send_chat_with_tools is provided by ToolCallingMixin.
@@ -1196,6 +1314,12 @@ class SendButtonListener(SendHandlersMixin, ToolCallingMixin, BaseActionListener
         if scope is not None:
             scope.cancel()
         self._stop_requested_fallback = True
+        try:
+            from plugin.doc.peer_message import drop_listener_queue
+
+            drop_listener_queue(self)
+        except Exception as e:
+            log.debug("SendButtonListener.disposing: drop peer queue: %s", e)
         try:
             from plugin.framework.event_bus import global_event_bus
 

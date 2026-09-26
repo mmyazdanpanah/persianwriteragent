@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: PACKAGE VERSION\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-09-04 14:15-0400\n"
+"POT-Creation-Date: 2026-09-14 16:20-0400\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: Latvian <LL@li.org>\n"
@@ -73,9 +73,28 @@ msgstr "Neizdevās atrast piezīmju grāmatiņas šūnu šim vadīklas elementam
 msgid "Open a Writer document first."
 msgstr "Vispirms atveriet Writer dokumentu."
 
-#: plugin/notebook/writer_importer.py
+#: plugin/notebook/notebook_controls.py
 msgid "Run code cell"
 msgstr "Izpildīt koda šūnu"
+
+#: plugin/embeddings/search_ui.py
+msgid "just now"
+msgstr "tikko"
+
+#: plugin/embeddings/search_ui.py
+#, python-brace-format
+msgid "{0}m ago"
+msgstr "pirms {0}m"
+
+#: plugin/embeddings/search_ui.py
+#, python-brace-format
+msgid "{0}h ago"
+msgstr "pirms {0}h"
+
+#: plugin/embeddings/search_ui.py
+#, python-brace-format
+msgid "{0}d ago"
+msgstr "pirms {0}d"
 
 #: plugin/embeddings/search_ui.py
 msgid "Cache Status: No active document"
@@ -96,20 +115,6 @@ msgstr "Kešatmiņas statuss: Nav izveidota (lancedb)"
 #: plugin/embeddings/search_ui.py
 msgid "Cache Status: Not built"
 msgstr "Kešatmiņas statuss: Nav izveidota"
-
-#: plugin/embeddings/search_ui.py
-msgid "just now"
-msgstr "tikko"
-
-#: plugin/embeddings/search_ui.py
-#, python-brace-format
-msgid "{0}m ago"
-msgstr "pirms {0}m"
-
-#: plugin/embeddings/search_ui.py
-#, python-brace-format
-msgid "{0}h ago"
-msgstr "pirms {0}h"
 
 #: plugin/embeddings/search_ui.py
 #, python-brace-format
@@ -418,7 +423,8 @@ msgid "Status:"
 msgstr "Statuss:"
 
 #: plugin/calc/python/cell_editor_ui.py plugin/chatbot/panel_wiring.py
-#: plugin/scripting/editor_ui_strings.py plugin/xdl_strings.py
+#: plugin/chatbot/panel.py plugin/scripting/editor_ui_strings.py
+#: plugin/xdl_strings.py
 msgid "Ready"
 msgstr "Gatavs"
 
@@ -560,13 +566,13 @@ msgstr "Ievietotie attēli"
 #: plugin/calc/python/geometric_recalc.py
 #, python-format
 msgid ""
-"Geometric Recalc Order skipped sheet '%s': found %s or more Python cells "
-"(discovery cap). The sheet was left unchained so a partial list is not "
-"treated as complete."
+"Geometric Recalc Order skipped sheet '%(sheet)s': found %(cap)s or more "
+"Python cells (discovery cap). The sheet was left unchained so a partial list "
+"is not treated as complete."
 msgstr ""
-"Ģeometriskās pārrēķināšanas secība izlaida lapu '%s': atrasts %s vai vairāk "
-"Python šūnu (atklāšanas limits). Lapa tika atstāta nesaistīta, lai nepilnīgs "
-"saraksts netiktu uzskatīts par pilnīgu."
+"Ģeometriskā pārrēķina secība izlaida lapu '%(sheet)s': atrasts %(cap)s vai "
+"vairāk Python šūnu (atklāšanas limits). Lapa tika atstāta nesaistīta, lai "
+"nepilnīgs saraksts netiktu uzskatīts par pilnīgu."
 
 #: plugin/calc/excel_py_convert/auto_open.py
 #, python-brace-format
@@ -1329,6 +1335,11 @@ msgid ""
 msgstr ""
 "[Modelis {0} neatbalsta vietējo audio. Lūdzu, iestatījumos atlasiet STT "
 "modeli.]"
+
+#: plugin/chatbot/panel.py
+msgid "[Peer send requires Chat mode on this sidebar.]"
+msgstr ""
+"[Vienādranga sūtīšanai šajā sānjoslā ir nepieciešams tērzēšanas režīms.]"
 
 #: plugin/chatbot/web_research_chat.py
 #, python-format
@@ -3160,6 +3171,20 @@ msgstr "Calc izklājlapu rīki"
 
 msgid "Max Rows Display"
 msgstr "Maksimālais rindu skaits"
+
+msgid "Cache Excel siblings as ODS"
+msgstr "Kešot Excel radniecīgos failus kā ODS"
+
+msgid ""
+"Convert sibling .xlsx/.xls to writeragent_ods_cache/ beside the folder so "
+"repeated DuckDB SQL reuses the ODS. Native .ods and the live workbook are "
+"never cached. Set calc.ods_cache_enabled false in writeragent.json to "
+"disable."
+msgstr ""
+"Konvertēt radniecīgos .xlsx/.xls failus uz writeragent_ods_cache/ blakus "
+"mapei, lai atkārtota DuckDB SQL izmantošana atkārtoti izmantotu ODS. "
+"Vietējie .ods faili un aktīvā darbgrāmata nekad netiek kešoti. Iestatiet "
+"calc.ods_cache_enabled false failā writeragent.json, lai atspējotu."
 
 msgid "Sidebar"
 msgstr "Sānjosla"

@@ -111,6 +111,20 @@ def _format_list_to_table(data: list, *, headers: list | None = None) -> str:
 
 
 
+
+def is_shape_tool_status_result(result: Any) -> bool:
+    """True for shape_upsert/edit status dicts that must not be HTML-dumped into Writer."""
+    if not isinstance(result, dict) or not result:
+        return False
+    if "geometry_applied" in result or "shape_count_after" in result or "custom_shape_engine" in result:
+        return True
+    msg = str(result.get("message") or "")
+    if result.get("status") == "ok" and ("index" in result or "page" in result):
+        if msg.startswith("Created ") or msg == "Shape updated":
+            return True
+    return False
+
+
 def format_result_for_writer(result: Any) -> str:
     """Format the Python execution result for insertion into Writer.
 
@@ -171,6 +185,12 @@ def insert_result_into_calc(doc: Any, uno_ctx: Any, result: Any) -> None:
     """
     try:
         if result is None:
+            return
+        if is_shape_tool_status_result(result):
+            log.debug(
+                "Skipping Calc result insert for shape tool status dict (keys=%s)",
+                sorted(result.keys()) if isinstance(result, dict) else type(result).__name__,
+            )
             return
 
         # Determine anchor cell from selection
@@ -359,6 +379,33 @@ def execute_and_insert_result(
     bindings: dict[str, Any] | None = None
     from plugin.scripting.helper_domain import parse_run_import_call_spec, script_uses_run_import
 
+    if is_writer(doc) and (script_uses_run_import(code, run_name="run_persian") or "writeragent.persian.scripts" in code):
+        from plugin.scripting.helper_domain import prepend_run_import_document_bindings
+
+        # Persian's shipped helper is intentionally a single direct operation:
+        # run_persian(text). Unlike multi-helper domains, there is no helper
+        # selector to parse or validate here.
+        try:
+            controller = doc.getCurrentController()
+            selection = controller.getSelection() if controller is not None else None
+            if selection is None or not hasattr(selection, "getCount") or selection.getCount() == 0:
+                return rps_error_outcome(_("Select Persian text before running the Persian helper."), t0=t0)
+
+            selected_range = selection.getByIndex(0)
+            selected_text = str(selected_range.getString() or "")
+            if not selected_text.strip():
+                return rps_error_outcome(_("Select Persian text before running the Persian helper."), t0=t0)
+
+            exec_code = prepend_run_import_document_bindings(
+                code,
+                bindings={"text": selected_text},
+            )
+        except Exception as exc:
+            return rps_error_outcome(
+                _("Could not read the selected Writer text: {error}").format(error=str(exc)),
+                t0=t0,
+            )
+
     if is_writer(doc) and (script_uses_run_import(code, run_name="run_text_analytics") or "writeragent.scripting.text_analytics" in code):
         from plugin.scripting.helper_domain import prepend_run_import_document_bindings
         from plugin.scripting.text_analytics import resolve_text_analytics_document_inputs
@@ -452,6 +499,18 @@ def execute_and_insert_result(
     # and prevents it from running for this structured result type.
     if doc and is_writer(doc) and isinstance(result_data, dict) and "changes" in result_data:
         changes = result_data.get("changes")
+        if isinstance(changes, list) and not changes:
+            # A clean selection is a successful no-op. Do not fall through to
+            # generic Writer result insertion, which would replace the
+            # selection with the textual representation of {"changes": []}.
+            return {
+                "ok": True,
+                "status_ok_text": _("No Persian changes needed. (took {time})").format(
+                    time=formatted_time
+                ),
+                "stdout": stdout,
+                "result": result_data,
+            }
         if isinstance(changes, list) and changes:
             try:
                 from plugin.persian.tracked_replace import apply_tracked_replacements
@@ -516,22 +575,36 @@ def execute_and_insert_result(
                     return post
 
             if is_calc(doc):
-                insert_result_into_calc(doc, ctx, result_data)
-            elif is_writer(doc):
-                formatted = format_result_for_writer(result_data)
-                if formatted:
-                    from plugin.writer.format import run_writer_mutation_with_optional_review
-
-                    run_writer_mutation_with_optional_review(
-                        doc,
-                        ctx,
-                        lambda: insert_content_at_position(doc, ctx, formatted, "selection"),
+                if is_shape_tool_status_result(result_data):
+                    log.debug(
+                        "Skipping Calc result insert for shape tool status dict (keys=%s)",
+                        sorted(result_data.keys()) if isinstance(result_data, dict) else type(result_data).__name__,
                     )
+                else:
+                    insert_result_into_calc(doc, ctx, result_data)
+            elif is_writer(doc):
+                if is_shape_tool_status_result(result_data):
+                    log.debug(
+                        "Skipping Writer result insert for shape tool status dict (keys=%s)",
+                        sorted(result_data.keys()) if isinstance(result_data, dict) else type(result_data).__name__,
+                    )
+                else:
+                    formatted = format_result_for_writer(result_data)
+                    if formatted:
+                        from plugin.writer.format import run_writer_mutation_with_optional_review
+
+                        run_writer_mutation_with_optional_review(
+                            doc,
+                            ctx,
+                            lambda: insert_content_at_position(doc, ctx, formatted, "selection"),
+                        )
             elif is_draw(doc):
                 insert_result_into_draw(doc, ctx, result_data)
             else:
                 return {"ok": False, "message": _("Unsupported document type for result insertion. (took {time})").format(time=formatted_time)}
         except Exception as e:
+            # Logging (type/str/repr + traceback) lives in rps_insert_failed_outcome —
+            # previously this catch painted the RPS dialog with no debug-log line.
             return rps_insert_failed_outcome(e, t0=t0)
 
     if stdout:

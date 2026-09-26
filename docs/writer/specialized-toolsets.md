@@ -233,13 +233,13 @@ flowchart LR
 **File:** `[plugin/writer/specialized.py](../../plugin/writer/specialized.py)`
 
 - Tool name: `delegate_to_specialized_writer_toolset`.
-- Parameters: `domain` (enum aligned with `_AVAILABLE_DOMAINS`), `task` (natural language).
+- Parameters: `domain` (enum aligned with `_AVAILABLE_DOMAINS`), `task` (natural language; detailed rules may be ~2K–8K). Sidebar chat shows a 120-char preview (`_truncate_delegate_task` in [`tool_loop_state.py`](../../plugin/chatbot/tool_loop_state.py)); the specialized agent receives the **full** `task`.
 - `tier = "core"`, `long_running = True`, `is_async()` → **True** so the sidebar drain loop is not blocked.
 - Tool gathering:
   - `registry.get_tools(filter_doc_type=False, exclude_tiers=())` — **all** tiers, no doc filter (needed so specialized tools are discoverable server-side).
   - Filter to `ToolWriterSpecialBase` with matching `specialized_domain`, plus `specialized_workflow_finished`.
 - Depending on the `USE_SUB_AGENT` toggle, it either uses `ToolCallingAgent` + `WriterAgentSmolModel` to execute the task autonomously, or calls `ctx.set_active_domain_callback(domain)` to switch the context for the main model.
-- **Sub-agent UNO threading (USE_SUB_AGENT=True):** the gateway runs on a background worker (`is_async()`). Before the smol loop starts, UNO scaffolding (`ToolRegistry.get_tools(doc=…)`, shapes canvas context, document-research open-doc list, embeddings index wakeup) is marshalled via `execute_on_main_thread` in [`plugin/doc/specialized_base.py`](../../plugin/doc/specialized_base.py). Sync domain tools are wrapped with `SmolToolAdapter` so each tool call marshals to the main thread by default; async tools must marshal UNO internally (e.g. `image_generate`, `delegate_read_document`). See [../framework/uno-thread-safety.md](../framework/uno-thread-safety.md).
+- **Sub-agent UNO threading (USE_SUB_AGENT=True):** the gateway runs on a background worker (`is_async()`). Before the smol loop starts, UNO scaffolding (`ToolRegistry.get_tools(doc=…)`, shapes canvas context, document-research open-doc list, embeddings index wakeup) is marshalled via `execute_on_main_thread` in [`plugin/doc/specialized_base.py`](../../plugin/doc/specialized_base.py). `ToolContext.active_page_index` via `DrawBridge` is marshalled in [`plugin/chatbot/tool_loop_actions.py`](../../plugin/chatbot/tool_loop_actions.py) `build_tool_execute_fn` (same hop is required for Draw/Impress async gateways). Sync domain tools are wrapped with `SmolToolAdapter` so each tool call marshals to the main thread by default; async tools must marshal UNO internally (e.g. `image_generate`, `delegate_read_document`). See [../framework/uno-thread-safety.md](../framework/uno-thread-safety.md).
 
 ### 3.3 System prompt guidance
 
@@ -254,7 +254,7 @@ Some Writer tools intentionally use the default main-chat tier (**`tier = "core"
 - **Track changes:** `[plugin/writer/tracking.py](../../plugin/writer/tracking.py)` — `track_changes_start` / `stop` / `list` / `show`, plus `manage_tracked_changes` (accept/reject one or all).
 - **Style apply:** `[plugin/writer/styles.py](../../plugin/writer/styles.py)` — `apply_style` subclasses [`plugin.framework.tool.ToolBase`](../../plugin/framework/tool.py) with the default **`core`** tier. Specialized style tools (`style_list`, `style_get_info`, `style_update`, …) stay under `ToolWriterStyleBase`.
 
-**Style discovery** (`style_list`, `style_get_info`) remains under `ToolWriterStyleBase` (specialized) so the main list does not duplicate large style catalog traffic; the prompt steers toward delegation or other discovery when needed.
+**Style discovery** (`style_list`, `style_get_info`) remains under `ToolWriterStyleBase` (specialized) so the main list does not duplicate large style catalog traffic; the prompt steers toward delegation or other discovery when needed. `style_get_info(family=PageStyles)` dispatches in-process to the same `get_page_style_properties` reader as `page_get_style_properties` (both entry points stay).
 
 **Naming:** Specialized Writer tools use `domain_verb` names (`image_list`, `bookmark_create`, `nav_goto_page`, `shape_delete`, …), matching `fields_*` / `footnotes_*` / `indexes_*`. Core tools keep stable `verb_noun` names (`get_document_content`, `apply_style`, `add_comment`, `get_image`, …). Shared Draw/Calc/Writer tools use one name (Writer does not invent a second). No tool-name aliases. Graphic listing is `image_list` (`domain=images`); there is no `shape_list_images`. Comment workflow is four skinny tools (`comment_scan_tasks`, `comment_workflow_get`, `comment_workflow_set`, `comment_check_stop`), not a fat `comment_workflow`.
 
@@ -280,23 +280,23 @@ Some Writer tools intentionally use the default main-chat tier (**`tier = "core"
 | Domain / area               | WriterAgent status      | Module & tools                                                                                                                                                                                                                                     | Extended LO API (gaps)                                                                                 |
 | --------------------------- | ----------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------ |
 | **Styles**                  | ✅ Implemented           | `styles.py`: StyleList, StyleGetInfo, StyleUpdate, StyleCreate, StyleImport; ApplyStyle (core tier, main chat)                                                                                                                                                          | Advanced typography: ligatures/special chars, kerning/tracking, OpenType features, font embedding      |
-| **Page**                    | ✅ Implemented           | `page.py`: PageGet/PageSetStyleProperties, PageGet/PageSetHeaderFooterText, PageGet/PageSetColumns, PageInsertBreak                                                                                                                                                | Custom page layouts; page backgrounds (see Watermark row)                                              |
+| **Page**                    | ✅ Implemented           | `page.py`: PageGet/PageSetStyleProperties, PageGet/PageSetHeaderFooterText (HTML get/set via the body XHTML/import stack), PageGet/PageSetColumns, PageInsertBreak                                                                                                                                                | Custom page layouts; page backgrounds (see Watermark row)                                              |
 | **Text frames**             | ✅ Implemented           | `textframes.py`: FrameList, FrameGetInfo, FrameSetProperties                                                                                                                                                                          | —                                                                                                      |
 | **Embedded OLE**            | ✅ Implemented           | `embedded.py`: EmbeddedInsert, EmbeddedEdit                                                                                                                                                                                                        | —                                                                                                      |
-| **Images**                  | ✅ Implemented           | `images.py`: ImageGenerate (async), ImageList/ImageGetInfo/ImageSetProperties, ImageDownload, ImageInsert/ImageDelete/ImageReplace                                                                                                                                                  | Advanced image editing                                                                                 |
+| **Images**                  | ✅ Implemented           | `images.py`: ImageGenerate (async; edit selected via `source_image='selection'`), ImageList/ImageGetInfo/ImageSetProperties, ImageDownload, ImageInsert/ImageDelete/ImageReplace                                                                                                                                                  | Advanced image editing                                                                                 |
 | **Shapes**                  | ✅ Implemented           | `specialized/shapes.py`: `shape_upsert`, `shape_delete`, `shape_summary`, `shape_connect`, `shape_group` (Draw lineage). List graphics via `image_list` (`domain=images`).                                                                                                                                  | —                                                                                                      |
 | **Charts**                  | ✅ Specialized           | `manage_charts` only via `domain=charts` ([`plugin/calc/charts.py`](../../plugin/calc/charts.py); Writer/Draw wrappers). Skinny list/info/upsert/delete are Dummy backends. | Full 3D / per-app schema split — see `ManageCharts` docstring.                                      |
-| **Indexes**                 | ✅ Implemented           | `indexes.py`: IndexesUpdateAll, IndexesList, IndexesCreate, IndexesAddMark                                                                                                                                                                         | —                                                                                                      |
+| **Indexes**                 | ✅ Implemented           | `indexes.py`: IndexesUpdateAll, IndexesList, IndexesListCites, IndexesCreate, IndexesAddMark (`kind=bibliography` cite = `TextField.Bibliography`)                                                                                                  | FieldMaster.Bibliography fat settings (brackets / numbering / sort) parked                             |
 | **Fields**                  | ✅ Implemented           | `fields.py`: FieldsUpdateAll, FieldsList, FieldsDelete, FieldsInsert                                                                                                                                                                               | User-defined variables, conditional text, DB fields overlap LO; distinct from **Forms** (business) row |
 | **Tracking**                | ✅ Implemented           | `tracking.py`: TrackChangesStart/Stop/List/Show, ManageTrackedChanges (accept/reject one or all), comment insert/list/delete                                                                                                                       | Document comparison; version control / integration (not agent)                                         |
 | **Bookmarks**               | ✅ Implemented           | `bookmark_tools.py`: BookmarkList/BookmarkCleanup/BookmarkCreate/BookmarkDelete/BookmarkRename/BookmarkGet                                                                                                                                                                                 | —                                                                                                      |
 | **Footnotes / endnotes**    | ✅ Implemented           | `footnotes.py`: Insert, List, Edit, Delete, SettingsGet/Update                                                                                                                                                                                     | —                                                                                                      |
-| **Tables**                  | ✅ Implemented           | HTML path for cell *content*, plus `specialized/tables.py` UNO toolset via `domain=tables`: `table_list`, `table_get_cells`, `table_set_cell`, `manage_table_structure` (insert/delete row or column)                                           | Merge/split cells; nested tables; per-cell formatting                                                  |
+| **Tables**                  | ✅ Implemented           | HTML path for cell *content*, plus `specialized/tables.py` UNO toolset via `domain=tables`: `table_list`, `table_get_cells` (host cells return host paragraphs only), `table_set_cell` (host cells rewrite paragraphs and keep nested tables), `manage_table_structure` (insert/delete row or column), `table_insert` (optional `parent`+`cell` to nest), `table_delete` (by name; nested or top-level). HTML export copies nested `TextTable`s; `apply_document_content` refuses a host-cell wipe. | Merge/split cells; per-cell formatting; surgical HTML rewrite of a host cell that keeps the inner table — see [§5.4](#54-future-work-writer-nested-tables) |
 | **Structural navigation**   | ✅ Implemented           | `structural.py` (`section_list`, `nav_goto_page`, `section_read`), `navigation.py` (`nav_heading`, `nav_surroundings`), `outline.py` (`nav_heading_children`); delegate `domain=structural`. Core `get_document_tree` includes document stats (`stats` object); `get_document_stats` was removed. `get_page_objects` stays core. | Technical docs: cross-refs, callouts, revision marks, change bars (not agent)                          |
 | **Sections**                | ✅ Partially implemented | `structural.py`: `section_list`, `section_read` (read-only). Create/edit/delete and per-section property setters not implemented. See [§5.3 Future work: Sections specialized toolset](#53-future-work-sections-specialized-toolset).             | Create/insert `TextSection`; `TextColumns`, `IsVisible`/`Condition`, `IsProtected` (+ password), `SectionLeft/RightMargin`, `BackColor`/`BackGraphic*`, `FileLink`/`LinkRegion`, `DDECommand*`, per-section footnote/endnote scoping; nesting; delete/rename |
 | **Forms**                   | ✅ Partially implemented | 'forms.py'                                                                                                                                                                                                                                         | remaining: DB integration                                                                              |
 | **Mail merge**              | ✅ Implemented           | `specialized/mail_merge.py` (`domain=mail_merge`): `mail_merge_list_sources`, `mail_merge_register_source` (`.ods`/`.csv`/`.odb` files), `mail_merge_insert_field`, `mail_merge_list_fields`, `mail_merge_run` (file / printer / email) | Labels; envelopes; live JDBC/ODBC server datasources (file registration only) |
-| **Bibliography**            | ❌ Not implemented       | No module                                                                                                                                                                                                                                          | Bib DB; citation styles; insertion/formatting; bibliography generation; reference managers             |
+| **Bibliography**            | ✅ v1 via indexes overload | No `domain=bibliography`. See [bibliography-via-indexes.md](bibliography-via-indexes.md). `indexes_add_mark kind=bibliography`, `indexes_list_cites`, `indexes_create kind=bibliography`, `indexes_update_all`. | FieldMaster fat settings; Zotero v2; CSL appearance; Bib DB CRUD |
 | **Watermark**               | ❌ Not implemented       | No module                                                                                                                                                                                                                                          | Text/image watermarks; page backgrounds; positioning/transparency                                      |
 | **AutoText**                | ❌ Not implemented       | No module                                                                                                                                                                                                                                          | —                                                                                                      |
 | **TOC enhancement**         | ❌ Not implemented       | Basic TOC via indexes; richer multi-level/style TBD                                                                                                                                                                                                | —                                                                                                      |
@@ -310,6 +310,17 @@ Some Writer tools intentionally use the default main-chat tier (**`tier = "core"
 
 
 `tables` now has a dedicated UNO toolset (`ToolWriterTableBase` in `specialized/tables.py`) for structural row/column/cell operations, alongside the core HTML path used for table *content*. **Math** still uses the core HTML insert path, not a `specialized_domain`. Rows above combine specialized domains, planned gaps, and LO-wide areas not covered by WriterAgent tools.
+
+For Writer text tables, `table_list` and `table_get_cells` report `nesting` (direct parent
+table/cell; top-level tables return null parent fields) and `nested_in_cells` (this table's
+host cells that contain nested tables). `table_get_cells` host slots are the host cell's own
+paragraphs, not concatenated inner-table text. `table_set_cell` on a host cell rewrites
+those paragraph siblings and keeps the nested table (`setString` would destroy it).
+`manage_table_structure` delete refuses a host row/column. `table_insert` with optional
+`parent` + `cell` nests into that host cell (at the cell end). `table_delete` removes a
+table by name (nested or top-level); hosted children go with it. Do not reuse
+`table_set_cell` as a delete. `apply_document_content` on a host-cell range is refused
+(same wipe). Remaining gaps: [§5.4](#54-future-work-writer-nested-tables).
 
 ### 5.2 Core infrastructure
 
@@ -405,6 +416,47 @@ Deferred capabilities (file link, DDE, footnote scoping, background, rename) sho
 - TextSection service: [api.libreoffice.org TextSection](https://api.libreoffice.org/docs/idl/ref/servicecom_1_1sun_1_1star_1_1text_1_1TextSection.html).
 - User-facing guide: [help.libreoffice.org "Using Sections"](https://help.libreoffice.org/latest/en-US/text/swriter/guide/sections.html).
 - Existing read tools: [`plugin/writer/structural.py`](../../plugin/writer/structural.py).
+
+### 5.4 Writer nested tables — status and remaining work
+
+Create/delete of nested `TextTable`s is implemented (`table_insert` with `parent`+`cell`,
+`table_delete` by name). The follow-on holes from that work are now closed as follows.
+
+**Shipped**
+
+- **Host-cell text beside a nested table.** `table_set_cell` enumerates the cell’s
+  `XText` and rewrites **direct** paragraph siblings only (first para gets the text;
+  extras are cleared; no paragraphs → `insertString` at `getStart()`). It does not
+  `setString` the whole host cell. Do not use `table_set_cell` as a delete
+  (`table_delete` by name).
+- **Parent `matrix` flatten.** `table_get_cells` returns host-paragraph text only for a
+  host cell (`nested_in_cells` remains the flag). An empty host with only a nested table
+  is `""`, not concatenated inner-table text.
+- **HTML export copies nested `TextTable`s.** `_copy_cell_xtext` in
+  [`plugin/writer/html_export.py`](../../plugin/writer/html_export.py) recreates an
+  in-cell table via `_copy_table(..., dest_text=dest_cell)` and recurses. Images in
+  cells are still not copied there.
+- **`apply_document_content` refuses a host-cell wipe.** Search/replace and selection
+  clear raise if the range lives in a cell that hosts a nested table. Use
+  `table_set_cell` / `table_*`. `target='full_document'` is not policed (a full
+  rewrite is supposed to replace the document). Body search-replace is not treated as
+  a host-cell wipe just because the document has top-level tables.
+- **Nesting through a frame or section.** Discovery walks the host cell’s
+  `XEnumeration` and as-character `TextFrame` portions (a frame in a cell is
+  not a sibling of the paragraphs — probed). The parent is still that
+  **host cell**. Table-in-table stays direct parent only — no ancestry walk.
+  A frame that is not in the cell’s XText is not hosted there;
+  `table_set_cell` then uses `setString` and still destroys that anchored
+  frame (and any table inside it).
+
+**Still open / out of scope**
+
+- Merge/split cells; per-cell formatting.
+- `table_set_cell` on a host cell does not rewrite paragraphs **inside** a frame or
+  section (those are a different `XText`).
+- No surgical HTML rewrite of a host cell that keeps the inner table — the apply path
+  refuses instead of trying to preserve through `setString("")`.
+- Cell images are still omitted from `_copy_cell_xtext`.
 
 ### 6.9 Feature: Structural Integrity & Object Preservation
 

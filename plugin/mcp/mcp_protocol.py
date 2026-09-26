@@ -33,7 +33,13 @@ from dataclasses import dataclass
 
 from plugin.framework.uno_context import get_runtime_uid, normalize_doc_url
 from plugin.framework.queue_executor import QueueExecutor
-from plugin.framework.errors import WriterAgentException, safe_json_loads
+from plugin.framework.errors import (
+    WriterAgentException,
+    _resolve_exception_message,
+    format_error_payload,
+    make_tool_error,
+    safe_json_loads,
+)
 from plugin.mcp.cors import send_cors_headers
 from plugin.mcp.http_trace import log_mcp_transport_entry, log_unsupported_protocol_version
 from plugin.mcp.server import write_http_empty, write_http_json
@@ -64,8 +70,33 @@ def _document_echo_payload(doc):
 
 # Chat keeps specialized + mcp off the default list (_DEFAULT_EXCLUDE_TIERS in tool.py).
 # MCP advertise policy is forked: keep mcp-tier tools; hide specialized except in direct_flat.
-MCP_DELEGATE_EXCLUDE_TIERS = frozenset({"specialized", "specialized_control"})
-MCP_DIRECT_FLAT_EXCLUDE_TIERS = frozenset({"specialized_control"})
+# tier="chat" (send_peer_work / send_peer_result) stays off both MCP lists.
+MCP_DELEGATE_EXCLUDE_TIERS = frozenset({"specialized", "specialized_control", "chat"})
+MCP_DIRECT_FLAT_EXCLUDE_TIERS = frozenset({"specialized_control", "chat"})
+
+
+def drop_unavailable_domains(schemas, registry, ctx):
+    """Remove tools whose specialized domain cannot run on this install.
+
+    The discovery catalog has always hidden such a domain; without this the flat tool list
+    advertised its tools anyway, so the same install offered a capability in one exposure mode and
+    not the other. Only domains with a known prerequisite are affected — everything else passes
+    through untouched.
+    """
+    if ctx is None:
+        return schemas
+    from plugin.vision.vision_availability import specialized_domain_available
+    kept = []
+    for schema in schemas:
+        name = schema.get("name") if isinstance(schema, dict) else None
+        domain = None
+        if name:
+            tool = registry.get(name)
+            domain = getattr(tool, "specialized_domain", None) if tool is not None else None
+        if domain and not specialized_domain_available(str(domain), ctx):
+            continue
+        kept.append(schema)
+    return kept
 
 
 @dataclass
@@ -165,6 +196,14 @@ def build_initialize_instructions(mode: str, *, now: datetime.datetime | None = 
 
 def _get_request_protocol_version(handler) -> str | None:
     for name in ("Mcp-Protocol-Version", "mcp-protocol-version", "MCP-Protocol-Version"):
+        value = handler.headers.get(name)
+        if value:
+            return value.strip()
+    return None
+
+
+def _get_request_session_id(handler) -> str | None:
+    for name in ("Mcp-Session-Id", "mcp-session-id", "MCP-Session-Id"):
         value = handler.headers.get(name)
         if value:
             return value.strip()
@@ -293,8 +332,46 @@ class BusyError(WriterAgentException):
     code: str = "SERVER_BUSY"
 
 
-# Session management
+# One session id for the whole soffice process, shared by every MCP client.
+# Minted on first successful initialize; never rotated; never cleared on DELETE.
 _mcp_session_id = None
+_mcp_session_lock = threading.Lock()
+_SESSION_EXPIRED_MSG = "Session expired (server restarted). Call initialize again."
+
+
+def _mint_session_id_once() -> str:
+    """Assign uuid4 on first successful initialize; later calls keep that id."""
+    global _mcp_session_id
+    with _mcp_session_lock:
+        if _mcp_session_id is None:
+            _mcp_session_id = str(uuid.uuid4())
+        return _mcp_session_id
+
+
+def _reject_stale_session(handler, msg=None) -> bool:
+    """Write HTTP 404 when Mcp-Session-Id is present and not the process id.
+
+    Spec clients re-initialize on 404, not 409 or silent success. No header is
+    allowed (CLI / first contact). A single ``initialize`` is always allowed —
+    that is recovery after restart. A stale header on a batch 404s the whole
+    request so we never process some items.
+    """
+    incoming = _get_request_session_id(handler)
+    if incoming is None:
+        return False
+    if isinstance(msg, dict) and msg.get("method") == "initialize":
+        return False
+    if incoming == _mcp_session_id:
+        return False
+    req_id = msg.get("id") if isinstance(msg, dict) else None
+    log.info("[MCP] stale session id %r (current=%r) — 404", incoming, _mcp_session_id)
+    write_http_json(
+        handler,
+        404,
+        wire_types.jsonrpc_failure(req_id, wire_types.INVALID_REQUEST, _SESSION_EXPIRED_MSG),
+        extra_headers=lambda h: _send_mcp_response_headers(h, session_id=_mcp_session_id),
+    )
+    return True
 
 
 class MCPProtocolHandler:
@@ -332,6 +409,8 @@ class MCPProtocolHandler:
     def handle_mcp_sse(self, handler):
         """GET /mcp — SSE notification stream (keepalive)."""
         log_mcp_transport_entry(handler, "mcp-sse")
+        if _reject_stale_session(handler):
+            return
         accept = handler.headers.get("Accept", "")
         if "text/event-stream" not in accept:
             self._send_json(handler, 406, {"error": "Not Acceptable: must Accept text/event-stream"})
@@ -344,12 +423,25 @@ class MCPProtocolHandler:
         self._run_sse_keepalive_loop(handler)
 
     def handle_mcp_delete(self, handler):
-        """DELETE /mcp — session termination."""
+        """DELETE /mcp — not supported: one process-wide session must stay alive."""
+        # Bugfix: Nelson a3d69e68 / GitHub #38. Streamable HTTP lets a client
+        # DELETE the session URL to end it. WriterAgent has one session id for
+        # the whole soffice process, shared by every client. Returning 200
+        # claimed the session ended when it did not; clearing the id would cut
+        # every other client off. 405 tells spec clients the session is still
+        # here. They recover on 404 (stale id after restart), not 409 or 200.
         log_mcp_transport_entry(handler, "mcp")
-        write_http_empty(handler, 200, extra_headers=_send_mcp_response_headers)
+
+        def _headers(h):
+            _send_mcp_response_headers(h)
+            h.send_header("Allow", "GET, POST, OPTIONS")
+
+        write_http_empty(handler, 405, extra_headers=_headers)
 
     def handle_sse_stream(self, handler):
         """GET /sse — legacy SSE transport (keepalive only)."""
+        if _reject_stale_session(handler):
+            return
         try:
             handler.send_response(200)
             handler.send_header("Content-Type", "text/event-stream")
@@ -410,19 +502,7 @@ class MCPProtocolHandler:
         if body is None:
             return
         document_url = handler.headers.get("X-Document-URL") or None
-        msg = body
-        method = msg.get("method", "?") if isinstance(msg, dict) else "batch"
-        req_id = msg.get("id") if isinstance(msg, dict) else None
-        log.info("[SSE] POST <<< %s (id=%s)", method, req_id)
-
-        result = self._process_jsonrpc(msg, document_url=document_url)
-        if result is None:
-            write_http_empty(handler, 202, extra_headers=_send_mcp_response_headers)
-            return
-
-        status, response = result
-        log.info("[SSE] POST >>> %s (id=%s) -> %d", method, req_id, status)
-        write_http_json(handler, status, response, extra_headers=_send_mcp_response_headers)
+        self._handle_mcp(body, handler, document_url=document_url)
 
     # ── Simple handlers (body, headers, query) -> (status, dict) ─────
 
@@ -480,11 +560,12 @@ class MCPProtocolHandler:
 
     def _handle_mcp(self, msg, handler, document_url=None):
         """Route MCP JSON-RPC request(s) — single or batch."""
-        global _mcp_session_id
-
         method = msg.get("method", "?") if isinstance(msg, dict) else "batch"
         req_id = msg.get("id") if isinstance(msg, dict) else None
         log.info("[MCP] <<< %s (id=%s)", method, req_id)
+
+        if _reject_stale_session(handler, msg):
+            return
 
         is_initialize = isinstance(msg, dict) and msg.get("method") == "initialize"
 
@@ -510,7 +591,7 @@ class MCPProtocolHandler:
         status, response = result
 
         if is_initialize and status == 200:
-            _mcp_session_id = str(uuid.uuid4())
+            _mint_session_id_once()
 
         log.info("[MCP] >>> %s (id=%s) -> %d", method, req_id, status)
         write_http_json(
@@ -591,6 +672,18 @@ class MCPProtocolHandler:
                 exclude_tiers=exclude_tiers,
                 **doc_filter,
             )
+
+            # A domain whose backend is not configured is hidden from the discovery catalog; the
+            # flat list has to agree, or the same install advertises a capability in one exposure
+            # mode and not the other. This block already runs on the main thread, which get_ctx
+            # requires.
+            from plugin.framework.uno_context import get_ctx
+
+            try:
+                uno_ctx = get_ctx()
+            except Exception:
+                uno_ctx = None  # no context to ask -> advertise, same as the catalog does
+            schemas = drop_unavailable_domains(schemas, self.tool_registry, uno_ctx)
 
             if mode == "direct_flat":
                 # Keep Writer sidebar-only flows (brainstorming, writing_plan) out of the flat
@@ -674,11 +767,29 @@ class MCPProtocolHandler:
                         else:
                             res = self._execute_with_backpressure(effect.tool_name, effect.arguments, document_url=effect.document_url)
                         events_to_process.append(MCPEvent(kind=EventKind.TOOL_COMPLETED, data={"result": res}))
-                    except (BusyError, TimeoutError, WriterAgentException) as e:
-                        # Re-raise standard json-rpc errors to be caught in _process_jsonrpc
-                        raise e
+                    except BusyError:
+                        raise
+                    except TimeoutError:
+                        raise
                     except Exception as e:
-                        events_to_process.append(MCPEvent(kind=EventKind.REQUEST_ERROR, data={"message": str(e), "code": "INTERNAL_ERROR"}))
+                        # Tool failures must be MCP tool results (isError), not JSON-RPC
+                        # INTERNAL_ERROR. Clients treat HTTP 500 as transient and retry
+                        # (Hermes retried apply_style ~150× in 0.5s). BusyError/TimeoutError
+                        # stay 429/504 above. WriterAgentException used to re-raise into
+                        # _process_jsonrpc as HTTP 500 — that is the retryable path.
+                        log.exception("MCP tool %s raised unexpectedly", effect.tool_name)
+                        code = getattr(e, "code", None) or "TOOL_EXECUTION_ERROR"
+                        if code == "INTERNAL_ERROR":
+                            code = "TOOL_EXECUTION_ERROR"
+                        events_to_process.append(MCPEvent(
+                            kind=EventKind.TOOL_COMPLETED,
+                            data={"result": make_tool_error(
+                                _resolve_exception_message(e),
+                                code=code,
+                                tool_name=effect.tool_name,
+                                error_type=type(e).__name__,
+                            )},
+                        ))
 
                 elif isinstance(effect, StreamResponseEffect):
                     event_bus = getattr(self, "event_bus", None)
@@ -734,8 +845,6 @@ class MCPProtocolHandler:
         if handler is None:
             return (400, wire_types.jsonrpc_failure(req_id, wire_types.METHOD_NOT_FOUND, "Unknown method: %s" % method))
 
-        from plugin.framework.errors import WriterAgentException, format_error_payload
-
         try:
             if method == "tools/list":
                 result = self._mcp_tools_list(params, document_url=document_url)
@@ -743,7 +852,9 @@ class MCPProtocolHandler:
                 result = self._mcp_tools_call(params, document_url=document_url)
             else:
                 result = handler(params)
-            log.debug(f"*** MCP RESULT: {str(result)[:100]} ***")
+            preview = str(result)
+            cap = 2000 if (isinstance(result, dict) and result.get("isError")) else 100
+            log.debug("*** MCP RESULT: %s ***", preview[:cap])
             if result is None:
                 return (500, wire_types.jsonrpc_failure(req_id, wire_types.INTERNAL_ERROR, "No result from MCP handler"))
             return (200, wire_types.jsonrpc_success(req_id, result))

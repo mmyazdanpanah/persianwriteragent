@@ -22,6 +22,12 @@ import time
 from typing import Any
 
 from compute_service.config import ComputeSettings
+from compute_service.json_forward import (
+    COMPUTE_MAX_PAYLOAD_BYTES,
+    WIRE_JSON_FORWARD,
+    WIRE_PICKLE,
+    decode_worker_result,
+)
 from compute_service.worker_base import BaseProcessPool, BaseProcessWorker
 
 log = logging.getLogger("compute_service.formula")
@@ -52,6 +58,7 @@ class FormulaProcessPool(BaseProcessPool):
             max_tasks=max_tasks,
             worker_name="Formula worker",
             idle_worker_ttl_sec=idle_worker_ttl_sec,
+            max_payload_bytes=COMPUTE_MAX_PAYLOAD_BYTES,
         )
         self._active_sessions: dict[str, BaseProcessWorker] = {}
         self._worker_sessions: dict[BaseProcessWorker, set[str]] = {}
@@ -134,7 +141,12 @@ class FormulaProcessPool(BaseProcessPool):
         return worker.tasks_executed >= self.max_tasks
 
     def reset_session(self, session_id: str, timeout_sec: float = 5.0) -> dict[str, Any]:
-        """Reset shared sandbox session and update active session tracking."""
+        """Drop the shared sandbox + init companion for *session_id*.
+
+        HTTP ``POST /v1/session/reset`` calls this (do not add a second reset
+        path). Unknown / already-gone ids are idempotent ``ok``. TTL eviction
+        in ``_evict_stale_sessions`` stays the safety net if reset is missed.
+        """
         with self._cond:
             self._session_last_activity.pop(session_id, None)
             worker = self._active_sessions.pop(session_id, None)
@@ -148,7 +160,12 @@ class FormulaProcessPool(BaseProcessPool):
 
         leased = self.lease_specific(worker, timeout_sec=timeout_sec)
         if leased is None:
-            return {"status": "error", "error": "Could not lease worker to reset session."}
+            # Same status/code/error shape as execute pool-busy; HTTP maps to 503.
+            return {
+                "status": "error",
+                "code": "WORKER_POOL_BUSY",
+                "error": "Could not lease worker to reset session.",
+            }
         try:
             res = leased.execute({"action": "reset_session", "session_id": session_id}, timeout_sec=timeout_sec)
             return res
@@ -202,8 +219,18 @@ class FormulaProcessPool(BaseProcessPool):
         mode: str = "isolated",
         init_script: str | None = None,
         req_id: str | None = None,
+        data_json: bytes | None = None,
+        wire: str = WIRE_JSON_FORWARD,
+        decode_result: bool = True,
     ) -> dict[str, Any]:
-        """Execute formula code on an appropriate worker subprocess."""
+        """Execute formula code on an appropriate worker subprocess.
+
+        Default *wire* is JSON-forward (compute HTTP): raw ``data_json`` bytes
+        go to the worker; the worker dumps the result once. Pass
+        ``wire="pickle"`` for the LibrePy-style ``host_pack_data`` /
+        ``split_grid`` path. The HTTP server sets ``decode_result=False`` so
+        it can forward ``result_json`` without a second dumps.
+        """
         if self._is_shutdown or not self.workers:
             return {
                 "id": req_id,
@@ -215,25 +242,17 @@ class FormulaProcessPool(BaseProcessPool):
         eff_timeout = float(timeout_sec or self.default_timeout_sec)
         deadline = time.monotonic() + eff_timeout
 
-        # Optimize large matrix data using zero-copy split_grid binary envelope
-        wire_data = data
-        if isinstance(data, list) and data:
-            from plugin.scripting.payload_codec import host_pack_data
-
-            try:
-                wire_data = host_pack_data(data, min_cells=1000)
-            except Exception:
-                wire_data = data
-
-        payload = {
-            "id": req_id,
-            "code": code,
-            "data": wire_data,
-            "session_id": session_id,
-            "mode": mode,
-            "timeout_sec": int(eff_timeout),
-            "init_script": init_script,
-        }
+        payload = self._build_execute_payload(
+            code=code,
+            data=data,
+            data_json=data_json,
+            session_id=session_id,
+            mode=mode,
+            timeout_sec=int(eff_timeout),
+            init_script=init_script,
+            req_id=req_id,
+            wire=wire,
+        )
 
         leased: BaseProcessWorker | None
         # Snapshot workers under the pool lock to avoid a TOCTOU race with
@@ -273,12 +292,60 @@ class FormulaProcessPool(BaseProcessPool):
             res = leased.execute(payload, timeout_sec=_remaining_sec(deadline))
             if req_id is not None and isinstance(res, dict):
                 res["id"] = req_id
+            if decode_result and isinstance(res, dict):
+                return decode_worker_result(res)
             return res
         finally:
             if mode == "shared" and session_id:
                 with self._cond:
                     self._session_last_activity[session_id] = time.monotonic()
             self.release_worker(leased)
+
+    @staticmethod
+    def _build_execute_payload(
+        *,
+        code: str,
+        data: Any,
+        data_json: bytes | None,
+        session_id: str | None,
+        mode: str,
+        timeout_sec: int,
+        init_script: str | None,
+        req_id: str | None,
+        wire: str,
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "id": req_id,
+            "code": code,
+            "session_id": session_id,
+            "mode": mode,
+            "timeout_sec": timeout_sec,
+            "init_script": init_script,
+            "wire": wire if wire in (WIRE_JSON_FORWARD, WIRE_PICKLE) else WIRE_JSON_FORWARD,
+        }
+        if payload["wire"] == WIRE_JSON_FORWARD:
+            blob = data_json
+            if blob is None and data is not None:
+                # Convenience for pool tests / in-process callers. The HTTP
+                # path always supplies data_json so the host never dumps the grid.
+                import json
+
+                blob = json.dumps(data, allow_nan=False).encode("utf-8")
+            if blob is not None:
+                payload["data_json"] = bytes(blob)
+            return payload
+
+        # LibrePy-style fallback: host Cython/stdlib flatten → split_grid in pickle.
+        wire_data = data
+        if isinstance(data, list) and data:
+            from plugin.scripting.payload_codec import host_pack_data
+
+            try:
+                wire_data = host_pack_data(data, min_cells=1000)
+            except Exception:
+                wire_data = data
+        payload["data"] = wire_data
+        return payload
 
 
 # Global singleton per server process

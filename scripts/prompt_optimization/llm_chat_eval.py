@@ -33,7 +33,7 @@ for _p in (_REPO, _SCRIPTS_PO):
         sys.path.insert(0, str(_p))
 
 from dataset import task_kind
-from eval_catalog import build_eval_tool_schemas
+from eval_catalog import apply_schema_density, apply_schema_patches, prepare_eval_tool_schemas
 from eval_worlds import CalcWorld, DrawWorld, WriterWorld
 from string_eval_tools import dispatch_string_tool
 
@@ -164,6 +164,29 @@ def _dispatch_world_tool(
     return _dispatch_lo_tool(name, raw_args or "{}", verbose=verbose)
 
 
+def _eval_tools(
+    *,
+    kind: str,
+    active_domain: str | None = None,
+    schema_patches: dict[str, dict[str, Any]] | None = None,
+    tools_spec: str | None = None,
+    schema_density: str = "full",
+) -> list[dict[str, Any]]:
+    """Same catalog as run_eval_multi, optionally filtered / skinny / patched.
+
+    ``tools_spec`` filters the *outer* catalog only. Specialized inner loops
+    pass ``active_domain`` and still get the full domain schemas (plus
+    density + patches) so ``delegate_to_specialized_*`` keeps working.
+    """
+    return prepare_eval_tool_schemas(
+        kind=kind,
+        active_domain=active_domain,
+        tools_spec=tools_spec,
+        schema_density=schema_density,
+        schema_patches=schema_patches,
+    )
+
+
 def _run_specialized_inner(
     *,
     kind: str,
@@ -180,6 +203,9 @@ def _run_specialized_inner(
     student: Literal["llm", "scripted"],
     usage_acc: dict[str, int],
     trace: list[dict[str, Any]],
+    schema_patches: dict[str, dict[str, Any]] | None = None,
+    tools_spec: str | None = None,
+    schema_density: str = "full",
 ) -> str:
     """Bounded inner LlmClient loop (not SmolAgents) on the same world."""
     domain = str(domain or "").strip()
@@ -192,7 +218,15 @@ def _run_specialized_inner(
         return json.dumps(
             {"status": "error", "message": "task is required for specialized delegation."}
         )
-    tools = build_eval_tool_schemas(kind=kind, active_domain=domain)
+    # Keep specialized schemas (sort_range, shapes, …). Density + MIPRO
+    # patches still apply; the outer --tools allowlist does not.
+    tools = _eval_tools(
+        kind=kind,
+        active_domain=domain,
+        schema_patches=schema_patches,
+        tools_spec=tools_spec,
+        schema_density=schema_density,
+    )
     if student == "scripted":
         inner_client = client
         messages: list[dict[str, Any]] = []
@@ -300,15 +334,36 @@ def run_llm_chat_eval(
     verbose: bool = False,
     student: Literal["llm", "scripted"] = "llm",
     task_id: str = "",
+    tools: list[dict[str, Any]] | None = None,
+    schema_patches: dict[str, dict[str, Any]] | None = None,
+    tools_spec: str | None = None,
+    schema_density: str = "full",
 ) -> tuple[str, dict[str, int], str | None, list[dict[str, Any]]]:
     """
     Run one eval example: multi-round tool loop.
 
     Returns ``(final_document, usage, error, trace)``. Trace entries are
     ``{name, arguments, result_status, result_chars, error_code}``.
+
+    ``schema_patches`` rewrites advertised tool / param descriptions for
+    this run (outer + specialized inner). Same dispatch as production eval.
+
+    ``tools_spec`` is the raw ``--tools`` value (preset or comma names).
+    ``schema_density`` ``skinny`` blanks descriptions on outer and inner
+    catalogs. Defaults match today's unfiltered, full-description catalog.
     """
     kind = task_kind(task_id)
-    tools = build_eval_tool_schemas(kind=kind)
+    if tools is None:
+        tools = _eval_tools(
+            kind=kind,
+            schema_patches=schema_patches,
+            tools_spec=tools_spec,
+            schema_density=schema_density,
+        )
+    else:
+        tools = apply_schema_density(tools, schema_density)
+        if schema_patches:
+            tools = apply_schema_patches(tools, schema_patches)
 
     instruction = system_prompt
     if bust_cache:
@@ -415,6 +470,9 @@ def run_llm_chat_eval(
                         student=student,
                         usage_acc=usage_acc,
                         trace=trace,
+                        schema_patches=schema_patches,
+                        tools_spec=tools_spec,
+                        schema_density=schema_density,
                     )
                     trace.append(_trace_entry(name, raw_args, result))
                 else:

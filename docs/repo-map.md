@@ -21,6 +21,7 @@ Start here by task.
 | LibrePy bootstrap | Core OXT: `=PY()`, Python menus, Settings → Python; no chat/MCP | [`plugin/main_core.py`](../plugin/main_core.py), [`plugin/librepy/`](../plugin/librepy/), [`plugin/calc/python/addin_librepy.py`](../plugin/calc/python/addin_librepy.py) |
 | Sidebar / send | Sidebar factory, panel, document resolution | [`plugin/chatbot/panel_factory.py`](../plugin/chatbot/panel_factory.py), [`plugin/chatbot/panel.py`](../plugin/chatbot/panel.py) |
 | Tool loop / chat FSM | Main chat tool loop and state machine | [`plugin/chatbot/tool_loop.py`](../plugin/chatbot/tool_loop.py), [`plugin/chatbot/tool_loop_state.py`](../plugin/chatbot/tool_loop_state.py) |
+| Compaction | Sidebar auto-compact at the tiered threshold + overflow retry. Chat / Web / Librarian share `_spawn_llm_worker`. Smol ReAct is not wired. | [`plugin/chatbot/compaction.py`](../plugin/chatbot/compaction.py), [`plugin/chatbot/tool_loop.py`](../plugin/chatbot/tool_loop.py) — [chat/compaction-dev-plan.md](chat/compaction-dev-plan.md), context denominator research [chat/context-window-fidelity-brief.md](chat/context-window-fidelity-brief.md) |
 | Smol / librarian ReAct | Separate ReAct runtime (shares `LlmClient`); do **not** merge with the main chat FSM | [`plugin/chatbot/smol_agent.py`](../plugin/chatbot/smol_agent.py) — [chat/smol-tool-architecture.md](chat/smol-tool-architecture.md) |
 | Agent backends | Optional external backends (`agent_backend.backend_id` when not `builtin`). ACP CLIs share [`acp_backend.py`](../plugin/agent_backend/acp_backend.py); set immutable `default_extra_args` when the official CLI needs a subcommand and settings args are empty. Grok overrides `_apply_default_extra_args` for `startswith("grok")`. Base `send()` drains prompt-result `contentBlocks`. | [`plugin/agent_backend/`](../plugin/agent_backend/) |
 | HTTP / LLM | Chat requests, tools, token stripping, pacing | [`plugin/framework/client/llm_client.py`](../plugin/framework/client/llm_client.py) (`make_chat_request`, `request_with_tools`, …), [`plugin/framework/client/http_transport.py`](../plugin/framework/client/http_transport.py), [`plugin/framework/client/auth.py`](../plugin/framework/client/auth.py). Ollama llama-server overflow 500s: plain sidebar sentence in [`errors.py`](../plugin/framework/client/errors.py); live `num_ctx` from [`model_fetcher.py`](../plugin/framework/client/model_fetcher.py) `/api/show` — [chat/llm-hacks.md](chat/llm-hacks.md) §11 |
@@ -45,12 +46,12 @@ Start here by task.
 | Vision / OCR | Host runner + venv worker + `run_vision` | [`plugin/vision/`](../plugin/vision/), [`plugin/vision/venv/`](../plugin/vision/venv/), [`plugin/scripting/client.py`](../plugin/scripting/client.py), [`plugin/vision/vision_availability.py`](../plugin/vision/vision_availability.py) — [images/recognition.md](images/recognition.md) |
 | PPT-Master | Impress/Draw adapters and session | [`plugin/contrib/ppt_master/`](../plugin/contrib/ppt_master/) ([README](../plugin/contrib/ppt_master/README.md)), [`plugin/ppt_master/`](../plugin/ppt_master/), [`plugin/chatbot/ppt_master.py`](../plugin/chatbot/ppt_master.py) — [integration plan](archive/ppt-master-integration-plan.md#roadmap) |
 | Tests (unit pytest) | Headless pytest; no live soffice | `make pytest` — `-m "not slow and not integration" --ignore-glob='*_uno.py'` |
-| Tests (UNO runner) | Native UNO tests (`@native_test`, `ctx`) | [`plugin/testing_runner.py`](../plugin/testing_runner.py) (`make test-uno`; mock-LLM sidebar: `make test-mock-sidebar`; `make test-run` includes pytest) |
+| Tests (UNO runner) | Native UNO tests (`@native_test`, `ctx`) | [`plugin/testing_runner.py`](../plugin/testing_runner.py) (`make test-uno`; Draw lifecycle soak: `make test-uno-soak`; mock-LLM sidebar: `make test-mock-sidebar`; `make test-run` includes pytest) — [framework/uno-test-lifecycle.md](framework/uno-test-lifecycle.md) |
 | Eval / benchmarks | CLI eval harness and prompt optimization | [`scripts/benchmark.py`](../scripts/benchmark.py), [`scripts/prompt_optimization/`](../scripts/prompt_optimization/) |
 | Mock LLM (dev) | Fake OpenAI `/v1/chat/completions` for sidebar soak: HTML/scroll, research, Stop, empty replies, reasoning, delegate, parallel tools, HTTP fail/hang (`make mock-llm`, port 18766) | [`scripts/mock_llm_server.py`](../scripts/mock_llm_server.py) — [chat/rich-text-control-sidebar.md](chat/rich-text-control-sidebar.md#mock-llm-for-sidebar-soak) |
 | Extension packaging | OXT resources; register new components in manifest | [`extension/`](../extension/) (`Dialogs/`, `idl/`, `metadata/`), [`extension/META-INF/manifest.xml`](../extension/META-INF/manifest.xml) |
 | Build / tooling | Make targets, package metadata, Python pin, LibrePy file list | [`Makefile`](../Makefile), [`pyproject.toml`](../pyproject.toml), [`.python-version`](../.python-version), [`scripts/librepy_bundle_paths.py`](../scripts/librepy_bundle_paths.py) |
-| CI status (Pages) | Actions API → `index.html` + `status.svg` for the README | [`scripts/generate_ci_status.py`](../scripts/generate_ci_status.py), [`.github/workflows/ci-status-pages.yml`](../.github/workflows/ci-status-pages.yml) |
+| CI status (Pages) | Actions API → `index.html` + `status.svg` + `status.json` for README / Pages (60-day test retention & cached hints) | [`scripts/generate_ci_status.py`](../scripts/generate_ci_status.py), [`.github/workflows/ci-status-pages.yml`](../.github/workflows/ci-status-pages.yml) |
 
 ## Deep dives (link index)
 
@@ -62,13 +63,14 @@ Start here by task.
 | Threading architecture (pool, marshal, MCP) | [framework/threading.md](framework/threading.md) |
 | UNO thread-safety enforcement | [framework/uno-thread-safety.md](framework/uno-thread-safety.md) |
 | Smol vs main chat HTTP | [chat/smol-tool-architecture.md](chat/smol-tool-architecture.md) |
-| Writer ↔ Calc peer-ask (design) | [chat/writer-calc-peer-messaging.md](chat/writer-calc-peer-messaging.md) |
+| Writer ↔ Calc ↔ Draw ↔ Impress `send_peer_work / send_peer_result` | [chat/peer-messaging.md](chat/peer-messaging.md) |
 | Writer specialized tool tiers | [writer/specialized-toolsets.md](writer/specialized-toolsets.md) |
 | Styles / LLM styling | [writer/llm-styles.md](writer/llm-styles.md) |
 | Writer API references | [writer/bookmarks-api-reference.md](writer/bookmarks-api-reference.md), [writer/footnotes-api-reference.md](writer/footnotes-api-reference.md), [writer/page-api-reference.md](writer/page-api-reference.md), [writer/tracking-api-reference.md](writer/tracking-api-reference.md) |
 | Reviewable agent edits (surgical redlines, toolbar) | [writer/reviewable-agent-edits.md](writer/reviewable-agent-edits.md) |
 | LO-DOM & Semantic Tree | [writer/lo-dom-semantic-tree.md](writer/lo-dom-semantic-tree.md) |
 | Draw/Impress specialized | [draw/impress-specialized-toolsets.md](draw/impress-specialized-toolsets.md), [draw/shape-support.md](draw/shape-support.md) |
+| Calc `=PROMPT()` | [calc/prompt-function.md](calc/prompt-function.md) |
 | Calc specialized | [calc/specialized-toolsets.md](calc/specialized-toolsets.md) |
 | Calc filters / formatting | [calc/conditional-formatting.md](calc/conditional-formatting.md), [calc/sheet-filter.md](calc/sheet-filter.md) |
 | Calc date / time lifecycle | [calc/date-time-handling.md](calc/date-time-handling.md) |
@@ -90,12 +92,14 @@ Start here by task.
 | Math / HTML import design | [writer/math-tex.md](writer/math-tex.md) |
 | Grammar pipeline (cache, queue) | [writer/grammar-checker-plan.md](writer/grammar-checker-plan.md) |
 | Test Architecture | [archive/test_architecture_analysis.md](archive/test_architecture_analysis.md) |
+| Native UNO lifecycle / URP dispose breadcrumbs | [framework/uno-test-lifecycle.md](framework/uno-test-lifecycle.md), Windows skip inventory [framework/windows-ci-harness-cleanup-note.md](framework/windows-ci-harness-cleanup-note.md) |
 | Type checking | [framework/type-checking.md](framework/type-checking.md) |
 | UNO Dialogs & Wizards | [framework/uno-dialogs.md](framework/uno-dialogs.md) |
 | UNO exception policy (disposed vs leaf catches) | [framework/exception-policy.md](framework/exception-policy.md) |
 | LLM Hacks & Workarounds | [chat/llm-hacks.md](chat/llm-hacks.md) |
 | Experimental memory / roadmap | [archive/hermes-agent-patterns.md](archive/hermes-agent-patterns.md), [ROADMAP.md](ROADMAP.md), [framework/robustness-roadmap.md](framework/robustness-roadmap.md) |
 | LLM evals / benchmarks | [eval/benchmarks.md](eval/benchmarks.md), [eval/string-harness-upgrade.md](eval/string-harness-upgrade.md), [scripts/prompt_optimization/README.md](../scripts/prompt_optimization/README.md) |
+| Eval-2 headed benchmarks (sibling of string-pack hard/partial/cost; separate JSON/charts) | [eval/eval-2/benchmarks.md](eval/eval-2/benchmarks.md), [eval/eval-2/README.md](eval/eval-2/README.md) |
 
 ## References
 

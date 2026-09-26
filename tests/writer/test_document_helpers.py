@@ -180,6 +180,24 @@ def test_writer_compound_undo_enter_close_and_idempotent():
     assert doc.undo.left is True
 
 
+def test_writer_compound_undo_context_manager_closes_on_success_and_error():
+    doc = _MockDoc(recording=True)
+    with WriterCompoundUndo(doc, "WriterAgent: with-ok") as cu:
+        assert cu is not None
+        assert doc.undo.entered is True
+        assert doc.undo.left is False
+    assert doc.undo.left is True
+
+    doc2 = _MockDoc(recording=True)
+    try:
+        with WriterCompoundUndo(doc2, "WriterAgent: with-err"):
+            assert doc2.undo.entered is True
+            raise RuntimeError("boom")
+    except RuntimeError:
+        pass
+    assert doc2.undo.left is True
+
+
 def test_set_document_property_updates_existing_without_readding(monkeypatch):
     """Regression: ``UserDefinedProperties`` exposes existence via ``getPropertySetInfo``,
     not ``hasByName``. The old check fell through to ``addProperty`` even when the
@@ -260,5 +278,188 @@ def test_document_helpers_import_does_not_load_calc_analyzer():
         env={**os.environ, "PYTHONPATH": repo_root},
     )
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_document_helpers_uno_skips_windows_leftover_hidden_mml() -> None:
+    """GHA 34678020608: leftover Hidden _blank .mml hang after latex skip."""
+    from pathlib import Path
+
+    src = Path(__file__).with_name("test_document_helpers_uno.py").read_text(encoding="utf-8")
+    assert "skip_windows_leftover_hidden_load" in src
+    assert "document helpers Hidden _blank .mml" in src
+
+
+# ── DocumentService.doc_key + cache invalidation (Nelson item 3) ──
+
+
+class _KeyDoc:
+    def __init__(self, uid="", url=""):
+        self._uid = uid
+        self._url = url
+
+    def getRuntimeUID(self):
+        return self._uid
+
+    def getURL(self):
+        return self._url
+
+
+class _FakeCacheModel:
+    def __init__(self, uid, url=""):
+        self._uid = uid
+        self._url = url
+        self.modify_listeners = []
+        self.doc_listeners = []
+        self.dead = False
+
+    def getRuntimeUID(self):
+        if self.dead:
+            raise RuntimeError("disposed")
+        return self._uid
+
+    def getURL(self):
+        if self.dead:
+            raise RuntimeError("disposed")
+        return self._url
+
+    def addModifyListener(self, listener):
+        self.modify_listeners.append(listener)
+
+    def removeModifyListener(self, listener):
+        self.modify_listeners.remove(listener)
+
+    def addDocumentEventListener(self, listener):
+        self.doc_listeners.append(listener)
+
+    def removeDocumentEventListener(self, listener):
+        self.doc_listeners.remove(listener)
+
+
+def _clear_cache_listener_state():
+    import plugin.doc.document_helpers as dh
+
+    dh._CACHE_LISTENERS.clear()
+    dh._IGNORE_DEPTH = 0
+
+
+def test_doc_key_prefers_runtime_uid_then_url_never_id():
+    from plugin.doc.document_helpers import UNKNOWN_DOC_KEY, DocumentService
+    from plugin.framework.uno_context import normalize_doc_url
+
+    _clear_cache_listener_state()
+    svc = DocumentService()
+    assert svc.doc_key(_KeyDoc(uid="42", url="file:///docs/a.odt")) == "uid:42"
+    assert svc.doc_key(_KeyDoc(uid="", url="file:///docs/a.odt/")) == "url:" + normalize_doc_url(
+        "file:///docs/a.odt/"
+    )
+    untitled = _KeyDoc(uid="7", url="")
+    assert svc.doc_key(untitled) == "uid:7"
+    unknown = _KeyDoc()
+    assert svc.doc_key(unknown) == UNKNOWN_DOC_KEY
+    assert svc.doc_key(unknown) != id(unknown)
+    assert svc.doc_key(None) == UNKNOWN_DOC_KEY
+
+
+def test_doc_key_geturl_error_is_unknown_not_id():
+    from plugin.doc.document_helpers import UNKNOWN_DOC_KEY, DocumentService
+
+    class _Boom:
+        def getRuntimeUID(self):
+            return ""
+
+        def getURL(self):
+            raise RuntimeError("disposed")
+
+    svc = DocumentService()
+    boom = _Boom()
+    assert svc.doc_key(boom) == UNKNOWN_DOC_KEY
+    assert svc.doc_key(boom) != id(boom)
+
+
+def test_ignore_cache_invalidation_is_reentrant_and_drops_emits():
+    from types import SimpleNamespace
+
+    from plugin.doc.document_helpers import DocumentService
+    from plugin.framework.event_bus import get_event_bus
+
+    _clear_cache_listener_state()
+    svc = DocumentService()
+    model = _FakeCacheModel("7")
+    assert svc.doc_key(model) == "uid:7"
+    assert len(model.modify_listeners) == 1
+
+    received = []
+
+    def handler(**kwargs):
+        received.append(kwargs)
+
+    bus = get_event_bus()
+    bus.subscribe("document:cache_invalidated", handler)
+    try:
+        event = SimpleNamespace(Source=model)
+        model.modify_listeners[0].modified(event)
+        assert received and received[-1].get("doc") is model
+        received.clear()
+        with svc.ignore_cache_invalidation():
+            with svc.ignore_cache_invalidation():
+                model.modify_listeners[0].modified(event)
+            model.modify_listeners[0].modified(event)
+        assert received == []
+        model.modify_listeners[0].modified(event)
+        assert received and received[-1].get("doc") is model
+    finally:
+        bus.unsubscribe("document:cache_invalidated", handler)
+        _clear_cache_listener_state()
+
+
+def test_closed_doc_emit_uses_stored_key_without_touching_model():
+    from plugin.doc.document_helpers import DocumentService
+    from plugin.framework.event_bus import get_event_bus
+
+    _clear_cache_listener_state()
+    svc = DocumentService()
+    model = _FakeCacheModel("gone")
+    svc.doc_key(model)
+    model.dead = True
+
+    received = []
+
+    def handler(**kwargs):
+        received.append(kwargs)
+
+    bus = get_event_bus()
+    bus.subscribe("document:cache_invalidated", handler)
+    try:
+        model.modify_listeners[0].disposing(None)
+        assert received == [{"key": "uid:gone"}]
+        assert "uid:gone" not in __import__(
+            "plugin.doc.document_helpers", fromlist=["_CACHE_LISTENERS"]
+        )._CACHE_LISTENERS
+    finally:
+        bus.unsubscribe("document:cache_invalidated", handler)
+        _clear_cache_listener_state()
+
+
+def test_cache_listener_dedupes_by_uid_and_recycle_does_not_evict_new():
+    import plugin.doc.document_helpers as dh
+    from plugin.doc.document_helpers import DocumentService
+
+    _clear_cache_listener_state()
+    svc = DocumentService()
+    first = _FakeCacheModel("R")
+    second = _FakeCacheModel("R")
+    svc.doc_key(first)
+    svc.doc_key(second)
+    assert len(dh._CACHE_LISTENERS) == 1
+    assert len(first.modify_listeners) == 1
+    assert second.modify_listeners == []
+
+    old = dh._CACHE_LISTENERS["uid:R"].modify
+    replacement = dh._CacheModifyListener("uid:R")
+    dh._CACHE_LISTENERS["uid:R"].modify = replacement
+    old.disposing(None)
+    assert "uid:R" in dh._CACHE_LISTENERS
+    assert dh._CACHE_LISTENERS["uid:R"].modify is replacement
+    _clear_cache_listener_state()
 
 

@@ -1,6 +1,8 @@
 
 import builtins
 import sys
+import threading
+import time
 from plugin.testing_runner import native_test
 from unittest.mock import MagicMock, patch
 from plugin.tests.testing_utils import setup_uno_mocks
@@ -200,6 +202,138 @@ def test_process_events_to_idle_force_under_drain_owner():
     assert toolkit.processEventsToIdle.call_count == 2
 
 
+def test_wait_while_pumping_returns_true_when_event_set():
+    from plugin.framework.uno_context import wait_while_pumping
+
+    done = threading.Event()
+    pumps: list[bool] = []
+
+    def _pe2i(_ctx: object, rounds: int = 1, force: bool = False) -> bool:
+        del rounds
+        pumps.append(force)
+        done.set()
+        return True
+
+    with patch("plugin.framework.uno_context.process_events_to_idle", side_effect=_pe2i):
+        assert wait_while_pumping(done, MagicMock(), timeout=1.0) is True
+    assert pumps
+    assert all(force is False for force in pumps)
+
+
+def test_wait_while_pumping_timeout_returns_false():
+    from plugin.framework.uno_context import wait_while_pumping
+
+    done = threading.Event()
+    with patch("plugin.framework.uno_context.process_events_to_idle", return_value=False):
+        assert wait_while_pumping(done, MagicMock(), timeout=0.05, poll_sec=0.01) is False
+    assert not done.is_set()
+
+
+def test_wait_while_pumping_swallows_pe2i_errors():
+    from plugin.framework.uno_context import wait_while_pumping
+
+    done = threading.Event()
+    n = {"i": 0}
+
+    def _pe2i(_ctx: object, rounds: int = 1, force: bool = False) -> bool:
+        del rounds, force
+        n["i"] += 1
+        if n["i"] == 1:
+            raise RuntimeError("no toolkit")
+        done.set()
+        return True
+
+    with patch("plugin.framework.uno_context.process_events_to_idle", side_effect=_pe2i):
+        assert wait_while_pumping(done, MagicMock(), timeout=1.0) is True
+
+
+def test_wait_while_pumping_under_drain_owner_still_waits():
+    from plugin.framework.queue_executor import drain_owner_scope, reset_suppressed_vcl_pump_count
+    from plugin.framework.uno_context import wait_while_pumping
+
+    reset_suppressed_vcl_pump_count()
+    done = threading.Event()
+    toolkit = MagicMock()
+
+    def _set_done() -> None:
+        time.sleep(0.02)
+        done.set()
+
+    worker = threading.Thread(target=_set_done)
+    with patch("plugin.framework.uno_context.get_toolkit", return_value=toolkit):
+        with drain_owner_scope("stream"):
+            worker.start()
+            assert wait_while_pumping(done, MagicMock(), timeout=1.0, poll_sec=0.01) is True
+            worker.join()
+    toolkit.processEventsToIdle.assert_not_called()
+
+
+def test_wait_while_pumping_off_main_posts_instead_of_pe2i():
+    """Writer doProofreading is Dummy-*; PE2I on that stack is a thread violation."""
+    from plugin.framework.uno_context import wait_while_pumping
+
+    done = threading.Event()
+    posts: list[object] = []
+    pe2i_threads: list[str] = []
+    result: dict[str, bool] = {}
+
+    def _pe2i(_ctx: object, rounds: int = 1, force: bool = False) -> bool:
+        del rounds, force
+        pe2i_threads.append(threading.current_thread().name)
+        return True
+
+    def _post(fn: object, *args: object, **kwargs: object) -> None:
+        del args, kwargs
+        posts.append(fn)
+        done.set()
+
+    def _waiter() -> None:
+        with (
+            patch("plugin.framework.uno_context.process_events_to_idle", side_effect=_pe2i),
+            patch("plugin.framework.queue_executor.post_to_main_thread", side_effect=_post),
+        ):
+            result["ok"] = wait_while_pumping(done, MagicMock(), timeout=1.0, poll_sec=0.01)
+
+    worker = threading.Thread(target=_waiter, name="Dummy-21")
+    worker.start()
+    worker.join(timeout=2.0)
+    assert result.get("ok") is True
+    assert posts
+    assert pe2i_threads == []
+
+
+def test_wait_while_pumping_off_main_post_fallback_skips_pe2i():
+    """QueueExecutor.post can run the callback on the waiter; still no PE2I off-main."""
+    from plugin.framework.uno_context import wait_while_pumping
+
+    done = threading.Event()
+    pe2i_threads: list[str] = []
+    result: dict[str, bool] = {}
+
+    def _pe2i(_ctx: object, rounds: int = 1, force: bool = False) -> bool:
+        del rounds, force
+        pe2i_threads.append(threading.current_thread().name)
+        return True
+
+    def _post(fn: object, *args: object, **kwargs: object) -> None:
+        del args, kwargs
+        fn()  # type: ignore[operator]
+        done.set()
+
+    def _waiter() -> None:
+        with (
+            patch("plugin.framework.uno_context.process_events_to_idle", side_effect=_pe2i),
+            patch("plugin.framework.queue_executor.post_to_main_thread", side_effect=_post),
+        ):
+            result["ok"] = wait_while_pumping(done, MagicMock(), timeout=1.0, poll_sec=0.01)
+
+    worker = threading.Thread(target=_waiter, name="Dummy-21")
+    worker.start()
+    worker.join(timeout=2.0)
+    assert result.get("ok") is True
+    assert pe2i_threads == []
+
+
 def test_resolve_package_extension_id_prefers_librepy():
     from plugin.framework.constants import EXTENSION_ID_LIBREPY
     from plugin.framework.uno_context import (
@@ -268,6 +402,73 @@ def test_product_display_name_follows_extension_id():
         assert product_display_name() == "WriterAgent"
     finally:
         reset_package_extension_id_for_tests()
+
+
+def test_get_desktop_skips_create_on_uno_bin_helper():
+    """Register/enable uno.bin must not createInstance(Desktop) (#768)."""
+    from plugin.framework.uno_context import get_desktop
+
+    smgr = MagicMock()
+    ctx = MagicMock()
+    ctx.ServiceManager = smgr
+    with patch.object(sys, "argv", ["/usr/lib64/libreoffice/program/uno.bin", "--singleaccept"]):
+        assert get_desktop(ctx) is None
+    smgr.createInstanceWithContext.assert_not_called()
+
+
+def test_get_desktop_skips_create_when_proc_exe_is_uno_bin():
+    """pythonloader may rewrite sys.argv; /proc/self/exe is the real process (#768)."""
+    from plugin.framework.uno_context import get_desktop
+
+    smgr = MagicMock()
+    ctx = MagicMock()
+    ctx.ServiceManager = smgr
+    proc = ["/usr/lib64/libreoffice/program/uno.bin", "--quiet", "--singleaccept"]
+    with (
+        patch.object(sys, "argv", [""]),
+        patch("plugin.framework.uno_context._linux_process_tokens", return_value=proc),
+    ):
+        assert get_desktop(ctx) is None
+    smgr.createInstanceWithContext.assert_not_called()
+
+
+def test_get_desktop_creates_on_soffice():
+    from plugin.framework.uno_context import get_desktop
+
+    desktop = MagicMock()
+    smgr = MagicMock()
+    smgr.createInstanceWithContext.return_value = desktop
+    ctx = MagicMock()
+    ctx.ServiceManager = smgr
+    with (
+        patch.object(sys, "argv", ["soffice"]),
+        patch("plugin.framework.uno_context._linux_process_tokens", return_value=["/usr/lib64/libreoffice/program/soffice.bin"]),
+        patch("plugin.framework.uno_context._wrap_uno", side_effect=lambda obj: obj),
+    ):
+        assert get_desktop(ctx) is desktop
+    smgr.createInstanceWithContext.assert_called_once_with("com.sun.star.frame.Desktop", ctx)
+
+
+def test_get_active_document_skips_desktop_create_on_no_vcl():
+    from plugin.framework.uno_context import get_active_document
+
+    smgr = MagicMock()
+    ctx = MagicMock()
+    ctx.ServiceManager = smgr
+    with patch.object(sys, "argv", ["/usr/lib64/libreoffice/program/uno.bin", "--singleaccept"]):
+        assert get_active_document(ctx) is None
+    smgr.createInstanceWithContext.assert_not_called()
+
+
+def test_current_document_controller_skips_desktop_create_on_no_vcl():
+    from plugin.framework.uno_context import _current_document_controller
+
+    smgr = MagicMock()
+    ctx = MagicMock()
+    ctx.ServiceManager = smgr
+    with patch.object(sys, "argv", ["/usr/lib64/libreoffice/program/uno.bin", "--singleaccept"]):
+        assert _current_document_controller(ctx) is None
+    smgr.createInstanceWithContext.assert_not_called()
 
 
 def test_extension_id_constants_match_package_ids():
@@ -362,3 +563,103 @@ def test_install_attaches_leave_controls_when_trackers_already_exist():
         query.addFocusListener.assert_not_called()
     finally:
         uc._stream_focus_trackers[:] = saved
+
+
+# ---- uno_same --------------------------------------------------------------
+
+
+class _NeverEq:
+    """Two instances compare unequal so the helper must fall through ``is`` / ``==``."""
+
+    def __eq__(self, other: object) -> bool:
+        return False
+
+
+def test_uno_same_identity():
+    from plugin.framework.uno_context import uno_same
+
+    obj = object()
+    assert uno_same(obj, obj) is True
+    assert uno_same(None, None) is True
+    assert uno_same(None, object()) is False
+
+
+def test_uno_same_eq_when_not_same_ref():
+    from plugin.framework.uno_context import uno_same
+
+    class AlwaysEq:
+        def __eq__(self, other: object) -> bool:
+            return True
+
+        def __hash__(self) -> int:
+            return 0
+
+    assert uno_same(AlwaysEq(), AlwaysEq()) is True
+
+
+def test_uno_same_issame_when_is_and_eq_fail():
+    from plugin.framework.uno_context import uno_same
+
+    a, b = _NeverEq(), _NeverEq()
+    with patch.object(sys.modules["uno"], "isSame", return_value=True, create=True):
+        assert uno_same(a, b) is True
+
+
+def test_uno_same_false_when_all_paths_differ():
+    from plugin.framework.uno_context import uno_same
+
+    a, b = _NeverEq(), _NeverEq()
+    with patch.object(sys.modules["uno"], "isSame", return_value=False, create=True):
+        assert uno_same(a, b) is False
+
+
+def test_uno_same_false_when_issame_missing():
+    from plugin.framework.uno_context import uno_same
+
+    a, b = _NeverEq(), _NeverEq()
+    with patch.object(sys.modules["uno"], "isSame", None, create=True):
+        assert uno_same(a, b) is False
+
+
+def test_uno_same_mocked_issame_is_not_treated_as_true():
+    """A session-wide MagicMock ``uno.isSame`` is truthy; must not collapse every pair to same."""
+    from plugin.framework.uno_context import uno_same
+
+    a, b = _NeverEq(), _NeverEq()
+    with patch.object(sys.modules["uno"], "isSame", MagicMock(), create=True):
+        assert uno_same(a, b) is False
+
+
+def test_uno_same_proxy_eq_unwraps_target():
+    """GUARD_ON proxy ``__eq__`` unwraps ``_target`` so proxy↔unwrapped is same (step 2)."""
+    from plugin.framework import thread_guard as tg
+    from plugin.framework.uno_context import uno_same
+    from tests.strip_bundle import skip_if_release_build
+
+    skip_if_release_build("GUARD_ON thread guard proxy stripped in release bundle")
+    real = object()
+    proxy = tg._UnoThreadGuardProxy(real)
+    assert proxy is not real
+    assert uno_same(proxy, real) is True
+    assert uno_same(real, proxy) is True
+
+
+def test_uno_same_issame_unwraps_proxy_first():
+    """``uno.isSame`` must see the real PyUNO target, not the viral proxy wrapper."""
+    from plugin.framework import thread_guard as tg
+    from plugin.framework.uno_context import uno_same
+    from tests.strip_bundle import skip_if_release_build
+
+    skip_if_release_build("GUARD_ON thread guard proxy stripped in release bundle")
+    real_a, real_b = object(), object()
+    proxy_a = tg._UnoThreadGuardProxy(real_a)
+    seen: list[tuple[object, object]] = []
+
+    def _issame(left: object, right: object) -> bool:
+        seen.append((left, right))
+        return left is real_a and right is real_b
+
+    with patch.object(sys.modules["uno"], "isSame", _issame, create=True):
+        # ``==`` is False (distinct objects / proxy target ≠ other), so ladder hits isSame.
+        assert uno_same(proxy_a, real_b) is True
+    assert seen == [(real_a, real_b)]

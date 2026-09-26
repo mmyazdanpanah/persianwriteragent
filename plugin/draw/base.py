@@ -58,7 +58,9 @@ class ToolDrawChartBase(ToolDrawSpecialBase):
 
 class ToolDrawShapeBase(ToolDrawSpecialBase):
     specialized_domain: ClassVar[str | None] = "shapes"
-    specialized_domain_description: ClassVar[str | None] = "Create and edit drawing shapes, connectors, and groups."
+    specialized_domain_description: ClassVar[str | None] = (
+        "Create and edit drawing shapes, connectors, and groups; fill paper-form blanks by name."
+    )
     uno_services = ["com.sun.star.drawing.DrawingDocument", "com.sun.star.presentation.PresentationDocument"]
 
 
@@ -111,7 +113,8 @@ class ToolDrawPythonBase(ToolDrawSpecialBase):
 class ToolDrawImageBase(ToolDrawSpecialBase):
     specialized_domain: ClassVar[str | None] = "images"
     specialized_domain_description: ClassVar[str | None] = (
-        "Insert, list, generate, and replace images on Draw/Impress pages (same image_* tools as Writer/Calc)."
+        "Insert, list, and generate images on Draw/Impress pages (same image_* tools as Writer/Calc); "
+        "edit a selected image with image_generate(source_image='selection')."
     )
     uno_services = ["com.sun.star.drawing.DrawingDocument", "com.sun.star.presentation.PresentationDocument"]
 

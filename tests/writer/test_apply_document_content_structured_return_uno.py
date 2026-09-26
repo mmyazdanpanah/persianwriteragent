@@ -15,10 +15,15 @@ import uno  # noqa: F401
 
 from plugin.testing_runner import native_test
 from plugin.writer.content import ApplyDocumentContent
-from plugin.tests.testing_utils import TestingFactory, with_native_doc
+from plugin.tests.testing_utils import (
+    TestingFactory,
+    skip_windows_leftover_hidden_load,
+    with_native_doc,
+)
 
 
 def _set_body(doc, text_value):
+    skip_windows_leftover_hidden_load("apply_document_content Hidden _default swriter")
     text = doc.getText()
     cur = text.createTextCursor()
     cur.gotoStart(False)
@@ -89,3 +94,80 @@ def test_empty_old_content_is_a_parameter_error_uno(ctx, doc):
     tool_ctx = TestingFactory.create_context(doc=doc, ctx=ctx, env="native")
     res = ApplyDocumentContent().execute(tool_ctx, target="search", old_content="   ", content="BAR")
     assert res.get("status") == "error", res
+
+
+@native_test
+@with_native_doc("writer")
+def test_search_occurrence_selects_exact_match_uno(ctx, doc):
+    """occurrence is 0-based and replaces only the requested Writer text match."""
+    tool_ctx = TestingFactory.create_context(doc=doc, ctx=ctx, env="native")
+
+    _set_body(doc, "foo | foo")
+    res = ApplyDocumentContent().execute(
+        tool_ctx,
+        target="search",
+        old_content="foo",
+        content="BAR",
+        occurrence=0,
+    )
+    assert res.get("status") == "ok", res
+    assert res.get("occurrence") == 0, res
+    assert doc.getText().getString() == "BAR | foo"
+
+    _set_body(doc, "foo | foo")
+    res = ApplyDocumentContent().execute(
+        tool_ctx,
+        target="search",
+        old_content="foo",
+        content="BAR",
+        occurrence=1,
+    )
+    assert res.get("status") == "ok", res
+    assert res.get("occurrence") == 1, res
+    assert doc.getText().getString() == "foo | BAR"
+
+
+@native_test
+@with_native_doc("writer")
+def test_search_occurrence_dry_run_does_not_edit_uno(ctx, doc):
+    """dry_run resolves the requested occurrence without mutating the document."""
+    _set_body(doc, "foo | foo")
+    tool_ctx = TestingFactory.create_context(doc=doc, ctx=ctx, env="native")
+    before = doc.getText().getString()
+
+    res = ApplyDocumentContent().execute(
+        tool_ctx,
+        target="search",
+        old_content="foo",
+        content="BAR",
+        occurrence=1,
+        dry_run=True,
+    )
+
+    assert res.get("status") == "ok", res
+    assert res.get("dry_run") is True, res
+    assert res.get("selected_occurrence") == 1, res
+    assert res.get("replaceable_count") == 2, res
+    assert res.get("matches")[0].get("occurrence") == 0, res
+    assert res.get("matches")[1].get("occurrence") == 1, res
+    assert doc.getText().getString() == before
+
+
+@native_test
+@with_native_doc("writer")
+def test_search_occurrence_out_of_range_uno(ctx, doc):
+    """OOR names the valid 0-based range and does not edit."""
+    _set_body(doc, "foo | foo")
+    before = doc.getText().getString()
+    tool_ctx = TestingFactory.create_context(doc=doc, ctx=ctx, env="native")
+    res = ApplyDocumentContent().execute(
+        tool_ctx,
+        target="search",
+        old_content="foo",
+        content="BAR",
+        occurrence=2,
+    )
+    assert res.get("status") == "error", res
+    assert res.get("code") == "OCCURRENCE_OUT_OF_RANGE", res
+    assert "use 0..1" in res.get("message", ""), res
+    assert doc.getText().getString() == before

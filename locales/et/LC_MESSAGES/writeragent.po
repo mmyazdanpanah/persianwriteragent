@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: PACKAGE VERSION\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-09-04 14:15-0400\n"
+"POT-Creation-Date: 2026-09-14 16:20-0400\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: Estonian <LL@li.org>\n"
@@ -72,9 +72,28 @@ msgstr "Selle juhtelemendi jaoks ei leitud märkmiku lahtrit."
 msgid "Open a Writer document first."
 msgstr "Ava esmalt Writeri dokument."
 
-#: plugin/notebook/writer_importer.py
+#: plugin/notebook/notebook_controls.py
 msgid "Run code cell"
 msgstr "Käivita koodilahter"
+
+#: plugin/embeddings/search_ui.py
+msgid "just now"
+msgstr "just nüüd"
+
+#: plugin/embeddings/search_ui.py
+#, python-brace-format
+msgid "{0}m ago"
+msgstr "{0} min tagasi"
+
+#: plugin/embeddings/search_ui.py
+#, python-brace-format
+msgid "{0}h ago"
+msgstr "{0} h tagasi"
+
+#: plugin/embeddings/search_ui.py
+#, python-brace-format
+msgid "{0}d ago"
+msgstr "{0} p tagasi"
 
 #: plugin/embeddings/search_ui.py
 msgid "Cache Status: No active document"
@@ -95,20 +114,6 @@ msgstr "Vahemälu olek: Pole koostatud (lancedb)"
 #: plugin/embeddings/search_ui.py
 msgid "Cache Status: Not built"
 msgstr "Vahemälu olek: Pole koostatud"
-
-#: plugin/embeddings/search_ui.py
-msgid "just now"
-msgstr "just nüüd"
-
-#: plugin/embeddings/search_ui.py
-#, python-brace-format
-msgid "{0}m ago"
-msgstr "{0} min tagasi"
-
-#: plugin/embeddings/search_ui.py
-#, python-brace-format
-msgid "{0}h ago"
-msgstr "{0} h tagasi"
 
 #: plugin/embeddings/search_ui.py
 #, python-brace-format
@@ -414,7 +419,8 @@ msgid "Status:"
 msgstr "Olek:"
 
 #: plugin/calc/python/cell_editor_ui.py plugin/chatbot/panel_wiring.py
-#: plugin/scripting/editor_ui_strings.py plugin/xdl_strings.py
+#: plugin/chatbot/panel.py plugin/scripting/editor_ui_strings.py
+#: plugin/xdl_strings.py
 msgid "Ready"
 msgstr "Valmis"
 
@@ -556,13 +562,13 @@ msgstr "Pildid lisatud"
 #: plugin/calc/python/geometric_recalc.py
 #, python-format
 msgid ""
-"Geometric Recalc Order skipped sheet '%s': found %s or more Python cells "
-"(discovery cap). The sheet was left unchained so a partial list is not "
-"treated as complete."
+"Geometric Recalc Order skipped sheet '%(sheet)s': found %(cap)s or more "
+"Python cells (discovery cap). The sheet was left unchained so a partial list "
+"is not treated as complete."
 msgstr ""
-"Geomeetrilise ümberarvutuse järjekord jättis lehe '%s' vahele: leiti %s või "
-"enam Pythoni lahtrit (tuvastamise piir). Leht jäeti aheldamata, et osalist "
-"loendit ei käsitletaks täielikuna."
+"Geomeetriline ümberarvutamise järjekord jättis lehe '%(sheet)s' vahele: "
+"leiti %(cap)s või rohkem Pythoni lahtrit (tuvastamise piirang). Leht jäeti "
+"aheldamata, et osalist loendit ei käsitletaks täielikuna."
 
 #: plugin/calc/excel_py_convert/auto_open.py
 #, python-brace-format
@@ -1324,6 +1330,10 @@ msgid ""
 "[Model {0} does not support native audio. Please select an STT Model in "
 "Settings.]"
 msgstr "[Mudel {0} ei toeta kohalikku heli. Palun valige seadetes STT-mudel.]"
+
+#: plugin/chatbot/panel.py
+msgid "[Peer send requires Chat mode on this sidebar.]"
+msgstr "[Vastastikune saatmine nõuab sellel külgribal vestlusrežiimi.]"
 
 #: plugin/chatbot/web_research_chat.py
 #, python-format
@@ -3139,6 +3149,20 @@ msgstr "Calc-i arvutustabeli tööriistad"
 
 msgid "Max Rows Display"
 msgstr "Maks. ridade arv"
+
+msgid "Cache Excel siblings as ODS"
+msgstr "Puhverda Exceli õed-failid ODS-vormingus"
+
+msgid ""
+"Convert sibling .xlsx/.xls to writeragent_ods_cache/ beside the folder so "
+"repeated DuckDB SQL reuses the ODS. Native .ods and the live workbook are "
+"never cached. Set calc.ods_cache_enabled false in writeragent.json to "
+"disable."
+msgstr ""
+"Teisenda õed-failid .xlsx/.xls kausta kõrval asuvasse writeragent_ods_cache/ "
+"kataloogi, et korduv DuckDB SQL saaks ODS-i taaskasutada. Natiivseid .ods-"
+"faile ja aktiivset töövihikut ei puhverdata kunagi. Keelamiseks määra "
+"writeragent.json failis calc.ods_cache_enabled väärtuseks false."
 
 msgid "Sidebar"
 msgstr "Külgriba"

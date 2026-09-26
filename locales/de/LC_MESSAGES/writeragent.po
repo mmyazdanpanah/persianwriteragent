@@ -3,7 +3,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: WriterAgent 1.0\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-09-04 14:15-0400\n"
+"POT-Creation-Date: 2026-09-14 16:20-0400\n"
 "PO-Revision-Date: 2024-03-21 12:00+0000\n"
 "Last-Translator: \n"
 "Language-Team: German\n"
@@ -68,9 +68,28 @@ msgstr "Notebook-Zelle für dieses Steuerelement konnte nicht gefunden werden."
 msgid "Open a Writer document first."
 msgstr "Öffnen Sie zuerst ein Writer-Dokument."
 
-#: plugin/notebook/writer_importer.py
+#: plugin/notebook/notebook_controls.py
 msgid "Run code cell"
 msgstr "Codezelle ausführen"
+
+#: plugin/embeddings/search_ui.py
+msgid "just now"
+msgstr "gerade eben"
+
+#: plugin/embeddings/search_ui.py
+#, python-brace-format
+msgid "{0}m ago"
+msgstr "vor {0} Min."
+
+#: plugin/embeddings/search_ui.py
+#, python-brace-format
+msgid "{0}h ago"
+msgstr "vor {0} Std."
+
+#: plugin/embeddings/search_ui.py
+#, python-brace-format
+msgid "{0}d ago"
+msgstr "vor {0} T."
 
 #: plugin/embeddings/search_ui.py
 msgid "Cache Status: No active document"
@@ -91,20 +110,6 @@ msgstr "Cache-Status: Nicht erstellt (lancedb)"
 #: plugin/embeddings/search_ui.py
 msgid "Cache Status: Not built"
 msgstr "Cache-Status: Nicht erstellt"
-
-#: plugin/embeddings/search_ui.py
-msgid "just now"
-msgstr "gerade eben"
-
-#: plugin/embeddings/search_ui.py
-#, python-brace-format
-msgid "{0}m ago"
-msgstr "vor {0} Min."
-
-#: plugin/embeddings/search_ui.py
-#, python-brace-format
-msgid "{0}h ago"
-msgstr "vor {0} Std."
 
 #: plugin/embeddings/search_ui.py
 #, python-brace-format
@@ -421,7 +426,8 @@ msgid "Status:"
 msgstr "Status:"
 
 #: plugin/calc/python/cell_editor_ui.py plugin/chatbot/panel_wiring.py
-#: plugin/scripting/editor_ui_strings.py plugin/xdl_strings.py
+#: plugin/chatbot/panel.py plugin/scripting/editor_ui_strings.py
+#: plugin/xdl_strings.py
 msgid "Ready"
 msgstr "Bereit"
 
@@ -567,14 +573,14 @@ msgstr "Bilder eingefügt"
 #: plugin/calc/python/geometric_recalc.py
 #, python-format
 msgid ""
-"Geometric Recalc Order skipped sheet '%s': found %s or more Python cells "
-"(discovery cap). The sheet was left unchained so a partial list is not "
-"treated as complete."
+"Geometric Recalc Order skipped sheet '%(sheet)s': found %(cap)s or more "
+"Python cells (discovery cap). The sheet was left unchained so a partial list "
+"is not treated as complete."
 msgstr ""
-"Geometrische Neuberechnungsreihenfolge hat Tabelle '%s' übersprungen: %s "
-"oder mehr Python-Zellen gefunden (Erkennungslimit). Die Tabelle wurde "
-"unverändert gelassen, damit eine unvollständige Liste nicht als vollständig "
-"behandelt wird."
+"Geometrische Neuberechnungsreihenfolge übersprang Tabelle '%(sheet)s': "
+"%(cap)s oder mehr Python-Zellen gefunden (Erkennungslimit). Die Tabelle "
+"wurde unverändert gelassen, damit eine unvollständige Liste nicht als "
+"vollständig behandelt wird."
 
 #: plugin/calc/excel_py_convert/auto_open.py
 #, python-brace-format
@@ -1347,6 +1353,10 @@ msgid ""
 msgstr ""
 "[Modell {0} unterstützt kein natives Audio. Bitte wählen Sie ein STT-Modell "
 "in den Einstellungen aus.]"
+
+#: plugin/chatbot/panel.py
+msgid "[Peer send requires Chat mode on this sidebar.]"
+msgstr "[Peer-Senden erfordert den Chat-Modus in dieser Seitenleiste.]"
 
 #: plugin/chatbot/web_research_chat.py
 #, python-format
@@ -3196,6 +3206,22 @@ msgstr "Calc-Tabellen-Tools"
 
 msgid "Max Rows Display"
 msgstr "Maximale Zeilenanzeige"
+
+msgid "Cache Excel siblings as ODS"
+msgstr "Excel-Geschwisterdateien als ODS zwischenspeichern"
+
+msgid ""
+"Convert sibling .xlsx/.xls to writeragent_ods_cache/ beside the folder so "
+"repeated DuckDB SQL reuses the ODS. Native .ods and the live workbook are "
+"never cached. Set calc.ods_cache_enabled false in writeragent.json to "
+"disable."
+msgstr ""
+"Konvertiert Geschwisterdateien im .xlsx/.xls-Format nach "
+"writeragent_ods_cache/ neben dem Ordner, damit wiederholte DuckDB-SQL-"
+"Abfragen das ODS wiederverwenden. Native .ods-Dateien und die aktive "
+"Arbeitsmappe werden niemals zwischengespeichert. Setzen Sie "
+"calc.ods_cache_enabled auf false in writeragent.json, um dies zu "
+"deaktivieren."
 
 msgid "Sidebar"
 msgstr "Seitenleiste"

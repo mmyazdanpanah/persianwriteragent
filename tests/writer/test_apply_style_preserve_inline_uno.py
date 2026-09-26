@@ -7,14 +7,22 @@
 # (at your option) any later version.
 #
 # Regression test: applying a paragraph style via apply_style must not wipe DIRECT
-# character formatting (color/bold/highlight) already set on the target text. The fix
-# captures the direct char overrides (values that differ from the old style's defaults)
-# and restores them after setting ParaStyleName.
+# character emphasis (color/bold/highlight) already set on the target text. Default
+# clear_direct is style_props: house font/size win, bold/italic/colour stay. The
+# helper captures Char* that differ from the old style default and restores
+# everything except STYLE_GOVERNED_CHAR_PROPERTIES (font name/size).
 import uno  # noqa: F401
 
 from plugin.testing_runner import native_test
-from plugin.writer.styles import ApplyStyle
-from plugin.tests.testing_utils import TestingFactory, with_native_doc
+from plugin.writer.styles import ApplyStyle, StyleUpdate
+from plugin.tests.testing_utils import (
+    TestingFactory,
+    skip_windows_leftover_hidden_load,
+    with_native_doc,
+)
+
+_HOUSE_FONT = "Liberation Sans"
+_DIRECT_FONT = "Times New Roman"
 
 
 @native_test
@@ -103,14 +111,31 @@ def test_apply_style_known_limitation_direct_equals_old_default_uno(ctx, doc):
     DIRECTLY; apply Heading 1 (default bold=150). The ideal would be to stay 100, but
     today it becomes 150. This test PINS the current behavior; if we ever improve the
     origin detection, it fails and reminds us to update."""
+    # GHA 34683742049: leftover writer reuse (after Quotations apply) flipped
+    # this canary. Product still compares value vs old style default
+    # (format.apply_paragraph_style_preserving_direct_char); Linux still
+    # pins CharWeight=150. Not origin detection improved — leftover style
+    # table / para state is not a clean Standard→Heading 1 fixture.
+    skip_windows_leftover_hidden_load("apply_style origin canary leftover reuse")
     text = doc.getText()
     insert_cur = text.createTextCursor()
     text.insertString(insert_cur, "Directly-normal text.", False)
 
+    # Force Standard first. Leftover Heading 1 / Quotations (Windows pool
+    # reuse, leftover_open=0 so the skip above does not fire) makes
+    # re-applying Heading 1 a no-op for Char*, which looks like "origin
+    # detection improved" (GHA 35466498641). Read the real style defaults
+    # instead of assuming Standard=100 / Heading 1=150.
+    para_styles = doc.getStyleFamilies().getByName("ParagraphStyles")
+    standard = para_styles.getByName("Standard")
+    heading = para_styles.getByName("Heading 1")
+    old_default = float(standard.getPropertyValue("CharWeight") or 100)
+    new_default = float(heading.getPropertyValue("CharWeight") or 150)
     fmt = text.createTextCursorByRange(text.getStart())
     fmt.gotoEnd(True)
-    fmt.setPropertyValue("CharWeight", 100.0)  # NORMAL, set directly = Standard's default
-    assert fmt.getPropertyValue("CharWeight") == 100.0
+    fmt.setPropertyValue("ParaStyleName", "Standard")
+    fmt.setPropertyValue("CharWeight", old_default)  # equals Standard's default, set directly
+    assert fmt.getPropertyValue("CharWeight") == old_default
 
     tool_ctx = TestingFactory.create_context(doc=doc, ctx=ctx, env="native")
     res = ApplyStyle().execute(
@@ -120,8 +145,8 @@ def test_apply_style_known_limitation_direct_equals_old_default_uno(ctx, doc):
 
     chk = text.createTextCursorByRange(text.getStart())
     chk.gotoEnd(True)
-    # LIMITATION: the 'normal' override (= Standard's default) was not preserved -> Heading 1 bold.
-    assert chk.getPropertyValue("CharWeight") == 150.0, \
+    # LIMITATION: the override (= old style default) was not preserved.
+    assert chk.getPropertyValue("CharWeight") == new_default, \
         "if this fails, origin detection improved — update the doc/limitation"
 
 
@@ -216,6 +241,114 @@ def test_apply_paragraph_style_multi_paragraph_selection_uno(ctx, doc):
     p2.goRight(len("First paragraph here.") + 1 + 6, True)
     assert int(p2.getPropertyValue("CharColor")) == 0xFF0000, \
         "direct COLOR lost in second paragraph"
+
+
+@native_test
+@with_native_doc("writer")
+def test_apply_style_default_shows_house_font_keeps_bold_uno(ctx, doc):
+    """Lawyer path: Times + bold → update Standard house font → apply Standard with
+    no clear_direct arg → house font shows, bold survives. Small models must not
+    need a retry-with-style_props dance."""
+    text = doc.getText()
+    text.setString("")
+    cur = text.createTextCursor()
+    text.insertString(cur, "Lawyer clause in Times.", False)
+
+    fmt = text.createTextCursorByRange(text.getStart())
+    fmt.gotoEnd(True)
+    fmt.setPropertyValue("CharFontName", _DIRECT_FONT)
+    fmt.setPropertyValue("CharWeight", 150.0)
+    assert fmt.getPropertyValue("CharFontName") == _DIRECT_FONT
+    assert fmt.getPropertyValue("CharWeight") == 150.0
+
+    tool_ctx = TestingFactory.create_context(doc=doc, ctx=ctx, env="native")
+    upd = StyleUpdate().execute(
+        tool_ctx, style="Standard", family="ParagraphStyles",
+        property_updates={"CharFontName": _HOUSE_FONT},
+    )
+    assert upd.get("status") == "ok", upd
+
+    res = ApplyStyle().execute(
+        tool_ctx, style="Standard", family="ParagraphStyles",
+        target="search", old_content="Lawyer clause in Times.",
+    )
+    assert res.get("status") == "ok", f"apply_style failed: {res}"
+    assert "hint" not in res
+    assert res.get("removed_char_overrides", {}).get("CharFontName") == _DIRECT_FONT
+
+    chk = text.createTextCursorByRange(text.getStart())
+    chk.gotoEnd(True)
+    assert chk.getPropertyValue("CharFontName") == _HOUSE_FONT, (
+        "default apply_style left the direct font standing (house font should win): %r"
+        % chk.getPropertyValue("CharFontName"))
+    assert chk.getPropertyValue("CharWeight") == 150.0, (
+        "default apply_style wiped bold; style_props must keep emphasis")
+
+
+@native_test
+@with_native_doc("writer")
+def test_apply_style_explicit_none_keeps_direct_font_uno(ctx, doc):
+    """clear_direct='none' is the opt-in that still masks Times over the house font."""
+    text = doc.getText()
+    text.setString("")
+    cur = text.createTextCursor()
+    text.insertString(cur, "Keep Times on this clause.", False)
+
+    fmt = text.createTextCursorByRange(text.getStart())
+    fmt.gotoEnd(True)
+    fmt.setPropertyValue("CharFontName", _DIRECT_FONT)
+    fmt.setPropertyValue("CharWeight", 150.0)
+
+    tool_ctx = TestingFactory.create_context(doc=doc, ctx=ctx, env="native")
+    upd = StyleUpdate().execute(
+        tool_ctx, style="Standard", family="ParagraphStyles",
+        property_updates={"CharFontName": _HOUSE_FONT},
+    )
+    assert upd.get("status") == "ok", upd
+
+    res = ApplyStyle().execute(
+        tool_ctx, style="Standard", family="ParagraphStyles",
+        target="search", old_content="Keep Times on this clause.",
+        clear_direct="none",
+    )
+    assert res.get("status") == "ok", f"apply_style failed: {res}"
+    assert "hint" not in res
+    assert res.get("preserved_char_overrides", {}).get("CharFontName") == _DIRECT_FONT
+
+    chk = text.createTextCursorByRange(text.getStart())
+    chk.gotoEnd(True)
+    assert chk.getPropertyValue("CharFontName") == _DIRECT_FONT, (
+        "explicit none must keep the direct font, got %r" % chk.getPropertyValue("CharFontName"))
+    assert chk.getPropertyValue("CharWeight") == 150.0
+
+
+@native_test
+@with_native_doc("writer")
+def test_apply_style_reapply_drops_direct_para_indent_uno(ctx, doc):
+    """Honest pin: setting ParaStyleName drops direct Para* (quote indents). Keith's F1
+    probe — do not promise that re-applying a style keeps a hand-set margin, even on none."""
+    text = doc.getText()
+    text.setString("")
+    cur = text.createTextCursor()
+    text.insertString(cur, "Indented quote lookalike.", False)
+
+    fmt = text.createTextCursorByRange(text.getStart())
+    fmt.gotoEnd(True)
+    fmt.setPropertyValue("ParaLeftMargin", 3251)  # ~3.25 cm
+    assert int(fmt.getPropertyValue("ParaLeftMargin")) == 3251
+
+    tool_ctx = TestingFactory.create_context(doc=doc, ctx=ctx, env="native")
+    res = ApplyStyle().execute(
+        tool_ctx, style="Standard", family="ParagraphStyles",
+        target="search", old_content="Indented quote lookalike.",
+        clear_direct="none",
+    )
+    assert res.get("status") == "ok", f"apply_style failed: {res}"
+
+    chk = text.createTextCursorByRange(text.getStart())
+    chk.gotoEnd(True)
+    assert int(chk.getPropertyValue("ParaLeftMargin")) != 3251, (
+        "if this fails, re-apply started keeping direct Para* — update the docs")
 
 
 @native_test

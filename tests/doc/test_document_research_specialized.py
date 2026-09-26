@@ -101,6 +101,23 @@ def test_document_research_workflow_hint_on():
     assert "grep_nearby_files" not in hint
     assert "fused" in hint
 
+
+def test_document_research_workflow_hint_peer_choice_when_peers_open():
+    from plugin.doc.document_research import get_document_research_workflow_hint
+
+    ctx = MagicMock()
+    doc = MagicMock()
+    peers = [{"name": "Budget.ods", "uid": "u2", "url": "", "type": "calc"}]
+    with patch("plugin.framework.constants.folder_search_enabled", return_value=False):
+        with patch("plugin.doc.peer_message.list_v1_peers", return_value=peers):
+            hint = get_document_research_workflow_hint(ctx, doc)
+    assert "send_peer_work" in hint
+    assert "send_peer_result" in hint
+    assert "delegate_read_document" in hint
+    assert "Budget.ods" in hint
+    assert "PEER SIDEBARS" not in hint
+
+
 @patch("plugin.doc.specialized_base.USE_SUB_AGENT", False)
 def test_document_research_requires_sub_agent_when_disabled():
     r = ToolRegistry(services={})
@@ -167,6 +184,68 @@ def test_document_research_outer_delegation_gets_document_research_tools(
     assert "list_nearby_files" in names
     assert "grep_nearby_files" in names
     assert "delegate_read_document" in names
+    assert "send_peer_work" not in names
+    assert "send_peer_result" not in names
+
+
+@patch(
+    "plugin.chatbot.smol_agent.get_config_int",
+    side_effect=_mock_get_config_int_for_sub_agent,
+)
+@patch("plugin.chatbot.smol_agent.get_api_config", create=True)
+@patch("plugin.chatbot.smol_agent.ToolCallingAgent")
+@patch("plugin.chatbot.smol_agent.WriterAgentSmolModel")
+@patch("plugin.chatbot.smol_agent.LlmClient")
+def test_document_research_outer_delegation_gets_peer_send_when_peers_open(
+    mock_llm,
+    mock_smol_model,
+    mock_agent_class,
+    mock_get_config,
+    _mock_get_config_int,
+):
+    from plugin.doc.peer_message import SendPeerResult, SendPeerWork
+
+    r = ToolRegistry(services={})
+    r.register(ListNearbyFiles())
+    r.register(DelegateReadDocument())
+    r.register(SendPeerWork())
+    r.register(SendPeerResult())
+    r.register(SpecializedWorkflowFinished())
+    r.register(DelegateToSpecializedWriter())
+
+    mock_get_config.return_value = {}
+    mock_agent_instance = MagicMock()
+    mock_agent_instance.run.return_value = [FinalAnswerStep(output="done")]
+    mock_agent_class.return_value = mock_agent_instance
+
+    ctx = MagicMock()
+    ctx.doc = MagicMock()
+    ctx.doc.supportsService = lambda svc: svc == "com.sun.star.text.TextDocument"
+    ctx.ctx = MagicMock()
+    ctx.services = {"tools": r}
+    ctx.stop_checker = lambda: False
+    ctx.active_domain = None
+    peers = [{"name": "Budget.ods", "uid": "u2", "url": "", "type": "calc"}]
+    gw = r.get("delegate_to_specialized_writer_toolset")
+    with patch("plugin.doc.document_research.get_open_documents", return_value=[]):
+        with patch("plugin.doc.peer_message.list_v1_peers", return_value=peers):
+            result = gw.execute_safe(ctx, domain="document_research", task="Get Q4 from the open budget")
+    assert result["status"] == "ok"
+    smol_tools = mock_agent_class.call_args.kwargs.get("tools", [])
+    names = {t.name for t in smol_tools}
+    assert "send_peer_work" in names
+    assert "send_peer_result" in names
+    assert "delegate_read_document" in names
+    peer_adapter = next(t for t in smol_tools if t.name == "send_peer_work")
+    peer_result_adapter = next(t for t in smol_tools if t.name == "send_peer_result")
+    assert "Budget.ods" in peer_result_adapter.description
+    assert "Budget.ods" in peer_adapter.description
+    assert "uid=u2" in peer_adapter.description
+    instructions = mock_agent_class.call_args.kwargs.get("instructions") or ""
+    assert "send_peer_work" in instructions
+    assert "send_peer_result" in instructions
+    assert "ASK vs REPLY" in instructions
+    assert ctx.active_domain is None
 
 
 @patch(
@@ -227,6 +306,174 @@ def test_document_research_chat_append_on_delegate_read_document(
     assert "Budget.ods" in captured[0]
     assert "[Document research]" not in captured[0]
     assert "delegate_read_document" in captured[0]
+
+
+@patch(
+    "plugin.chatbot.smol_agent.get_config_int",
+    side_effect=_mock_get_config_int_for_sub_agent,
+)
+@patch("plugin.chatbot.smol_agent.get_api_config", create=True)
+@patch("plugin.chatbot.smol_agent.ToolCallingAgent")
+@patch("plugin.chatbot.smol_agent.WriterAgentSmolModel")
+@patch("plugin.chatbot.smol_agent.LlmClient")
+@patch("plugin.doc.specialized_base.SmolAgentExecutor")
+def test_document_research_return_idles_outer_after_peer_send(
+    mock_executor_cls,
+    mock_llm,
+    mock_smol_model,
+    mock_agent_class,
+    mock_get_config,
+    _mock_get_config_int,
+):
+    """Host appends idle-after-send when an inner peer send ran."""
+    from plugin.framework.prompts import PEER_OUTER_IDLE_AFTER_SEND
+
+    def fake_execute_safe(agent, task, tool_call_handler=None, **kwargs):
+        if tool_call_handler:
+            tool_call_handler(
+                ToolCall(
+                    name="send_peer_work",
+                    arguments={"document_url": "u2", "message": "Get KPIs"},
+                    id="peer-send-1",
+                )
+            )
+        return "Message sent to the peer."
+
+    mock_executor_cls.return_value.execute_safe.side_effect = fake_execute_safe
+
+    r = ToolRegistry(services={})
+    r.register(ListNearbyFiles())
+    r.register(DelegateReadDocument())
+    r.register(SpecializedWorkflowFinished())
+    r.register(DelegateToSpecializedWriter())
+
+    mock_get_config.return_value = {}
+    mock_agent_class.return_value = MagicMock()
+
+    ctx = MagicMock()
+    ctx.doc = MagicMock()
+    ctx.doc.supportsService = lambda svc: svc == "com.sun.star.text.TextDocument"
+    ctx.ctx = MagicMock()
+    ctx.services = {"tools": r}
+    ctx.stop_checker = lambda: False
+
+    gw = r.get("delegate_to_specialized_writer_toolset")
+    with patch("plugin.doc.document_research.get_open_documents", return_value=[]):
+        result = gw.execute_safe(ctx, domain="document_research", task="Get KPIs from the open sheet")
+    assert result["status"] == "ok"
+    assert PEER_OUTER_IDLE_AFTER_SEND in result["message"]
+    assert PEER_OUTER_IDLE_AFTER_SEND in result["result"]
+
+
+@patch(
+    "plugin.chatbot.smol_agent.get_config_int",
+    side_effect=_mock_get_config_int_for_sub_agent,
+)
+@patch("plugin.chatbot.smol_agent.get_api_config", create=True)
+@patch("plugin.chatbot.smol_agent.ToolCallingAgent")
+@patch("plugin.chatbot.smol_agent.WriterAgentSmolModel")
+@patch("plugin.chatbot.smol_agent.LlmClient")
+@patch("plugin.doc.specialized_base.SmolAgentExecutor")
+@patch("plugin.doc.specialized_base._outer_turn_is_peer_work", return_value=True)
+def test_ranges_return_stamps_delivery_pending_on_peer_work_turn(
+    _mock_peer_work,
+    mock_executor_cls,
+    mock_llm,
+    mock_smol_model,
+    mock_agent_class,
+    mock_get_config,
+    _mock_get_config_int,
+):
+    """Nested ranges finish on a Peer-work turn must not look like peer delivery."""
+    from plugin.calc.cells import SortRange
+    from plugin.framework.prompts import PEER_OUTER_DELIVERY_STILL_REQUIRED
+
+    mock_executor_cls.return_value.execute_safe.return_value = "Range A2:B5 sorted descending"
+    mock_get_config.return_value = {}
+    mock_agent_class.return_value = MagicMock()
+
+    r = ToolRegistry(services={})
+    r.register(SortRange())
+    r.register(SpecializedWorkflowFinished())
+    r.register(DelegateToSpecializedCalc())
+
+    ctx = MagicMock()
+    ctx.doc = MagicMock()
+    ctx.doc.supportsService = lambda svc: svc == "com.sun.star.sheet.SpreadsheetDocument"
+    ctx.ctx = MagicMock()
+    ctx.services = {"tools": r}
+    ctx.stop_checker = lambda: False
+
+    gw = r.get("delegate_to_specialized_calc_toolset")
+    result = gw.execute_safe(ctx, domain="ranges", task="Sort A2:B5 descending")
+    assert result["status"] == "ok"
+    assert PEER_OUTER_DELIVERY_STILL_REQUIRED in result["message"]
+    assert PEER_OUTER_DELIVERY_STILL_REQUIRED in result["result"]
+    assert result["instruction"] == PEER_OUTER_DELIVERY_STILL_REQUIRED
+
+
+@patch(
+    "plugin.chatbot.smol_agent.get_config_int",
+    side_effect=_mock_get_config_int_for_sub_agent,
+)
+@patch("plugin.chatbot.smol_agent.get_api_config", create=True)
+@patch("plugin.chatbot.smol_agent.ToolCallingAgent")
+@patch("plugin.chatbot.smol_agent.WriterAgentSmolModel")
+@patch("plugin.chatbot.smol_agent.LlmClient")
+@patch("plugin.doc.specialized_base.SmolAgentExecutor")
+@patch("plugin.doc.specialized_base._outer_turn_is_peer_work", return_value=True)
+def test_document_research_send_peer_result_skips_delivery_pending(
+    _mock_peer_work,
+    mock_executor_cls,
+    mock_llm,
+    mock_smol_model,
+    mock_agent_class,
+    mock_get_config,
+    _mock_get_config_int,
+):
+    """send_peer_result on a Peer-work turn keeps idle-after-send, not delivery-pending."""
+    from plugin.framework.prompts import (
+        PEER_OUTER_DELIVERY_STILL_REQUIRED,
+        PEER_OUTER_IDLE_AFTER_SEND,
+    )
+
+    def fake_execute_safe(agent, task, tool_call_handler=None, **kwargs):
+        if tool_call_handler:
+            tool_call_handler(
+                ToolCall(
+                    name="send_peer_result",
+                    arguments={"document_url": "u1", "message": "<table/>"},
+                    id="peer-result-1",
+                )
+            )
+        return "Queued. You MUST call specialized_workflow_finished immediately."
+
+    mock_executor_cls.return_value.execute_safe.side_effect = fake_execute_safe
+    mock_get_config.return_value = {}
+    mock_agent_class.return_value = MagicMock()
+
+    r = ToolRegistry(services={})
+    r.register(ListNearbyFiles())
+    r.register(DelegateReadDocument())
+    r.register(SpecializedWorkflowFinished())
+    r.register(DelegateToSpecializedCalc())
+
+    ctx = MagicMock()
+    ctx.doc = MagicMock()
+    ctx.doc.supportsService = lambda svc: svc == "com.sun.star.sheet.SpreadsheetDocument"
+    ctx.ctx = MagicMock()
+    ctx.services = {"tools": r}
+    ctx.stop_checker = lambda: False
+
+    gw = r.get("delegate_to_specialized_calc_toolset")
+    with patch("plugin.doc.document_research.get_open_documents", return_value=[]):
+        result = gw.execute_safe(
+            ctx, domain="document_research", task="Deliver sorted table to peer"
+        )
+    assert result["status"] == "ok"
+    assert PEER_OUTER_IDLE_AFTER_SEND in result["message"]
+    assert PEER_OUTER_DELIVERY_STILL_REQUIRED not in result["message"]
+    assert result.get("instruction") != PEER_OUTER_DELIVERY_STILL_REQUIRED
 
 
 @patch("plugin.doc.document_research_specialized.build_toolcalling_agent")

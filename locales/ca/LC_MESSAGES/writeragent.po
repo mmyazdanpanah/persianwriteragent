@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: PACKAGE VERSION\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-09-04 14:15-0400\n"
+"POT-Creation-Date: 2026-09-14 16:20-0400\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: Catalan <LL@li.org>\n"
@@ -72,9 +72,28 @@ msgstr "No s'ha pogut trobar la cel·la del quadern per a aquest control."
 msgid "Open a Writer document first."
 msgstr "Obriu primer un document del Writer."
 
-#: plugin/notebook/writer_importer.py
+#: plugin/notebook/notebook_controls.py
 msgid "Run code cell"
 msgstr "Executa la cel·la de codi"
+
+#: plugin/embeddings/search_ui.py
+msgid "just now"
+msgstr "ara mateix"
+
+#: plugin/embeddings/search_ui.py
+#, python-brace-format
+msgid "{0}m ago"
+msgstr "fa {0}m"
+
+#: plugin/embeddings/search_ui.py
+#, python-brace-format
+msgid "{0}h ago"
+msgstr "fa {0}h"
+
+#: plugin/embeddings/search_ui.py
+#, python-brace-format
+msgid "{0}d ago"
+msgstr "fa {0}d"
 
 #: plugin/embeddings/search_ui.py
 msgid "Cache Status: No active document"
@@ -95,20 +114,6 @@ msgstr "Estat de la memòria cau: No construïda (lancedb)"
 #: plugin/embeddings/search_ui.py
 msgid "Cache Status: Not built"
 msgstr "Estat de la memòria cau: No construïda"
-
-#: plugin/embeddings/search_ui.py
-msgid "just now"
-msgstr "ara mateix"
-
-#: plugin/embeddings/search_ui.py
-#, python-brace-format
-msgid "{0}m ago"
-msgstr "fa {0}m"
-
-#: plugin/embeddings/search_ui.py
-#, python-brace-format
-msgid "{0}h ago"
-msgstr "fa {0}h"
 
 #: plugin/embeddings/search_ui.py
 #, python-brace-format
@@ -428,7 +433,8 @@ msgid "Status:"
 msgstr "Estat:"
 
 #: plugin/calc/python/cell_editor_ui.py plugin/chatbot/panel_wiring.py
-#: plugin/scripting/editor_ui_strings.py plugin/xdl_strings.py
+#: plugin/chatbot/panel.py plugin/scripting/editor_ui_strings.py
+#: plugin/xdl_strings.py
 msgid "Ready"
 msgstr "Preparat"
 
@@ -575,13 +581,13 @@ msgstr "Imatges inserides"
 #: plugin/calc/python/geometric_recalc.py
 #, python-format
 msgid ""
-"Geometric Recalc Order skipped sheet '%s': found %s or more Python cells "
-"(discovery cap). The sheet was left unchained so a partial list is not "
-"treated as complete."
+"Geometric Recalc Order skipped sheet '%(sheet)s': found %(cap)s or more "
+"Python cells (discovery cap). The sheet was left unchained so a partial list "
+"is not treated as complete."
 msgstr ""
-"L'ordre de recalcul geomètric ha omès el full «%s»: s'han trobat %s o més "
-"cel·les Python (límit de descoberta). El full s'ha deixat sense canvis "
-"perquè una llista parcial no es tracti com a completa."
+"Ordre de recalcul geomètric saltat al full «%(sheet)s»: s'han trobat %(cap)s "
+"o més cel·les Python (límit de descoberta). El full s'ha deixat sense "
+"encadenar perquè una llista parcial no es tracti com a completa."
 
 #: plugin/calc/excel_py_convert/auto_open.py
 #, python-brace-format
@@ -1349,6 +1355,11 @@ msgid ""
 msgstr ""
 "[El model {0} no admet àudio natiu. Si us plau, seleccioneu un model STT a "
 "la configuració.]"
+
+#: plugin/chatbot/panel.py
+msgid "[Peer send requires Chat mode on this sidebar.]"
+msgstr ""
+"[L'enviament entre iguals requereix el mode Xat en aquesta barra lateral.]"
 
 #: plugin/chatbot/web_research_chat.py
 #, python-format
@@ -3196,6 +3207,20 @@ msgstr "Eines de full de càlcul del Calc"
 
 msgid "Max Rows Display"
 msgstr "Nombre màxim de files"
+
+msgid "Cache Excel siblings as ODS"
+msgstr "Crea una memòria cau dels fitxers Excel germans com a ODS"
+
+msgid ""
+"Convert sibling .xlsx/.xls to writeragent_ods_cache/ beside the folder so "
+"repeated DuckDB SQL reuses the ODS. Native .ods and the live workbook are "
+"never cached. Set calc.ods_cache_enabled false in writeragent.json to "
+"disable."
+msgstr ""
+"Converteix els fitxers germans .xlsx/.xls a writeragent_ods_cache/ al costat "
+"de la carpeta perquè el SQL de DuckDB reutilitzi l'ODS. Els .ods natius i el "
+"llibre de treball actiu no es posen mai a la memòria cau. Establiu "
+"calc.ods_cache_enabled a false a writeragent.json per desactivar-ho."
 
 msgid "Sidebar"
 msgstr "Barra lateral"

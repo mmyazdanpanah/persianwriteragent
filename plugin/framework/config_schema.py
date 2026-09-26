@@ -259,7 +259,7 @@ _DEFAULT_PYTHON_SCRIPTS = {
             print("Unsupported document type for rich text insertion.")
 
         # 2. 24-sided star (sizes in 100ths of a mm; 4000 = 4cm)
-        wa.shape.upsert(action="create", shape_type="star24", x=2000, y=5000, width=4000, height=4000, fill_color="blue", text="24-sided Star")
+        _ = wa.shape.upsert(action="create", shape_type="star24", x=2000, y=5000, width=4000, height=4000, fill_color="blue", text="24-sided Star")
         print("Inserted a 24-sided blue star shape.")
         """).strip(),
 }
@@ -295,6 +295,12 @@ def _normalize_configured_endpoint(endpoint_str: str, is_openwebui: bool) -> str
     return _endpoint_normalizer(endpoint_str, is_openwebui)
 
 
+# 1024 maps to vendor "1K". Models dislike 512 / 0.5K — OpenRouter chat
+# rejects image_size "0.5K" for some Gemini image models. On-page display
+# is capped separately (visual_helpers.GENERATED_IMAGE_MAX_DISPLAY_MM).
+DEFAULT_IMAGE_BASE_SIZE = 1024
+
+
 @dataclasses.dataclass
 class WriterAgentConfig:
     """Dataclass schema for WriterAgent configuration."""
@@ -305,10 +311,14 @@ class WriterAgentConfig:
     temperature: float = -1.0
     additional_instructions: str = ""
     chat_max_tokens: int = 16384
+    # Sidebar history auto-compact (plugin/chatbot/compaction.py). Unused by the
+    # tool loop until PR2; default ON matches the v2 plan. False disables both
+    # proactive compact and overflow retry once wired.
+    chat_compaction_enabled: bool = True
     request_timeout: int = 120
     stt_model: str = ""
     api_keys_by_endpoint: Dict[str, str] = dataclasses.field(default_factory=dict)
-    image_base_size: int = 512
+    image_base_size: int = DEFAULT_IMAGE_BASE_SIZE
     image_default_aspect: str = "Square"
     image_steps: int = -1
     image_auto_gallery: bool = True

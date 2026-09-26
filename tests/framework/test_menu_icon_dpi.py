@@ -3,6 +3,21 @@
 from plugin.framework.menu_icon_dpi import interpolate_menu_icon_px, reset_menu_icon_dpi_cache
 
 
+def test_candidate_windows_skips_desktop_create_on_no_vcl():
+    from unittest.mock import MagicMock, patch
+    from plugin.framework import menu_icon_dpi as m
+
+    smgr = MagicMock()
+    ctx = MagicMock()
+    ctx.ServiceManager = smgr
+    with (
+        patch("plugin.framework.appearance.get_style_window", return_value=None),
+        patch("plugin.framework.uno_context.desktop_create_is_unsafe", return_value=True),
+    ):
+        assert m._candidate_windows(ctx) == []
+    smgr.createInstanceWithContext.assert_not_called()
+
+
 def test_one_x_keeps_16():
     assert interpolate_menu_icon_px(1.0) == 16
 
@@ -71,6 +86,9 @@ def test_menu_icon_filename_uses_only_32_when_that_is_all(monkeypatch, tmp_path)
 def test_strong_cache_logs_info_once(monkeypatch, caplog):
     import logging
     from plugin.framework import menu_icon_dpi as m
+    from tests.strip_bundle import skip_if_release_build
+
+    skip_if_release_build("log.info stripped in release bundle")
 
     m.reset_menu_icon_dpi_cache()
     monkeypatch.setattr(m, "probe_vcl_dpi_scale", lambda ctx=None: 1.0)

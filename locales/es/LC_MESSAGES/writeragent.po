@@ -7,7 +7,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: PACKAGE VERSION\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-09-04 14:15-0400\n"
+"POT-Creation-Date: 2026-09-14 16:20-0400\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: Spanish <LL@li.org>\n"
@@ -71,9 +71,28 @@ msgstr "No se pudo encontrar la celda del cuaderno para este control."
 msgid "Open a Writer document first."
 msgstr "Abra primero un documento de Writer."
 
-#: plugin/notebook/writer_importer.py
+#: plugin/notebook/notebook_controls.py
 msgid "Run code cell"
 msgstr "Ejecutar celda de código"
+
+#: plugin/embeddings/search_ui.py
+msgid "just now"
+msgstr "justo ahora"
+
+#: plugin/embeddings/search_ui.py
+#, python-brace-format
+msgid "{0}m ago"
+msgstr "hace {0}m"
+
+#: plugin/embeddings/search_ui.py
+#, python-brace-format
+msgid "{0}h ago"
+msgstr "hace {0}h"
+
+#: plugin/embeddings/search_ui.py
+#, python-brace-format
+msgid "{0}d ago"
+msgstr "hace {0}d"
 
 #: plugin/embeddings/search_ui.py
 msgid "Cache Status: No active document"
@@ -94,20 +113,6 @@ msgstr "Estado de la caché: No construido (lancedb)"
 #: plugin/embeddings/search_ui.py
 msgid "Cache Status: Not built"
 msgstr "Estado de la caché: No construido"
-
-#: plugin/embeddings/search_ui.py
-msgid "just now"
-msgstr "justo ahora"
-
-#: plugin/embeddings/search_ui.py
-#, python-brace-format
-msgid "{0}m ago"
-msgstr "hace {0}m"
-
-#: plugin/embeddings/search_ui.py
-#, python-brace-format
-msgid "{0}h ago"
-msgstr "hace {0}h"
 
 #: plugin/embeddings/search_ui.py
 #, python-brace-format
@@ -424,7 +429,8 @@ msgid "Status:"
 msgstr "Estado:"
 
 #: plugin/calc/python/cell_editor_ui.py plugin/chatbot/panel_wiring.py
-#: plugin/scripting/editor_ui_strings.py plugin/xdl_strings.py
+#: plugin/chatbot/panel.py plugin/scripting/editor_ui_strings.py
+#: plugin/xdl_strings.py
 msgid "Ready"
 msgstr "Listo"
 
@@ -571,13 +577,13 @@ msgstr "Imágenes insertadas"
 #: plugin/calc/python/geometric_recalc.py
 #, python-format
 msgid ""
-"Geometric Recalc Order skipped sheet '%s': found %s or more Python cells "
-"(discovery cap). The sheet was left unchained so a partial list is not "
-"treated as complete."
+"Geometric Recalc Order skipped sheet '%(sheet)s': found %(cap)s or more "
+"Python cells (discovery cap). The sheet was left unchained so a partial list "
+"is not treated as complete."
 msgstr ""
-"El orden de recálculo geométrico omitió la hoja «%s»: se encontraron %s o "
-"más celdas de Python (límite de descubrimiento). La hoja se dejó sin "
-"encadenar para que una lista parcial no se considere completa."
+"Orden de recálculo geométrico omitió la hoja «%(sheet)s»: se encontraron "
+"%(cap)s o más celdas de Python (límite de descubrimiento). La hoja se dejó "
+"sin encadenar para que una lista parcial no se trate como completa."
 
 #: plugin/calc/excel_py_convert/auto_open.py
 #, python-brace-format
@@ -1345,6 +1351,10 @@ msgid ""
 msgstr ""
 "[El modelo {0} no soporta audio nativo. Por favor, selecciona un Modelo STT "
 "en Configuración.]"
+
+#: plugin/chatbot/panel.py
+msgid "[Peer send requires Chat mode on this sidebar.]"
+msgstr "[El envío entre pares requiere el modo Chat en esta barra lateral.]"
 
 #: plugin/chatbot/web_research_chat.py
 #, python-format
@@ -3188,6 +3198,20 @@ msgstr "Herramientas de hoja de cálculo de Calc"
 
 msgid "Max Rows Display"
 msgstr "Límite de filas a mostrar"
+
+msgid "Cache Excel siblings as ODS"
+msgstr "Almacenar en caché los archivos Excel hermanos como ODS"
+
+msgid ""
+"Convert sibling .xlsx/.xls to writeragent_ods_cache/ beside the folder so "
+"repeated DuckDB SQL reuses the ODS. Native .ods and the live workbook are "
+"never cached. Set calc.ods_cache_enabled false in writeragent.json to "
+"disable."
+msgstr ""
+"Convertir los archivos .xlsx/.xls hermanos a writeragent_ods_cache/ junto a "
+"la carpeta para que el SQL de DuckDB reutilice el ODS. Los archivos .ods "
+"nativos y el libro de trabajo activo nunca se almacenan en caché. Establezca "
+"calc.ods_cache_enabled false en writeragent.json para desactivarlo."
 
 msgid "Sidebar"
 msgstr "Panel lateral"

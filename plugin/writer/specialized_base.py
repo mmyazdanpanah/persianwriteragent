@@ -101,7 +101,8 @@ class ToolWriterEmbeddedBase(ToolWriterSpecialBase):
 class ToolWriterImageBase(ToolWriterSpecialBase, ToolDrawImageBase):
     specialized_domain: ClassVar[str | None] = "images"
     specialized_domain_description: ClassVar[str | None] = (
-        "In-document image operations (image_list) and nearby folder images (image_list_nearby_files); generate, insert, and replace."
+        "In-document image operations (image_list) and nearby folder images (image_list_nearby_files); "
+        "generate new images, or edit a selected image with image_generate(source_image='selection')."
     )
     intent = "media"
     uno_services = SHAPE_TOOL_UNO_SERVICES
@@ -138,7 +139,9 @@ class ToolWriterChartBase(ToolWriterSpecialBase):
 
 class ToolWriterIndexBase(ToolWriterSpecialBase):
     specialized_domain: ClassVar[str | None] = "indexes"
-    specialized_domain_description: ClassVar[str | None] = "Manage Table of Contents and alphabetical indexes."
+    specialized_domain_description: ClassVar[str | None] = (
+        "Manage Table of Contents, alphabetical indexes, and native bibliography cites plus the reference table."
+    )
 
 
 class ToolWriterFieldBase(ToolWriterSpecialBase):

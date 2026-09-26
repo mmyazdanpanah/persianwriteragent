@@ -1,8 +1,13 @@
 # Python Compute Service
 
 Standalone HTTP service for Collabora Online / Collabora Office `=PY()` formulas.
-coolwsd POSTs dumb JSON to `/v1/execute`; this process runs sandboxed Python and
-returns JSON results. **It does not read `writeragent.json`.**
+coolwsd POSTs to `/v1/execute`; this process runs sandboxed Python and returns
+JSON results. **It does not read `writeragent.json`.**
+
+**Both ingress formats are supported now** (dispatch on `Content-Type`). Peel of
+a single JSON object is **today’s Collabora/kit contract** and is **transitional**.
+Multipart is the long-term preferred kit↔compute shape. See
+[HTTP ingress: peel vs multipart](#http-ingress-peel-vs-multipart).
 
 ## Quick start
 
@@ -13,8 +18,9 @@ python compute_service/server.py --host 127.0.0.1 --port 8000
 ```
 
 - `GET /health` → `{"status":"healthy","service":"python-compute","version":"<version>"}` (no auth required)
-- `POST /v1/execute` → `{ "id?", "code", "data?", "mode?", "session_id?", "timeout_ms?", "init_script?" }`
+- `POST /v1/execute[?session_id=<id>]` — `application/json` (peel one object) **or** `multipart/form-data` (`meta` + raw `data` part). Same execute fields; same egress. Peel is compatibility; multipart is the preferred wire.
   (`init_script` runs **once** per worker: shared uses `{session_id}:init`, isolated uses a hash of the script. Later cells are seeded from that namespace; a changed script replaces the snapshot.)
+- `POST /v1/session/reset?session_id=<id>` — optional `{ "id?" }` → `{ "id?", "status": "ok" }`. Query-only `session_id` (same L7 sticky reason as execute). Idempotent: unknown / already-gone is still `ok`. Caller is coolwsd on DocumentBroker destroy / last view leave (service-side only today; Online still hard-codes `isolated`).
 - Docker (hardened run flags): `./compute_service/start-docker.sh` — see **Production / Collabora Online** below.
 
 ---
@@ -32,26 +38,22 @@ Always unauthenticated even when Bearer authentication is configured for executi
   {
     "status": "healthy",
     "service": "python-compute",
-    "version": "0.8.59"
+    "version": "0.8.76"
   }
   ```
 
-### 2. Execution Endpoint (`POST /v1/execute`)
+### 2. Execution Endpoint (`POST /v1/execute[?session_id=<id>]`)
 
 Evaluates sandboxed Python code and emits kit-safe dumb JSON (`allow_nan=False`, `NaN`/`Inf` → `null`).
 
-- **Request Schema**:
-  ```json
-  {
-    "id": "req-123",
-    "code": "result = float(np.sum(data))",
-    "data": [10, 20, 30],
-    "mode": "isolated",
-    "session_id": "optional-session-id",
-    "timeout_ms": 5000,
-    "init_script": "optional-init-code"
-  }
-  ```
+- **Sticky Routing via URL Query Parameter**: For stateful calculations (`mode="shared"`), `session_id` is supplied as a URL query parameter (`POST /v1/execute?session_id=<id>`) so Layer 7 routers, ingress proxies, and load balancers can route stickily without buffering and parsing JSON request bodies:
+  - **HAProxy**: `balance url_param session_id`
+  - **NGINX**: `hash $arg_session_id consistent;`
+  - **Envoy**: `hash_policy: [query_parameter: { name: "session_id" }]`
+  - **AWS ALB**: Query string routing conditions on `session_id`.
+
+See **[HTTP ingress: peel vs multipart](#http-ingress-peel-vs-multipart)** for both
+request shapes, why multipart exists, and the plan to retire peel.
 
 - **Success Response (`200 OK`)**:
   ```json
@@ -76,7 +78,43 @@ Evaluates sandboxed Python code and emits kit-safe dumb JSON (`allow_nan=False`,
   }
   ```
 
-### 3. Vision & OCR Endpoint (`POST /v1/vision`)
+#### HTTP ingress: peel vs multipart
+
+Both formats work **now**. Dispatch is strictly `Content-Type`.
+
+| `Content-Type` | Body | Host does | Role |
+|----------------|------|-----------|------|
+| `application/json` (or missing) | One JSON object `{id?, code, data?, mode?, timeout_ms?, init_script?}` | Peel small keys; **forward the raw `data` value bytes** (no `json.loads` of the grid) | **Today’s Collabora/kit contract.** Compatibility. The walker/peel exists so we do not deserialize the nested grid. |
+| `multipart/form-data` (or other `multipart/*`) | Part `meta` (`application/json`, control fields only) + part `data` (`application/json`, raw grid bytes) | Parse `meta` only; **forward Part B bytes untouched** | **Preferred kit↔compute shape.** Control vs payload are separate MIME parts. |
+
+`session_id` stays on the URL (`?session_id=...`) for L7 affinity — not in the JSON body and not in `meta`.
+
+**Why multipart:** cleaner framing (tiny control JSON vs the grid blob). No custom JSON walker to slice `data` out of one object. Same “forward bytes, don’t re-serialize” win. That is the long-term wire we want between kit and this service.
+
+**Migration:** support both until Collabora/kit switches to multipart. After that, retire the single-JSON peel (the walker). Peel is **transitional compatibility**, not the forever design. No kit date — eventually switch kit to multipart, then delete peel.
+
+**Unchanged either way:** worker dumps kit JSON once (`result_json`); the HTTP host forwards those bytes (no host re-`dumps` of a large result). LibrePy desktop `=PY()` stays Pickle5 + `split_grid` both ways and never uses this HTTP hop.
+
+### 3. Session Reset Endpoint (`POST /v1/session/reset?session_id=<id>`)
+
+Drops the shared sandbox and init companion for one workbook kernel. Reuses `FormulaPool.reset_session` → worker `action: reset_session` → LibrePy `reset_sandbox_session` (no second reset path).
+
+Intended caller is **coolwsd on DocumentBroker destroy / last view leave**. This endpoint lands ahead of Online shared-kernel work; Collabora Online still hard-codes `mode: isolated` and does not call reset yet.
+
+- **Sticky routing:** `session_id` is **URL query only** (`POST /v1/session/reset?session_id=<id>`), same L7 reason as `/v1/execute` — the request must hit the host that owns the kernel. Reject if `session_id` is only in the JSON body (or present in the body at all).
+- **Request body** (optional; empty body is fine):
+  ```json
+  { "id": "corr-1" }
+  ```
+  `id` is a correlation echo only. It is not a session identifier.
+- **Success (`200 OK`)** — **idempotent**: unknown / already-gone still `ok`:
+  ```json
+  { "id": "corr-1", "status": "ok" }
+  ```
+- **Errors:** `400` missing/empty query `session_id` or `session_id` in the JSON body; `401` auth (same Bearer as execute); worker lease failure → `{ "id?", "status": "error", "code": "WORKER_POOL_BUSY", "error": "..." }` with HTTP `503`.
+- Idle TTL (`shared_kernel_ttl_sec`) remains the safety net if reset is missed. Do not remove it.
+
+### 4. Vision & OCR Endpoint (`POST /v1/vision`)
 
 Evaluates heavy document/image OCR and layout structure extraction in a dedicated, isolated worker subprocess pool. Supports both in-memory image buffers (`image_b64`) and server-local/mounted filesystem paths (`file_path`).
 
@@ -122,16 +160,16 @@ Evaluates heavy document/image OCR and layout structure extraction in a dedicate
   }
   ```
 
-### 4. HTTP Status Codes & Error Semantics
+### 5. HTTP Status Codes & Error Semantics
 
 | HTTP Status | Condition | Response Payload Shape |
 | :--- | :--- | :--- |
-| **`200 OK`** | Evaluation completed (success or runtime evaluation error) | `{"id"?: "...", "status": "ok"\|"error", "result"\|"error": ...}` |
-| **`400 Bad Request`** | Malformed JSON, missing `code`, `code` longer than `max_code_chars` (`CODE_TOO_LARGE`), or vision `file_path` not under `ocr.allow_paths` (`FILE_PATH_DENIED`) | `{"id"?: "...", "status": "error", "code"?: "...", "error": "..."}` |
-| **`401 Unauthorized`** | Missing or incorrect `Authorization: Bearer <secret>` | `{"status": "error", "error": "Unauthorized"}` + `WWW-Authenticate: Bearer` |
+| **`200 OK`** | Evaluation completed (success or runtime evaluation error); session reset succeeded (including unknown / already-gone) | `{"id"?: "...", "status": "ok"\|"error", "result"\|"error": ...}` |
+| **`400 Bad Request`** | Malformed JSON, missing `code`, `code` longer than `max_code_chars` (`CODE_TOO_LARGE`), missing/empty reset `session_id`, `session_id` in the JSON body, or vision `file_path` not under `ocr.allow_paths` (`FILE_PATH_DENIED`) | `{"id"?: "...", "status": "error", "code"?: "...", "error": "..."}` |
+| **`401 Unauthorized`** | Missing or incorrect `Authorization: Bearer <secret>` on `/v1/execute`, `/v1/session/reset`, or `/v1/vision` | `{"status": "error", "error": "Unauthorized"}` + `WWW-Authenticate: Bearer` |
 | **`404 Not Found`** | Unknown path or unsupported HTTP method | Plaintext `Not Found` |
 | **`413 Payload Too Large`**| Request body exceeds `max_body_bytes` | `{"status": "error", "error": "Request body too large"}` |
-| **`503 Service Unavailable`** | Process or per-session in-flight cap (`INFLIGHT_LIMIT` / `SESSION_INFLIGHT_LIMIT`). coolwsd may map this to `#N/A`. | `{"id"?: "...", "status": "error", "code": "...", "error": "..."}` |
+| **`503 Service Unavailable`** | Process or per-session in-flight cap (`INFLIGHT_LIMIT` / `SESSION_INFLIGHT_LIMIT`), or `/v1/session/reset` worker lease failure (`WORKER_POOL_BUSY`). coolwsd may map this to `#N/A`. | `{"id"?: "...", "status": "error", "code": "...", "error": "..."}` |
 | **`500 Internal Server Error`**| Unhandled server exception or JSON encoding failure | `{"id"?: "...", "status": "error", "error": "..."}` |
 
 ---
@@ -151,8 +189,8 @@ There is **no** `--api-key` CLI flag (secrets in argv are visible in `ps`).
 
 Rules:
 
-- **No key configured** → `/v1/execute` is open (insecure; fine for local/dev/test).
-- **Key configured** → `/v1/execute` requires an exact `Bearer <token>` match
+- **No key configured** → `/v1/execute` and `/v1/session/reset` are open (insecure; fine for local/dev/test).
+- **Key configured** → `/v1/execute` and `/v1/session/reset` require an exact `Bearer <token>` match
   (`hmac.compare_digest`). Failures return HTTP 401 + `WWW-Authenticate: Bearer`.
 
 Match coolwsd (`coolwsd.xml`):
@@ -221,7 +259,7 @@ docker run --read-only --tmpfs /tmp:rw,size=64m,mode=1777 \
   python-compute
 ```
 
-Shared `mode=shared` **must** use a per-document `session_id` (not a user id). Idle kernels are reset after `shared_kernel_ttl_sec`.
+Shared `mode=shared` **must** use a per-document `session_id` query parameter (`?session_id=<id>`) (not a user id). coolwsd should `POST /v1/session/reset?session_id=<id>` on DocumentBroker destroy / last view leave (caller not shipped; Online still hard-codes isolated). Idle TTL (`shared_kernel_ttl_sec`) remains the safety net if reset is missed.
 
 ---
 
@@ -237,35 +275,36 @@ Shared `mode=shared` **must** use a per-document `session_id` (not a user id). I
 The Python Compute Service is structured as a resilient master HTTP server fronting two specialized subprocess worker pools:
 
 ### 1. Master HTTP Router (~20MB RAM)
-- Ultra-thin network process that accepts HTTP connections, verifies Bearer authentication tokens, and forwards each job as a **length-prefixed Pickle 5 frame** on the worker's stdin pipe.
+- Ultra-thin network process that accepts HTTP connections, verifies Bearer authentication tokens, and forwards each job as a **length-prefixed Pickle 5 envelope** on the worker's stdin pipe. Large formula `data` / results are **raw JSON bytes** inside that envelope (not a second codec stage).
 - **Multi-Threaded HTTP Listener (`threads`, default `2`)**: Uses a `ThreadPoolExecutor` to handle concurrent HTTP connections, Kubernetes `/health` probes, and requests waiting on worker leases without socket stalls.
 - **Unbreakable Design**: The master process never executes user code directly, ensuring that user errors, native crashes, or memory spikes cannot destabilize the HTTP service.
 
-### Internal wire: HTTP JSON vs Pickle + split_grid
+### Internal wire: JSON-forward
 
-Two stacked protocols:
+LibrePy desktop `=PY()` is a **different product** (Pickle5 + `split_grid`, no HTTP hop). Do not regress that path when changing compute. Desktop detail: [`docs/scripting/numpy-serialization.md`](../docs/scripting/numpy-serialization.md).
 
-| Hop | Format | What travels |
-|-----|--------|--------------|
-| coolwsd → HTTP server | Dumb JSON (`POST /v1/execute`, `POST /v1/vision`) | `code`, `data` as nested lists, `mode`, `session_id`, … / vision `image_b64` or `file_path` |
-| HTTP server → formula/vision workers | Length-prefixed **Pickle 5** on stdio | Request/response **dicts**; large formula `data` may be a `split_grid` envelope |
+Kit HTTP is MIME-dispatched — [peel vs multipart](#http-ingress-peel-vs-multipart). Both are live. Peel of one JSON object is **today’s Collabora contract** and **goes away** once kit speaks multipart. Multipart is the preferred wire (control vs payload as parts; no walker). Egress does not care which ingress you used.
 
-**Pickle framing** ([`plugin/scripting/ipc.py`](../plugin/scripting/ipc.py), [`worker_base.py`](worker_base.py)):
+The host is a proxy: auth, sticky routing, timeouts, worker lease. One deserialize of `data` happens on the **worker**. Small control fields may be deserialized on the host. The expensive rule is **no host re-serialize** of large ingress or egress.
+
+**Compute JSON-forward** ([`json_forward.py`](json_forward.py)):
+
+- Peel (transitional): scan the top-level JSON object; `json.loads` only isolated small values. The `data` value is sliced from the request body unchanged. A kit `data_json` string field is also accepted (inner text becomes the forwarded blob). Retire this walker after kit switches to multipart.
+- Multipart (preferred): `parse_multipart_execute` loads only the small `meta` part; Part B is `data_json` as-is. `meta` must not nest `data`.
+- Envelope: `{code, mode, timeout_sec, session_id, init_script, wire: "json_forward", data_json: <bytes>}`. Pickle copies the byte buffer; it does not walk the JSON tree.
+- Worker: `json.loads(data_json)` → sandbox → [`json_egress.normalize_execute_response`](json_egress.py) → `json.dumps(..., allow_nan=False)` → `{status, result_json}`.
+- HTTP: `_start_raw_json` writes `result_json` as the response body.
+
+**Pickle framing** (control envelope only — [`plugin/scripting/ipc.py`](../plugin/scripting/ipc.py), [`worker_base.py`](worker_base.py)):
 
 - Write: `pickle.dumps(dict, protocol=5)` prefixed with a 4-byte big-endian length.
 - Read: 4-byte size, then exactly *N* bytes, `pickle.loads`.
 - Spawn handshake: the child writes `{status: "ready", pid: ...}` before the request loop.
+- Formula workers allow up to ~33 MiB per frame so a 32 MiB HTTP body can travel as `data_json`.
 
-**split_grid** ([`plugin/scripting/payload_codec.py`](../plugin/scripting/payload_codec.py)):
+Vision workers share the pickle framing. HTTP `image_b64` is decoded to raw `bytes` (`image_bytes`) on the pipe so the child does not re-decode Base64. Vision is unchanged (full JSON parse of a small OCR body).
 
-- [`FormulaProcessPool.execute`](formula_pool.py) calls `host_pack_data(data, min_cells=1000)` when `data` is a non-empty list (desktop `=PY()` uses `BINARY_MIN_CELLS = 100`; this service uses a higher bar so small HTTP grids stay nested lists).
-- ≥ 1000 cells → `{__wa_payload__: "split_grid", dtype, column_kinds, shape, buffer: <float64 bytes>, strings: {flat_index: str}}` inside the pickled request dict.
-- Below threshold → nested Python lists in that same dict.
-- The worker unpacks with `child_unpack_data` (numeric-only grids materialize via `np.frombuffer`). Large ndarray results may pack as `split_grid` on the way back; [`json_egress`](json_egress.py) unpacks them to nested lists / scalars before the HTTP JSON response so the kit never sees the envelope.
-
-Vision workers share the pickle framing. HTTP `image_b64` is decoded to raw `bytes` (`image_bytes`) on the pipe so the child does not re-decode Base64.
-
-Wire-format detail for `split_grid` and Pickle5: [`docs/scripting/numpy-serialization.md`](../docs/scripting/numpy-serialization.md). Kit-side dumb JSON contract: [`docs/scripting/numpy-jailsafe.md`](../docs/scripting/numpy-jailsafe.md).
+Kit-side dumb JSON contract: [`docs/scripting/numpy-jailsafe.md`](../docs/scripting/numpy-jailsafe.md).
 
 ### 2. Tier 1: Formula Compute Pool (`FormulaProcessPool`)
 - Manages persistent worker subprocesses (`workers`, default `1`).
@@ -325,19 +364,10 @@ The service uses standard Python `logging` under the logger name `compute_servic
 Log format includes timestamps, log level, request IDs, modes, code size, execution durations, and status:
 
 ```text
-2026-08-17 20:00:00,123 [INFO] compute_service: Starting Python Compute Service on 127.0.0.1:8000 (auth=yes)...
-2026-08-17 20:00:00,125 [INFO] compute_service: Cython Accelerator: Active (Optimized, source: contrib.vec_pack)
+2026-08-17 20:00:00,123 [INFO] compute_service: Starting Python Compute Service on 127.0.0.1:8000 (auth=yes, workers=1, ocr_workers=0)...
 2026-08-17 20:00:01,456 [INFO] compute_service: exec /v1/execute id='req-123' mode=isolated session=None code_len=32 timeout=30s
 2026-08-17 20:00:01,489 [INFO] compute_service: done /v1/execute id='req-123' status='ok' duration=32.40ms
 ```
-
-### Cython Binary Acceleration & Canary Verification
-
-The service automatically detects compiled Cython binaries (`pack.*.so` / `pack.*.pyd`) from:
-1. In-tree git repository checkouts (`contrib/vec_pack`)
-2. Installed LibrePy user profile locations (`audio_binaries/writeragent_vec`)
-
-On startup, a runtime canary verification test (`_verify_accelerator`) runs to ensure binary integrity and compatibility before enabling Cython binary acceleration for `split_grid` 2D array packing. If no compatible binary is found or the canary check fails, the service logs a warning and falls back to pure Python without interrupting execution.
 
 ---
 
@@ -373,16 +403,21 @@ python compute_service/server.py --config compute_service/python-compute.example
 ### 1. Functional Tests
 ```bash
 pytest tests/compute_service/
+# JSON-forward peel / multipart / no host re-dumps:
+pytest tests/compute_service/test_json_forward.py
 ```
 
 ### 2. Concurrency & Throughput Benchmarks
 Run the built-in benchmark harness to evaluate throughput (RPS), latency percentiles, and multi-core scaling under simulated concurrent office loads:
 
 ```bash
-# Quick sanity run
+# Quick formula worker scaling run (evaluates 1, 2, and 4 formula workers with 4 concurrent clients)
 python scripts/benchmark_compute_service.py --quick
 
-# Full multi-concurrency benchmark (1 to 32 concurrent clients)
+# Worker scaling across specific worker counts and concurrency
+python scripts/benchmark_compute_service.py --workers 1,2,4 --concurrency 4
+
+# Multi-concurrency client load benchmark (1 to 32 concurrent clients)
 python scripts/benchmark_compute_service.py --concurrency 1,2,4,8,16,32 --requests 50 --threads 32
 ```
 
@@ -390,6 +425,6 @@ python scripts/benchmark_compute_service.py --concurrency 1,2,4,8,16,32 --reques
 - **`numpy_vector` (GIL Released)**: High throughput (280+ RPS), low median latency (~7–14ms) across 1–32 client threads as NumPy frees the GIL to all CPU cores.
 - **`tabular_stats` (Mixed C/Python)**: Steady 180–195 RPS for 2D spreadsheet table filtering, summary statistics, and column aggregations.
 - **`stateful_session` (`mode="shared"`)**: Fast in-memory stateful recalculations (400–430 RPS) with median latency under 10ms for multi-tenant sessions.
-- **`pure_python` (GIL Held)**: Constant CPU throughput (~30 RPS) bounded by single-interpreter bytecode execution.
+- **`pure_python` (GIL Held)**: Constant single-interpreter CPU throughput (~30 RPS) per worker process, scaling linearly across CPU cores as formula worker subprocesses are added (`--workers 1,2,4`).
 
-See also [`docs/scripting/numpy-jailsafe.md`](../docs/scripting/numpy-jailsafe.md) (kit JSON contract) and [`docs/scripting/numpy-serialization.md`](../docs/scripting/numpy-serialization.md) (Pickle5 + `split_grid`).
+See also [`docs/scripting/numpy-jailsafe.md`](../docs/scripting/numpy-jailsafe.md) (kit JSON contract). LibrePy desktop Pickle5 + `split_grid` is not this service: [`docs/scripting/numpy-serialization.md`](../docs/scripting/numpy-serialization.md).
