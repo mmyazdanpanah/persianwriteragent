@@ -230,8 +230,8 @@ def test_render_svg_escapes_xml() -> None:
 
 def test_readme_embeds_pages_svg() -> None:
     text = (_REPO_ROOT / "README.md").read_text(encoding="utf-8")
-    assert "![CI status](https://keithcu.github.io/writeragent/status.svg)" in text
-    assert "[CI status page](https://keithcu.github.io/writeragent/)" in text
+    assert "![CI status](https://mmyazdanpanah.github.io/persianwriteragent/status.svg)" in text
+    assert "[CI status page](https://mmyazdanpanah.github.io/persianwriteragent/)" in text
 
 
 def test_render_html_escapes_and_omits_token() -> None:
@@ -359,14 +359,14 @@ def test_parse_cached_rows_filters_expired_and_no_run() -> None:
                 "os": "windows-latest",
                 "conclusion": "success",
                 "sha": "96912c4",
-                "when": "2026-06-01T00:00:00Z",  # Expired (> 60 days)
+                "when": "2026-06-01T00:00:00Z",
                 "run_url": "https://github.com/KeithCu/writeragent/actions/runs/100",
                 "run_id": 100,
             },
             {
                 "suite": "Mock LLM Sidebar",
                 "os": "ubuntu-latest",
-                "conclusion": "no run",  # Empty
+                "conclusion": "no run",
                 "sha": "",
                 "when": "",
                 "run_url": "",
@@ -375,11 +375,8 @@ def test_parse_cached_rows_filters_expired_and_no_run() -> None:
         ]
     }
     rows = parse_cached_rows(cached, specs, max_age_days=60, now=now)
-    # macos-latest is retained
     assert any(r.suite == "Test & Typecheck" and r.os == "macos-latest" and r.sha == "589df34" for r in rows.values())
-    # windows-latest was expired, so not retained
     assert not any(r.suite == "Test & Typecheck" and r.os == "windows-latest" for r in rows.values())
-    # no run was not retained
     assert not any(r.suite == "Mock LLM Sidebar" and r.os == "ubuntu-latest" for r in rows.values())
 
 
@@ -428,11 +425,9 @@ def test_parse_cached_rows_filters_non_terminal_conclusions() -> None:
         ]
     }
     rows = parse_cached_rows(cached, specs, max_age_days=60, now=now)
-    # in_progress, queued, and unknown are non-terminal and MUST NOT be accepted as cached hints
     assert not any(r.suite == "Test & Typecheck" and r.os == "macos-latest" for r in rows.values())
     assert not any(r.suite == "Test & Typecheck" and r.os == "windows-latest" for r in rows.values())
     assert not any(r.suite == "Mock LLM Sidebar" and r.os == "ubuntu-latest" for r in rows.values())
-    # success is terminal and is retained with its run_attempt
     ubuntu_row = [r for r in rows.values() if r.suite == "Test & Typecheck" and r.os == "ubuntu-latest"][0]
     assert ubuntu_row.conclusion == "success"
     assert ubuntu_row.run_attempt == 2
@@ -489,8 +484,6 @@ def test_collect_status_uses_cached_hints_and_stops_early() -> None:
             },
         ]
     }
-    # Run 4000 is a newer run that has ubuntu-latest
-    # Run 33780513241 is at or before the checkpoint for all remaining specs
     runs = {
         "crosshair-deep.yml": [],
         "pr-ci.yml": [
@@ -515,15 +508,11 @@ def test_collect_status_uses_cached_hints_and_stops_early() -> None:
 
     rows = collect_status(fetch, "KeithCu/writeragent", cached_data=cached_data, max_age_days=60, now=now)
     by_key = {(r.suite, r.os): r for r in rows}
-    # Ubuntu got the new run
     assert by_key[("Test & Typecheck", "ubuntu-latest")].sha == "new_sha"
     assert by_key[("Test & Typecheck", "ubuntu-latest")].conclusion == "success"
-    # MacOS retained the cached run
     assert by_key[("Test & Typecheck", "macos-latest")].sha == "589df34"
     assert by_key[("Test & Typecheck", "macos-latest")].run_id == 33780513241
-    # Windows retained the cached run
     assert by_key[("Test & Typecheck", "windows-latest")].sha == "96912c4"
-    # Because all checkpoints were reached, jobs were NOT requested for 33780513241
     assert 33780513241 not in jobs_called
 
 
@@ -567,8 +556,6 @@ def test_collect_status_supersedes_cached_hint_when_newer_run_exists() -> None:
 
 def test_collect_status_skips_pr_runs_when_ubuntu_typecheck_resolved() -> None:
     now = datetime(2026, 9, 9, 12, 0, 0, tzinfo=timezone.utc)
-    # Run 500: PR run (gives ubuntu-latest)
-    # Runs 499, 498, 497: PR runs that should be skipped without calling jobs
     runs = {
         "crosshair-deep.yml": [],
         "pr-ci.yml": [
@@ -593,7 +580,7 @@ def test_collect_status_skips_pr_runs_when_ubuntu_typecheck_resolved() -> None:
         raise AssertionError(f"unexpected URL: {url}")
 
     rows = collect_status(fetch, "KeithCu/writeragent", max_age_days=60, now=now)
-    assert job_calls == [500]  # Only run 500 called jobs; 499 and 498 were skipped!
+    assert job_calls == [500]
     by_key = {(r.suite, r.os): r for r in rows}
     assert by_key[("Test & Typecheck", "ubuntu-latest")].conclusion == "success"
 
@@ -655,11 +642,10 @@ def test_collect_status_re_evaluates_in_progress_cached_hint() -> None:
                     _job("Test & Typecheck (macos-latest)", "success", "2026-09-20T00:37:50Z")
                 ]
             }
-        raise AssertionError(f"unexpected URL: {url}")
+        raise AssertionError(f"unexpected URL {url}")
 
     rows = collect_status(fetch, "KeithCu/writeragent", cached_data=cached_data, max_age_days=60, now=now)
     by_key = {(r.suite, r.os): r for r in rows}
-    # macOS must resolve to success, not remain in_progress
     assert by_key[("Test & Typecheck", "macos-latest")].conclusion == "success"
     assert by_key[("Test & Typecheck", "macos-latest")].sha == "3dc07b3"
     assert by_key[("Test & Typecheck", "macos-latest")].run_id == 35478652597
@@ -707,7 +693,7 @@ def test_collect_status_re_evaluates_on_higher_run_attempt() -> None:
                     _job("Test & Typecheck (macos-latest)", "success", "2026-09-20T01:00:00Z")
                 ]
             }
-        raise AssertionError(f"unexpected URL: {url}")
+        raise AssertionError(f"unexpected URL {url}")
 
     rows = collect_status(fetch, "KeithCu/writeragent", cached_data=cached_data, max_age_days=60, now=now)
     by_key = {(r.suite, r.os): r for r in rows}
