@@ -382,10 +382,9 @@ def execute_and_insert_result(
     if is_writer(doc) and (script_uses_run_import(code, run_name="run_persian") or "writeragent.persian.scripts" in code):
         from plugin.scripting.helper_domain import prepend_run_import_document_bindings
 
-        call_spec = parse_run_import_call_spec(code, run_name="run_persian") or {}
-        if str(call_spec.get("helper") or "").strip() not in {"normalize_review"}:
-            return rps_error_outcome(_("Unknown Persian helper."), t0=t0)
-
+        # Persian's shipped helper is intentionally a single direct operation:
+        # run_persian(text). Unlike multi-helper domains, there is no helper
+        # selector to parse or validate here.
         try:
             controller = doc.getCurrentController()
             selection = controller.getSelection() if controller is not None else None
