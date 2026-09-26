@@ -110,6 +110,7 @@ def test_picker_order_starts_with_vision_math_units_analysis():
         "analysis",
         "sql",
         "viz",
+        "persian",
         "quant",
         "optimize",
         "forecast",
