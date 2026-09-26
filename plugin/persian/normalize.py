@@ -383,71 +383,79 @@ def find_ellipsis_changes(original: str, normalized: str) -> list[tuple[str, str
     return changes
 
 
+def find_hazm_zwnj_changes(
+    original: str, normalized: str
+) -> list[tuple[str, str]]:
+    """Extract exact word/phrase replacements caused by Hazm ZWNJ insertion."""
+    changes: list[tuple[str, str]] = []
+
+    # Match normalized word sequences containing ZWNJ.
+    # Punctuation is deliberately excluded from the token.
+    token_pattern = re.compile(r"[^\W\d_]+(?:‌[^\W\d_]+)+", re.UNICODE)
+
+    for match in token_pattern.finditer(normalized):
+        new_text = match.group(0)
+
+        parts = new_text.split(ZWNJ)
+        if len(parts) < 2:
+            continue
+
+        pattern = r"\s+".join(re.escape(part) for part in parts)
+        original_match = re.search(pattern, original)
+
+        if not original_match:
+            continue
+
+        old_text = original_match.group(0)
+
+        if old_text != new_text:
+            changes.append((old_text, new_text))
+
+    return changes
+
 def extract_hazm_changes(text: str) -> dict[str, list[list[str]]]:
-    """Main entry point: extract safe Persian normalization changes from text.
-
-    v0.2: Implements mechanically safe normalizations:
-    1. ZWNJ word joins (v0.1)
-    2. Arabic character normalization (ي -> ی, ك -> ک)
-    3. Whitespace normalization (multiple spaces/tabs -> single space)
-    4. Tatweel/Kashida removal
-    4. Ellipsis normalization (... -> …)
-
-    All with protection for URLs, emails, version numbers, code.
-
-    Args:
-        text: Input Persian text (typically the Writer selection)
-
-    Returns:
-        Dict with "changes" key containing list of [old_text, new_text] pairs
-    """
+    """Extract exact replacements from full Hazm normalization plus mechanical cleanup."""
     if not text or not text.strip():
         return {"changes": []}
 
-    # Step 1: Protect sensitive regions
     protector = ProtectedText(text)
     protected_text = protector.protect()
 
-    # Step 2: Apply Hazm for ZWNJ joins only
+    # Hazm is the full Persian linguistic normalization engine.
     hazm_normalized = normalize_with_hazm(protected_text)
 
-    # Step 3: Apply safe normalizations on the protected text
-    safe_normalized = apply_safe_normalizations(hazm_normalized)
+    # Mechanical normalization is deliberately separate and deterministic.
+    mechanical_normalized = apply_safe_normalizations(hazm_normalized)
 
-    # Step 4: Restore protected regions
-    final_normalized = protector.restore(safe_normalized)
+    final_normalized = protector.restore(mechanical_normalized)
 
     if final_normalized == text:
         return {"changes": []}
 
-    # Step 5: Extract changes by comparing original with normalized
-    all_changes = []
+    all_changes: list[tuple[str, str]] = []
 
-    # 1. ZWNJ joins (use Hazm's result for this)
-    all_changes.extend(find_joined_word_changes(text, final_normalized))
+    # Hazm linguistic changes: extract ZWNJ insertions directly.
+    all_changes.extend(
+        find_hazm_zwnj_changes(protected_text, hazm_normalized)
+    )
 
-    # 2. Arabic character changes
+    # Mechanical changes use the existing exact extractors.
     all_changes.extend(find_arabic_char_changes(text, final_normalized))
-
-    # 3. Whitespace changes
     all_changes.extend(find_whitespace_changes(text, final_normalized))
-
-    # 4. Tatweel changes
     all_changes.extend(find_tatweel_changes(text, final_normalized))
-
-    # 5. Ellipsis changes
     all_changes.extend(find_ellipsis_changes(text, final_normalized))
 
-    # Deduplicate while preserving order
-    seen = set()
-    unique_changes = []
+    # Deduplicate while preserving order.
+    seen: set[tuple[str, str]] = set()
+    unique_changes: list[list[str]] = []
+
     for old, new in all_changes:
         key = (old, new)
-        if key not in seen:
+        if old and new and old != new and key not in seen:
             seen.add(key)
-            unique_changes.append((old, new))
+            unique_changes.append([old, new])
 
-    return {"changes": [[old, new] for old, new in unique_changes]}
+    return {"changes": unique_changes}
 
 
 # For direct execution as a Python Script
