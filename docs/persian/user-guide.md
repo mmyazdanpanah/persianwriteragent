@@ -24,7 +24,23 @@ For general WriterAgent installation and UI documentation, use the upstream proj
 
 Persian-specific setup is documented in ../install-troubleshooting.md.
 
-## 2. Configure Python once
+## 2. Prepare the Persian Python environment
+
+Hazm is the required Persian runtime dependency. The exact dependency is pinned in [requirements-persian.txt](../../requirements-persian.txt).
+
+For a fresh local environment:
+
+~~~bash
+python3 -m venv ~/Workspace/02_AI_Lab/Persian_Writing/Persian_NLP/hazm_env
+~/Workspace/02_AI_Lab/Persian_Writing/Persian_NLP/hazm_env/bin/python -m pip install --upgrade pip
+~/Workspace/02_AI_Lab/Persian_Writing/Persian_NLP/hazm_env/bin/python -m pip install -r requirements-persian.txt
+~~~
+
+If you already have the environment, do not recreate it; update it from the requirements file instead.
+
+See the [dependency reference](dependencies.md) for the runtime/development dependency boundary.
+
+## 3. Configure Python once
 
 Open WriterAgent → Settings → Python and set the Python environment containing the Persian dependencies.
 
