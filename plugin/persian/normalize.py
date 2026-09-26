@@ -5,7 +5,7 @@
 """Persian Hazm normalization with exact-range change extraction — v0.2.
 
 Experimental module that extracts mechanically safe Persian normalizations:
-1. ZWNJ word joins (v0.1) - space -> ZWNJ between word parts
+1. ZWNJ edits - insertions and removals of zero-width non-joiners
 2. Arabic character normalization - ي -> ی, ك -> ک
 3. Whitespace normalization - multiple spaces/tabs -> single space (preserve newlines)
 4. Tatweel/Kashida removal - مـــوزه -> موزه
@@ -455,7 +455,7 @@ def extract_hazm_changes(text: str) -> dict[str, list[list[str]]]:
 
     all_changes: list[tuple[str, str]] = []
 
-    # Hazm linguistic changes: extract ZWNJ insertions directly.
+    # Hazm linguistic changes: extract ZWNJ insertions and removals.
     all_changes.extend(
         find_hazm_zwnj_changes(protected_text, hazm_normalized)
     )
