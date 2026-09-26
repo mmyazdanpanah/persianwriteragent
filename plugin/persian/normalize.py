@@ -21,6 +21,7 @@ already-authorized modules (hazm, stdlib).
 from __future__ import annotations
 
 import re
+from difflib import SequenceMatcher
 
 try:
     from hazm import Normalizer
@@ -386,32 +387,52 @@ def find_ellipsis_changes(original: str, normalized: str) -> list[tuple[str, str
 def find_hazm_zwnj_changes(
     original: str, normalized: str
 ) -> list[tuple[str, str]]:
-    """Extract exact word/phrase replacements caused by Hazm ZWNJ insertion."""
+    """Extract exact word-level replacements caused by Hazm ZWNJ edits.
+
+    Hazm may insert or remove a zero-width non-joiner (ZWNJ). Character-level
+    replacements are unsafe for the current tracked-replacement contract,
+    because each [old, new] pair is applied to every matching occurrence.
+    We therefore expand each ZWNJ-related diff to its surrounding Persian
+    word span before returning it.
+
+    Handles both directions:
+    - ``می کردند`` -> ``می‌کردند`` (ZWNJ insertion)
+    - ``جنگ‌ جهانی`` -> ``جنگ جهانی`` (ZWNJ removal)
+    """
     changes: list[tuple[str, str]] = []
+    word_char = re.compile(r"[^\W\d_]|" + re.escape(ZWNJ), re.UNICODE)
 
-    # Match normalized word sequences containing ZWNJ.
-    # Punctuation is deliberately excluded from the token.
-    token_pattern = re.compile(r"[^\W\d_]+(?:‌[^\W\d_]+)+", re.UNICODE)
+    def expand(text: str, start: int, end: int) -> tuple[int, int]:
+        """Expand a changed range to the surrounding Persian word span."""
+        while start > 0 and word_char.fullmatch(text[start - 1]):
+            start -= 1
+        while end < len(text) and word_char.fullmatch(text[end]):
+            end += 1
+        return start, end
 
-    for match in token_pattern.finditer(normalized):
-        new_text = match.group(0)
-
-        parts = new_text.split(ZWNJ)
-        if len(parts) < 2:
+    matcher = SequenceMatcher(None, original, normalized, autojunk=False)
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag == "equal":
+            continue
+        old_fragment = original[i1:i2]
+        new_fragment = normalized[j1:j2]
+        if ZWNJ not in old_fragment and ZWNJ not in new_fragment:
             continue
 
-        pattern = r"\s+".join(re.escape(part) for part in parts)
-        original_match = re.search(pattern, original)
-
-        if not original_match:
-            continue
-
-        old_text = original_match.group(0)
-
-        if old_text != new_text:
+        old_start, old_end = expand(original, i1, i2)
+        new_start, new_end = expand(normalized, j1, j2)
+        old_text = original[old_start:old_end]
+        new_text = normalized[new_start:new_end]
+        if old_text and new_text and old_text != new_text:
             changes.append((old_text, new_text))
 
-    return changes
+    unique: list[tuple[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for change in changes:
+        if change not in seen:
+            seen.add(change)
+            unique.append(change)
+    return unique
 
 def extract_hazm_changes(text: str) -> dict[str, list[list[str]]]:
     """Extract exact replacements from full Hazm normalization plus mechanical cleanup."""
