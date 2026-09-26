@@ -499,6 +499,18 @@ def execute_and_insert_result(
     # and prevents it from running for this structured result type.
     if doc and is_writer(doc) and isinstance(result_data, dict) and "changes" in result_data:
         changes = result_data.get("changes")
+        if isinstance(changes, list) and not changes:
+            # A clean selection is a successful no-op. Do not fall through to
+            # generic Writer result insertion, which would replace the
+            # selection with the textual representation of {"changes": []}.
+            return {
+                "ok": True,
+                "status_ok_text": _("No Persian changes needed. (took {time})").format(
+                    time=formatted_time
+                ),
+                "stdout": stdout,
+                "result": result_data,
+            }
         if isinstance(changes, list) and changes:
             try:
                 from plugin.persian.tracked_replace import apply_tracked_replacements
